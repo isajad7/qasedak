@@ -1,0 +1,382 @@
+{% extends 'base.html' %}
+{% load store_formatters %}
+
+{% block title %}داشبورد {{ store.name|default:"آزادنت" }}{% endblock %}
+
+{% block content %}
+<div class="space-y-5 sm:space-y-6">
+    <section id="home" class="scroll-mt-24 rounded-3xl border border-white/10 bg-white/[0.05] p-4 sm:p-5">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+                <p class="text-xs font-black text-emerald-300">داشبورد</p>
+                <h1 class="mt-1 text-xl font-black text-white sm:text-2xl">وضعیتت در یک نگاه</h1>
+                <p class="mt-2 text-sm leading-6 text-slate-400">لینک اصلی، وضعیت سفارش و خرید دوباره همین بالاست. جزئیات اضافه پایین‌تر جمع شده‌اند.</p>
+            </div>
+            <a href="{% url 'home' %}#plans" class="inline-flex items-center justify-center rounded-2xl bg-sky-500 px-5 py-3 text-sm font-black text-slate-950 transition-colors hover:bg-sky-400">
+                خرید یا تمدید
+            </a>
+        </div>
+    </section>
+
+    <section class="grid grid-cols-3 gap-2 text-center">
+        <div class="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+            <p class="text-[11px] text-slate-500">فعال</p>
+            <p class="mt-1 text-lg font-black text-white">{{ active_access_cards|length|fa_digits }}</p>
+        </div>
+        <div class="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+            <p class="text-[11px] text-slate-500">منتظر تایید</p>
+            <p class="mt-1 text-lg font-black text-amber-200">{{ pending_orders_count|fa_digits }}</p>
+        </div>
+        <div class="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+            <p class="text-[11px] text-slate-500">باقی‌مانده</p>
+            <p class="mt-1 text-sm font-black text-emerald-200" dir="ltr">{{ remaining_traffic_bytes|traffic_gb }} GB</p>
+        </div>
+    </section>
+
+    <section id="access" class="scroll-mt-24 space-y-3">
+        <div class="flex items-center justify-between gap-3">
+            <div>
+                <p class="text-xs font-black text-sky-300">دسترسی‌ها</p>
+                <h2 class="mt-1 text-lg font-black text-white">موردهای اصلی</h2>
+            </div>
+            <a href="{% url 'home' %}#plans" class="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-2 text-xs font-black text-white transition-colors hover:bg-white/10">
+                اضافه کردن
+            </a>
+        </div>
+
+        <div class="space-y-3">
+            {% for item in access_cards %}
+                {% with order=item.order client=item.client stats=item.stats %}
+                    <article class="rounded-3xl border border-white/10 bg-white/[0.045] p-4">
+                        <div class="mb-3 flex items-start justify-between gap-3">
+                            <div class="min-w-0">
+                                <div class="mb-1 flex flex-wrap items-center gap-2">
+                                    <h3 class="break-all text-sm font-black text-white" dir="ltr">{{ client.xui_email|default:client.username }}</h3>
+                                    {% if stats.is_expired %}
+                                        <span class="rounded-full border border-red-400/20 bg-red-400/10 px-2.5 py-1 text-[11px] font-bold text-red-200">تمام‌شده</span>
+                                    {% elif stats.is_enabled %}
+                                        <span class="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-bold text-emerald-200">فعال</span>
+                                    {% else %}
+                                        <span class="rounded-full border border-amber-400/20 bg-amber-400/10 px-2.5 py-1 text-[11px] font-bold text-amber-200">در انتظار تایید</span>
+                                    {% endif %}
+                                </div>
+                                <p class="text-xs text-slate-500">{{ order.plan.name }} | {{ order.created_at|jalali_date }}</p>
+                            </div>
+                            <a href="{% url 'config_detail' tracking_code=order.order_tracking_code config_id=client.public_id %}" class="shrink-0 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-black text-white transition-colors hover:bg-white/10">
+                                جزئیات
+                            </a>
+                        </div>
+
+                        {% if stats.is_enabled and not stats.is_expired %}
+                            <div class="mb-3 rounded-2xl border border-sky-400/15 bg-sky-400/10 p-3">
+                                <p class="mb-2 text-xs font-bold text-sky-100/80">لینک اصلی آماده است</p>
+                                {% if client.sub_link %}
+                                    <div class="grid gap-2 sm:grid-cols-[1fr_auto_auto] sm:items-center" data-copy-scope>
+                                        <a href="{{ client.sub_link }}" target="_blank" rel="noopener" class="min-w-0 truncate rounded-xl border border-sky-300/20 bg-slate-950/45 px-3 py-2 font-mono text-xs text-sky-100" dir="ltr">{{ client.sub_link }}</a>
+                                        <button type="button" data-copy-access-link data-copy-value="{{ client.sub_link }}" class="rounded-xl bg-sky-500 px-4 py-2 text-xs font-black text-slate-950">کپی</button>
+                                        <span data-copy-status class="text-xs text-slate-400">آماده کپی</span>
+                                    </div>
+                                {% else %}
+                                    <p class="text-sm text-sky-100/80">لینک تا چند لحظه دیگر آماده می‌شود.</p>
+                                {% endif %}
+                            </div>
+                        {% else %}
+                            <div class="mb-3 rounded-2xl border border-amber-400/20 bg-amber-400/10 p-3">
+                                <p class="text-sm font-black text-white">در انتظار تایید پشتیبانی</p>
+                                <p class="mt-1 text-xs leading-6 text-amber-50/80">پرداخت ثبت شده؛ بعد از تایید، لینک اصلی همین‌جا فعال می‌شود.</p>
+                            </div>
+                        {% endif %}
+
+                        <div class="mb-3">
+                            <div class="mb-2 flex items-center justify-between text-xs">
+                                <span class="text-slate-500">مصرف</span>
+                                <span class="font-bold text-slate-300" dir="ltr">{{ stats.used_traffic_bytes|percent_of:stats.total_traffic_bytes }}%</span>
+                            </div>
+                            <div class="h-2 overflow-hidden rounded-full bg-slate-800">
+                                <div class="h-full rounded-full bg-gradient-to-r from-sky-400 to-emerald-400" style="width: {{ stats.used_traffic_bytes|percent_of:stats.total_traffic_bytes }}%"></div>
+                            </div>
+                            <p class="mt-2 text-xs text-slate-500" dir="ltr">{{ stats.remaining_traffic_bytes|traffic_gb }} GB باقی‌مانده</p>
+                        </div>
+
+                        <details class="group rounded-2xl border border-white/10 bg-slate-950/30 p-3">
+                            <summary class="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-black text-white [&::-webkit-details-marker]:hidden">
+                                <span>جزئیات مصرف و لینک جایگزین</span>
+                                <span class="text-xs text-slate-500 group-open:hidden">نمایش</span>
+                                <span class="hidden text-xs text-slate-500 group-open:inline">بستن</span>
+                            </summary>
+                            <div class="mt-3 space-y-3">
+                                {% if not stats.panel_available %}
+                                    <p class="rounded-xl border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs leading-6 text-amber-100">
+                                        ارتباط لحظه‌ای برقرار نشد؛ آخرین اطلاعات ذخیره‌شده نمایش داده شده است.
+                                    </p>
+                                {% endif %}
+                                <div class="grid grid-cols-3 gap-2 text-xs">
+                                    <div class="rounded-xl border border-white/10 bg-white/[0.035] p-2">
+                                        <p class="text-slate-500">کل</p>
+                                        <p class="mt-1 font-black text-white" dir="ltr">{{ stats.total_traffic_bytes|traffic_gb }} GB</p>
+                                    </div>
+                                    <div class="rounded-xl border border-white/10 bg-white/[0.035] p-2">
+                                        <p class="text-slate-500">مصرف</p>
+                                        <p class="mt-1 font-black text-sky-200" dir="ltr">{{ stats.used_traffic_bytes|traffic_gb }} GB</p>
+                                    </div>
+                                    <div class="rounded-xl border border-white/10 bg-white/[0.035] p-2">
+                                        <p class="text-slate-500">باقی</p>
+                                        <p class="mt-1 font-black text-emerald-200" dir="ltr">{{ stats.remaining_traffic_bytes|traffic_gb }} GB</p>
+                                    </div>
+                                </div>
+                                {% include 'includes/config_links.html' with sub_link=client.sub_link direct_link=client.direct_link %}
+                            </div>
+                        </details>
+                    </article>
+                {% endwith %}
+            {% empty %}
+                {% with latest_order=orders.0 %}
+                    <div class="rounded-3xl border border-white/10 bg-white/[0.045] p-5 text-center">
+                        <h2 class="text-lg font-black text-white">هنوز لینک فعالی نداری</h2>
+                        {% if latest_order %}
+                            <p class="mt-2 text-sm leading-7 text-slate-400">آخرین سفارش: {{ latest_order.plan.name }}، وضعیت {{ latest_order.get_status_display }}</p>
+                        {% else %}
+                            <p class="mt-2 text-sm leading-7 text-slate-400">برای شروع یک پلن انتخاب کن.</p>
+                        {% endif %}
+                        <a href="{% url 'home' %}#plans" class="mt-4 inline-flex rounded-2xl bg-sky-500 px-5 py-3 text-sm font-black text-slate-950 transition-colors hover:bg-sky-400">
+                            انتخاب پلن
+                        </a>
+                    </div>
+                {% endwith %}
+            {% endfor %}
+        </div>
+    </section>
+
+    <details id="stats" class="group scroll-mt-24 rounded-3xl border border-white/10 bg-white/[0.045] p-4">
+        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+            <span>
+                <span class="block text-xs font-black text-emerald-300">آمار مصرف</span>
+                <span class="mt-1 block text-lg font-black text-white">نمودار و گزارش کامل</span>
+            </span>
+            <span class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-black text-white group-open:hidden">نمایش</span>
+            <span class="hidden rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-black text-white group-open:inline">بستن</span>
+        </summary>
+        <div class="mt-4 space-y-4">
+            <div class="grid gap-2 sm:grid-cols-3">
+                <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                    <p class="text-xs text-slate-500">کل حجم</p>
+                    <p class="mt-1 text-base font-black text-white" dir="ltr">{{ total_traffic_bytes|traffic_gb }} GB</p>
+                </div>
+                <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                    <p class="text-xs text-slate-500">مصرف‌شده</p>
+                    <p class="mt-1 text-base font-black text-sky-200" dir="ltr">{{ used_traffic_bytes|traffic_gb }} GB</p>
+                </div>
+                <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                    <p class="text-xs text-slate-500">باقی‌مانده</p>
+                    <p class="mt-1 text-base font-black text-emerald-200" dir="ltr">{{ remaining_traffic_bytes|traffic_gb }} GB</p>
+                </div>
+            </div>
+            <div class="grid gap-3 lg:grid-cols-2">
+                {% for item in access_cards %}
+                    {% with order=item.order client=item.client %}
+                        <div class="h-56 rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                            <div class="mb-2 flex items-center justify-between gap-3">
+                                <p class="truncate text-xs font-black text-white" dir="ltr">{{ client.xui_email|default:client.username }}</p>
+                                <span class="text-xs text-slate-500">{{ order.plan.name }}</span>
+                            </div>
+                            <canvas
+                                data-usage-chart
+                                data-usage-url="{% url 'config_usage' tracking_code=order.order_tracking_code config_id=client.public_id %}"
+                                aria-label="Usage chart"
+                            ></canvas>
+                        </div>
+                    {% endwith %}
+                {% empty %}
+                    <p class="rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-center text-sm text-slate-400 lg:col-span-2">
+                        بعد از فعال شدن اولین سفارش، نمودار مصرف اینجا می‌آید.
+                    </p>
+                {% endfor %}
+            </div>
+        </div>
+    </details>
+
+    <details id="history" class="group scroll-mt-24 rounded-3xl border border-white/10 bg-white/[0.045] p-4">
+        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+            <span>
+                <span class="block text-xs font-black text-amber-300">سوابق</span>
+                <span class="mt-1 block text-lg font-black text-white">سفارش‌های قبلی</span>
+            </span>
+            <span class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-black text-white group-open:hidden">نمایش</span>
+            <span class="hidden rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-black text-white group-open:inline">بستن</span>
+        </summary>
+        <div class="mt-4 space-y-2">
+            {% for order in orders %}
+                <article class="rounded-2xl border border-white/10 bg-slate-950/30 p-3">
+                    <div class="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-center">
+                        <div class="min-w-0">
+                            <h3 class="text-sm font-black text-white">{{ order.plan.name }}</h3>
+                            <p class="mt-1 text-xs text-slate-500">{{ order.created_at|jalali_datetime }}</p>
+                            <p class="mt-1 break-all font-mono text-[11px] font-bold text-sky-200" dir="ltr">{{ order.order_tracking_code }}</p>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 sm:justify-end">
+                            <span class="rounded-xl border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-bold text-white">{{ order.get_status_display }}</span>
+                        </div>
+                    </div>
+                    <details class="group/order mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-black text-slate-300 [&::-webkit-details-marker]:hidden">
+                            <span>جزئیات سفارش</span>
+                            <span class="text-slate-500 group-open/order:hidden">نمایش</span>
+                            <span class="hidden text-slate-500 group-open/order:inline">بستن</span>
+                        </summary>
+                        <div class="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                            <div class="rounded-xl border border-white/10 bg-slate-950/30 p-3">
+                                <p class="text-slate-500">وضعیت تایید</p>
+                                <p class="mt-1 font-bold text-white">{{ order.get_verification_status_display }}</p>
+                            </div>
+                            <div class="rounded-xl border border-white/10 bg-slate-950/30 p-3">
+                                <p class="text-slate-500">مبلغ نهایی</p>
+                                <p class="mt-1 font-bold text-white" dir="ltr">{{ order.amount|commafy }} {{ order.currency|currency_label }}</p>
+                            </div>
+                            <div class="rounded-xl border border-white/10 bg-slate-950/30 p-3">
+                                <p class="text-slate-500">پرداخت</p>
+                                <p class="mt-1 font-bold text-white">{{ order.payment_date|jalali_date }}</p>
+                            </div>
+                            <div class="rounded-xl border border-white/10 bg-slate-950/30 p-3">
+                                <p class="text-slate-500">ساعت</p>
+                                <p class="mt-1 font-bold text-white">{{ order.payment_time|jalali_time }}</p>
+                            </div>
+                        </div>
+                    </details>
+                </article>
+            {% endfor %}
+        </div>
+    </details>
+
+    <details id="profile" class="group scroll-mt-24 rounded-3xl border border-emerald-400/15 bg-emerald-400/10 p-4">
+        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+            <span>
+                <span class="block text-xs font-black text-emerald-200">حساب و دعوت</span>
+                <span class="mt-1 block text-lg font-black text-white">کد معرفی و جایزه‌ها</span>
+            </span>
+            <span class="rounded-xl border border-emerald-400/20 bg-slate-950/20 px-3 py-2 text-xs font-black text-white group-open:hidden">نمایش</span>
+            <span class="hidden rounded-xl border border-emerald-400/20 bg-slate-950/20 px-3 py-2 text-xs font-black text-white group-open:inline">بستن</span>
+        </summary>
+        <div class="mt-4 space-y-4">
+            <div class="grid gap-3 lg:grid-cols-2">
+                <div class="rounded-2xl border border-emerald-400/15 bg-slate-950/25 p-4">
+                    <p class="text-xs text-emerald-100/70">نام حساب</p>
+                    <p class="mt-1 font-black text-white">{{ customer.display_name }}</p>
+                    {% if customer.wholesale_discount_percent %}
+                        <p class="mt-2 text-xs leading-6 text-emerald-100">تخفیف دائمی همکاری شما به‌صورت خودکار اعمال می‌شود: <span dir="ltr">{{ customer.wholesale_discount_percent|fa_digits }}%</span></p>
+                    {% endif %}
+                    <details class="group/account mt-4 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-black text-white [&::-webkit-details-marker]:hidden">
+                            <span>ویرایش حساب</span>
+                            <span class="text-emerald-100/70 group-open/account:hidden">نمایش</span>
+                            <span class="hidden text-emerald-100/70 group-open/account:inline">بستن</span>
+                        </summary>
+                        <form action="{% url 'account' %}" method="post" class="mt-3 space-y-3">
+                            {% csrf_token %}
+                            <div>
+                                <label class="mb-1 block text-xs font-bold text-emerald-100/70">نام کاربری</label>
+                                <input type="text" name="username" value="{{ customer.username }}" maxlength="80" class="w-full rounded-xl border border-emerald-400/20 bg-slate-950/45 px-3 py-2 text-sm text-white placeholder:text-slate-600 focus:border-emerald-300 focus:outline-none focus:ring-1 focus:ring-emerald-300" dir="ltr" placeholder="username">
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-xs font-bold text-emerald-100/70">شماره موبایل</label>
+                                <input type="text" name="phone_number" value="{{ customer.phone_number }}" maxlength="30" class="w-full rounded-xl border border-emerald-400/20 bg-slate-950/45 px-3 py-2 text-sm text-white placeholder:text-slate-600 focus:border-emerald-300 focus:outline-none focus:ring-1 focus:ring-emerald-300" dir="ltr" placeholder="09...">
+                            </div>
+                            {% if not customer.referred_by %}
+                                <div>
+                                    <label class="mb-1 block text-xs font-bold text-emerald-100/70">کد معرف اختیاری</label>
+                                    <input type="text" name="referral_code" maxlength="16" class="w-full rounded-xl border border-emerald-400/20 bg-slate-950/45 px-3 py-2 font-mono text-sm uppercase text-white placeholder:text-slate-600 focus:border-emerald-300 focus:outline-none focus:ring-1 focus:ring-emerald-300" dir="ltr" placeholder="RF12345678">
+                                </div>
+                            {% endif %}
+                            <button type="submit" class="w-full rounded-xl bg-emerald-400 px-4 py-2.5 text-xs font-black text-slate-950 transition-colors hover:bg-emerald-300">
+                                ذخیره
+                            </button>
+                        </form>
+                    </details>
+                </div>
+                <div class="rounded-2xl border border-emerald-400/15 bg-slate-950/25 p-4">
+                    <p class="text-xs text-emerald-100/70">لینک دعوت</p>
+                    <input type="text" readonly value="{{ referral_link }}" class="mt-2 w-full rounded-xl border border-emerald-400/20 bg-slate-950/45 px-3 py-2 font-mono text-xs text-emerald-100 select-all" dir="ltr">
+                    <p class="mt-2 text-xs leading-6 text-emerald-50/75">بعد از خرید موفق دوستانت، جایزه‌ها اینجا دیده می‌شوند.</p>
+                </div>
+            </div>
+            <div class="grid gap-2 sm:grid-cols-2">
+                {% for reward in rewards %}
+                    <article class="rounded-2xl border border-emerald-400/15 bg-slate-950/25 p-3">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <h3 class="text-sm font-black text-white">{{ reward.title }}</h3>
+                                <p class="mt-1 text-xs leading-6 text-slate-300">{{ reward.description }}</p>
+                            </div>
+                            <span class="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-bold text-emerald-200">{{ reward.get_status_display }}</span>
+                        </div>
+                        {% if reward.discount_code %}
+                            <p class="mt-2 rounded-xl border border-white/10 bg-slate-950/35 px-3 py-2 font-mono text-xs font-black text-sky-200" dir="ltr">{{ reward.discount_code.code }}</p>
+                        {% endif %}
+                    </article>
+                {% empty %}
+                    <p class="rounded-2xl border border-emerald-400/15 bg-slate-950/25 p-3 text-sm leading-7 text-emerald-50/75 sm:col-span-2">
+                        هنوز جایزه‌ای ثبت نشده است.
+                    </p>
+                {% endfor %}
+            </div>
+        </div>
+    </details>
+</div>
+
+{% if access_cards %}
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        document.addEventListener("DOMContentLoaded", function () {
+            const chartDefaults = {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { intersect: false, mode: "index" },
+                plugins: {
+                    legend: { labels: { color: "#cbd5e1", usePointStyle: true } },
+                },
+                scales: {
+                    x: { ticks: { color: "#94a3b8" }, grid: { color: "rgba(148,163,184,0.12)" } },
+                    y: { ticks: { color: "#94a3b8" }, grid: { color: "rgba(148,163,184,0.12)" } },
+                },
+            };
+
+            document.querySelectorAll("[data-usage-chart]").forEach(async function (canvas) {
+                try {
+                    const response = await fetch(canvas.dataset.usageUrl, {
+                        headers: { "X-Requested-With": "XMLHttpRequest" },
+                    });
+                    const payload = await response.json();
+                    if (!payload.ok || !window.Chart) return;
+
+                    new Chart(canvas, {
+                        type: "line",
+                        data: {
+                            labels: payload.usage.labels,
+                            datasets: [
+                                {
+                                    label: "مصرف‌شده (GB)",
+                                    data: payload.usage.used_gb,
+                                    borderColor: "#38bdf8",
+                                    backgroundColor: "rgba(56,189,248,0.14)",
+                                    tension: 0.35,
+                                    fill: true,
+                                },
+                                {
+                                    label: "باقی‌مانده (GB)",
+                                    data: payload.usage.remaining_gb,
+                                    borderColor: "#34d399",
+                                    backgroundColor: "rgba(52,211,153,0.10)",
+                                    tension: 0.35,
+                                    fill: true,
+                                },
+                            ],
+                        },
+                        options: chartDefaults,
+                    });
+                } catch (error) {
+                    return;
+                }
+            });
+        });
+    </script>
+{% endif %}
+{% endblock %}

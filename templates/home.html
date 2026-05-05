@@ -1,0 +1,788 @@
+{% extends 'base.html' %}
+{% load store_formatters %}
+
+{% block title %}{{ store.name|default:"آزادنت" }} | خرید اشتراک{% endblock %}
+
+{% block content %}
+<div id="checkout-flow" data-selected-plan-id="{{ selected_plan_id }}" data-scroll-to="{{ scroll_to }}" data-discount-url="{% url 'discount_preview' %}" data-wholesale-discount-percent="{{ current_customer.wholesale_discount_percent|default:0 }}" class="space-y-8 sm:space-y-10">
+    <section id="home" class="scroll-mt-24">
+        <div class="grid gap-5 lg:grid-cols-[1.15fr_0.85fr] lg:items-end">
+            <div class="rounded-[2rem] border border-white/10 bg-white/[0.05] p-5 sm:p-7">
+                <p class="mb-4 inline-flex rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1.5 text-xs font-black text-sky-200">
+                    شروع سریع، بدون دردسر
+                </p>
+                <h1 class="text-3xl font-black leading-tight text-white sm:text-4xl">
+                    یه پلن انتخاب کن، پرداخت رو ثبت کن، بقیه‌اش با ما.
+                </h1>
+                <p class="mt-4 max-w-2xl text-sm leading-7 text-slate-300 sm:text-base">
+                    همه‌چیز همین‌جاست: پلن‌ها، مبلغ نهایی، ثبت پرداخت و پیگیری سفارش. بعد از تایید، لینک‌های دسترسی آماده استفاده می‌شوند.
+                </p>
+                <div class="mt-6 flex flex-col gap-3 sm:flex-row">
+                    <a href="#plans" class="inline-flex items-center justify-center rounded-2xl bg-sky-500 px-5 py-3 text-sm font-black text-slate-950 transition-colors hover:bg-sky-400">
+                        دیدن پلن‌ها
+                    </a>
+                    {% if current_customer_has_orders %}
+                        <a href="{% url 'dashboard' %}" class="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-white/10">
+                            رفتن به داشبورد
+                        </a>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if not current_customer_has_orders %}
+                <div class="grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
+                    <div class="rounded-3xl border border-emerald-400/15 bg-emerald-400/10 p-4">
+                        <p class="text-sm font-black text-white">تحویل بعد از تایید</p>
+                        <p class="mt-2 text-xs leading-6 text-emerald-50/80">پرداختت ثبت می‌شود و بعد از بررسی، سفارش فعال می‌شود.</p>
+                    </div>
+                    <div class="rounded-3xl border border-amber-400/15 bg-amber-400/10 p-4">
+                        <p class="text-sm font-black text-white">کد تخفیف داری؟</p>
+                        <p class="mt-2 text-xs leading-6 text-amber-50/80">داخل فرم بزن؛ مبلغ نهایی همان‌جا حساب می‌شود.</p>
+                    </div>
+                    <div class="rounded-3xl border border-fuchsia-400/15 bg-fuchsia-400/10 p-4">
+                        <p class="text-sm font-black text-white">معرفی دوستان</p>
+                        <p class="mt-2 text-xs leading-6 text-fuchsia-50/80">بعد از اولین خرید، لینک دعوت و جایزه‌ها توی داشبوردت می‌آیند.</p>
+                    </div>
+                </div>
+            {% endif %}
+        </div>
+    </section>
+
+    {% if not current_customer_has_orders %}
+        <section class="grid gap-3 sm:grid-cols-3">
+            <div class="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
+                <span class="mb-3 grid h-8 w-8 place-items-center rounded-2xl bg-sky-400 text-sm font-black text-slate-950">1</span>
+                <h2 class="text-sm font-black text-white">پلنت رو بردار</h2>
+                <p class="mt-2 text-xs leading-6 text-slate-400">حجم، مدت و تعداد دستگاه رو سریع مقایسه کن.</p>
+            </div>
+            <div class="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
+                <span class="mb-3 grid h-8 w-8 place-items-center rounded-2xl bg-emerald-400 text-sm font-black text-slate-950">2</span>
+                <h2 class="text-sm font-black text-white">پرداخت رو ثبت کن</h2>
+                <p class="mt-2 text-xs leading-6 text-slate-400">فقط اطلاعات کوتاه پرداخت لازم است.</p>
+            </div>
+            <div class="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
+                <span class="mb-3 grid h-8 w-8 place-items-center rounded-2xl bg-amber-300 text-sm font-black text-slate-950">3</span>
+                <h2 class="text-sm font-black text-white">داشبوردت باز می‌شود</h2>
+                <p class="mt-2 text-xs leading-6 text-slate-400">بعد از اولین سفارش، سوابق و آمار همین‌جا جمع می‌شوند.</p>
+            </div>
+        </section>
+    {% endif %}
+
+    <section id="plans" class="scroll-mt-24">
+        <div class="mb-4 flex items-end justify-between gap-4">
+            <div>
+                <p class="text-xs font-black text-sky-300">پلن‌ها</p>
+                <h2 class="mt-1 text-2xl font-black text-white">یکی رو انتخاب کن</h2>
+            </div>
+            <p class="hidden text-xs text-slate-500 sm:block">بعد از انتخاب، فرم پرداخت آماده می‌شود.</p>
+        </div>
+
+        <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {% for plan in plans %}
+                <article class="plan-card overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/[0.045] p-4 transition-all duration-300 hover:-translate-y-0.5 hover:border-sky-400/40 hover:bg-white/[0.07]">
+                    <div class="flex min-h-full flex-col">
+                        <div class="mb-5 flex items-start justify-between gap-4">
+                            <div class="min-w-0">
+                                <h3 class="truncate text-lg font-black text-white">{{ plan.name }}</h3>
+                                <p class="mt-1 text-xs text-slate-400">{{ plan.duration_days }} روز اعتبار</p>
+                            </div>
+                            <span class="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-black text-emerald-200">
+                                {{ plan.volume_gb|clean_gb }} GB
+                            </span>
+                        </div>
+
+                        <div class="mb-5 rounded-3xl border border-white/10 bg-slate-950/35 p-4">
+                            <p class="mb-2 text-xs font-bold text-slate-500">قیمت</p>
+                            <div class="flex items-end gap-2" dir="ltr">
+                                <span class="text-3xl font-black text-white">{{ plan.price|commafy }}</span>
+                                <span class="pb-1 text-xs font-bold text-slate-400">{{ plan.currency|currency_label }}</span>
+                            </div>
+                        </div>
+
+                        <div class="mb-5 grid grid-cols-2 gap-2 text-xs">
+                            <div class="rounded-2xl border border-white/10 bg-white/[0.035] p-3">
+                                <p class="text-slate-500">حجم</p>
+                                <p class="mt-1 font-black text-white">{{ plan.volume_gb|clean_gb }} GB</p>
+                            </div>
+                            <div class="rounded-2xl border border-white/10 bg-white/[0.035] p-3">
+                                <p class="text-slate-500">دستگاه</p>
+                                <p class="mt-1 font-black text-white">{{ plan.device_limit }}</p>
+                            </div>
+                        </div>
+
+                        <button
+                            type="button"
+                            class="js-plan-select mt-auto w-full rounded-2xl bg-sky-500 px-4 py-3 text-sm font-black text-slate-950 transition-all duration-300 hover:bg-sky-400"
+                            data-plan-id="{{ plan.id }}"
+                            data-plan-name="{{ plan.name }}"
+                            data-plan-price="{{ plan.price|commafy }}"
+                            data-plan-raw-price="{{ plan.price }}"
+                            data-plan-currency="{{ plan.currency|currency_label }}"
+                            data-plan-currency-code="{{ plan.currency }}"
+                            data-plan-volume="{{ plan.volume_gb|clean_gb }}"
+                            data-plan-duration="{{ plan.duration_days }}"
+                        >
+                            انتخاب این پلن
+                        </button>
+                    </div>
+                </article>
+            {% empty %}
+                <div class="rounded-3xl border border-white/10 bg-white/[0.04] p-8 text-center md:col-span-2 xl:col-span-3">
+                    <h2 class="text-xl font-bold text-white">فعلا پلن فعالی نداریم</h2>
+                    <p class="mt-2 text-sm text-slate-400">کمی بعد دوباره سر بزن یا به پشتیبانی پیام بده.</p>
+                </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section id="checkout" class="scroll-mt-24">
+        <div class="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start">
+            <aside class="order-first lg:order-last lg:sticky lg:top-24">
+                <div class="rounded-[1.75rem] border border-white/10 bg-white/[0.045] p-4 sm:p-5">
+                    <h2 class="mb-4 text-base font-black text-white">خلاصه خرید</h2>
+                    <div id="selected-plan-empty" class="rounded-2xl border border-dashed border-white/10 bg-slate-950/30 p-4 text-sm leading-7 text-slate-400">
+                        هنوز پلنی انتخاب نشده. از بخش بالا یک پلن را انتخاب کن تا پرداخت فعال شود.
+                    </div>
+                    <div id="selected-plan-summary" class="hidden">
+                        <p id="selected-plan-name" class="mb-3 text-lg font-black text-white"></p>
+                        <div class="mb-3 rounded-2xl border border-sky-400/15 bg-sky-400/10 p-4">
+                            <p class="mb-1 text-xs font-bold text-sky-100/70">قیمت واحد</p>
+                            <p class="flex items-end gap-2" dir="ltr">
+                                <span id="selected-plan-price" class="text-2xl font-black text-white"></span>
+                                <span id="selected-plan-currency" class="pb-1 text-xs font-bold text-sky-100/70"></span>
+                            </p>
+                        </div>
+                        <div id="discount-summary" class="mb-3 hidden rounded-2xl border border-emerald-400/15 bg-emerald-400/10 p-4 text-sm">
+                            <div class="flex items-center justify-between gap-3">
+                                <span class="text-emerald-100/80">تخفیف</span>
+                                <span class="font-black text-emerald-200" dir="ltr">-<span id="discount-amount">0</span></span>
+                            </div>
+                        </div>
+                        <div class="mb-3 rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-sm">
+                            <div class="flex items-center justify-between gap-3">
+                                <span class="text-slate-400">مبلغ قابل پرداخت</span>
+                                <span class="font-black text-white" dir="ltr">
+                                    <span id="payable-amount"></span>
+                                    <span id="payable-currency" class="text-xs text-slate-500"></span>
+                                </span>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2 text-xs">
+                            <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                                <p class="text-slate-500">حجم</p>
+                                <p class="mt-1 font-black text-white"><span id="selected-plan-volume"></span> GB</p>
+                            </div>
+                            <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                                <p class="text-slate-500">مدت</p>
+                                <p class="mt-1 font-black text-white"><span id="selected-plan-duration"></span> روز</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+            <div class="rounded-[1.75rem] border border-white/10 bg-white/[0.045] p-4 sm:p-6">
+                <div class="mb-5 flex items-start justify-between gap-4">
+                    <div>
+                        <p class="text-xs font-black text-sky-300">ثبت پرداخت</p>
+                        <h2 class="mt-1 text-xl font-black text-white">اطلاعات کوتاه، مسیر سریع</h2>
+                    </div>
+                    <span class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-bold text-slate-400">مرحله آخر</span>
+                </div>
+
+                {% if checkout_error %}
+                    <div class="mb-5 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                        {{ checkout_error }}
+                    </div>
+                {% endif %}
+
+                <div class="mb-5 rounded-2xl border border-white/10 bg-slate-950/30 p-4">
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <p class="text-xs font-bold text-slate-500">مقصد پرداخت</p>
+                            <p class="mt-1 font-mono text-sm font-bold text-slate-200" dir="ltr">{{ store.card_number }}</p>
+                        </div>
+                        <div class="sm:text-left">
+                            <p class="text-xs text-slate-500">به نام</p>
+                            <p class="mt-1 text-sm font-bold text-slate-300">{{ store.card_owner }}</p>
+                        </div>
+                    </div>
+                    <p class="mt-3 text-xs leading-6 text-slate-500">بعد از واریز، نام، ساعت پرداخت و رسید را بفرست. رسید می‌تواند متن یا عکس باشد.</p>
+                </div>
+
+                <form action="{% url 'home' %}#confirmation" method="POST" enctype="multipart/form-data" class="space-y-4">
+                    {% csrf_token %}
+                    <input id="selected-plan-id" type="hidden" name="plan_id" value="{{ selected_plan_id }}">
+
+                    <div class="grid gap-4 sm:grid-cols-2">
+                        <div>
+                            <label class="mb-2 block text-sm font-bold text-slate-400">نام صاحب کارت پرداخت‌کننده</label>
+                            <input type="text" name="sender_card_name" required class="w-full rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-white placeholder:text-slate-600 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400" placeholder="مثلا علی رضایی">
+                        </div>
+
+                        <div>
+                            <label class="mb-2 block text-sm font-bold text-slate-400">ساعت پرداخت</label>
+                            <input type="time" name="payment_time" value="{{ payment_time }}" step="60" required class="w-full rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 font-mono text-white focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400" dir="ltr">
+                        </div>
+                    </div>
+
+                    <div class="rounded-2xl border border-white/10 bg-white/[0.03] p-4" data-receipt-switcher>
+                        <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                                <p class="text-sm font-black text-white">رسید پرداخت</p>
+                                <p class="mt-1 text-xs leading-6 text-slate-500">یکی را انتخاب کن: متن رسید یا عکس رسید.</p>
+                            </div>
+                            <div class="grid grid-cols-2 gap-2 rounded-2xl border border-white/10 bg-slate-950/35 p-1 text-xs font-black">
+                                <label class="cursor-pointer rounded-xl px-3 py-2 text-center text-slate-300 has-[:checked]:bg-sky-500 has-[:checked]:text-slate-950">
+                                    <input type="radio" name="receipt_mode" value="text" class="sr-only" checked data-receipt-mode>
+                                    متن رسید
+                                </label>
+                                <label class="cursor-pointer rounded-xl px-3 py-2 text-center text-slate-300 has-[:checked]:bg-sky-500 has-[:checked]:text-slate-950">
+                                    <input type="radio" name="receipt_mode" value="image" class="sr-only" data-receipt-mode>
+                                    عکس رسید
+                                </label>
+                            </div>
+                        </div>
+                        <div data-receipt-panel="text">
+                            <label class="mb-2 block text-xs font-bold text-slate-500">متن رسید</label>
+                            <textarea name="payment_receipt_text" rows="4" maxlength="1200" class="w-full resize-y rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-sm leading-7 text-white placeholder:text-slate-600 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400" placeholder="مثلا: مبلغ، ساعت، شناسه پرداخت یا متن رسید">{{ payment_receipt_text }}</textarea>
+                            <p class="mt-2 min-h-5 text-xs text-slate-500" data-receipt-status></p>
+                        </div>
+                        <div class="hidden" data-receipt-panel="image">
+                            <label class="mb-2 block text-xs font-bold text-slate-500">عکس رسید</label>
+                            <input type="file" name="payment_receipt_image" accept=".jpg,.jpeg,.png,.webp,.gif,image/jpeg,image/png,image/webp,image/gif" class="w-full rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-sm text-slate-300 file:ml-4 file:rounded-xl file:border-0 file:bg-sky-500 file:px-4 file:py-2 file:text-sm file:font-black file:text-slate-950 hover:file:bg-sky-400">
+                        </div>
+                    </div>
+
+                    <details class="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-300" {% if discount_code %}open{% endif %}>
+                        <summary class="cursor-pointer list-none font-bold text-slate-400 [&::-webkit-details-marker]:hidden">
+                            کد تخفیف داری؟
+                        </summary>
+                        <div class="mt-3">
+                            <label class="mb-2 block text-xs font-bold text-slate-500">کد تخفیف</label>
+                            <input id="discount-code" type="text" name="discount_code" value="{{ discount_code }}" maxlength="50" class="w-full rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 font-mono uppercase text-white placeholder:text-slate-600 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400" placeholder="OFF20" dir="ltr" autocomplete="off">
+                        </div>
+                        {% if current_customer.wholesale_discount_percent %}
+                            <p class="mt-2 text-xs text-emerald-300">تخفیف همکاری شما خودکار اعمال می‌شود.</p>
+                        {% endif %}
+                        <p id="discount-message" class="mt-2 min-h-5 text-xs text-slate-500"></p>
+                    </details>
+
+                    {% if not current_customer.referred_by %}
+                        <details class="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-300" {% if referral_code %}open{% endif %}>
+                            <summary class="cursor-pointer list-none font-bold text-slate-400 [&::-webkit-details-marker]:hidden">
+                                کد دوستت رو داری؟ اینجا بزن
+                            </summary>
+                            <div class="mt-3">
+                                <label class="mb-2 block text-xs font-bold text-slate-500">کد معرف اختیاری</label>
+                                <input type="text" name="referral_code" value="{{ referral_code }}" maxlength="16" class="w-full rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 font-mono uppercase text-white placeholder:text-slate-600 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400" placeholder="RF12345678" dir="ltr" autocomplete="off">
+                                <p class="mt-2 text-xs leading-6 text-slate-500">این بخش اختیاریه و روی ثبت سفارش اصلی فشار نمی‌آره.</p>
+                            </div>
+                        </details>
+                    {% else %}
+                        <div class="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
+                            کد معرفی برای حسابت ثبت شده است.
+                        </div>
+                    {% endif %}
+
+                    <details class="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-300">
+                        <summary class="cursor-pointer list-none font-bold text-slate-400 [&::-webkit-details-marker]:hidden">
+                            خرید چندتایی می‌خوای؟
+                        </summary>
+                        <div class="mt-3 max-w-40">
+                            <label for="quantity" class="mb-2 block text-xs font-bold text-slate-500">تعداد</label>
+                            <input id="quantity" type="number" name="quantity" min="1" max="50" value="{{ quantity|default:'1' }}" class="w-full rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-3 text-center font-mono text-white focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400" dir="ltr">
+                        </div>
+                    </details>
+
+                    <button id="checkout-submit" type="submit" disabled class="w-full rounded-2xl bg-sky-500 px-4 py-4 text-sm font-black text-slate-950 transition-all hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-45">
+                        ثبت پرداخت و دریافت کد پیگیری
+                    </button>
+                </form>
+            </div>
+        </div>
+    </section>
+
+    <section id="confirmation" class="scroll-mt-24">
+        {% if order %}
+            <div class="rounded-[1.75rem] border border-amber-400/20 bg-amber-400/10 p-5 sm:p-7">
+                <div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                        {% if order.status == 'completed' %}
+                            <h2 class="text-2xl font-black text-white">دسترسی آماده است</h2>
+                            <p class="mt-2 text-sm leading-7 text-slate-300">لینک اصلی را کپی کن و طبق سه قدم پایین فعالش کن.</p>
+                        {% else %}
+                            <h2 class="text-2xl font-black text-white">پرداختت ثبت شد</h2>
+                            <p class="mt-2 text-sm leading-7 text-slate-300">کد پیگیری را نگه دار. بعد از تایید پشتیبانی، لینک دسترسی همین‌جا فعال می‌شود.</p>
+                        {% endif %}
+                    </div>
+                    <span class="inline-flex w-fit rounded-full border border-amber-300/20 bg-amber-300/10 px-4 py-2 text-xs font-black text-amber-100">
+                        {{ order.get_status_display }}
+                    </span>
+                </div>
+
+                {% if order_update_error %}
+                    <div class="mb-5 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                        {{ order_update_error }}
+                    </div>
+                {% endif %}
+                {% if order_update_saved %}
+                    <div class="mb-5 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
+                        اطلاعات پرداخت به‌روزرسانی شد.
+                    </div>
+                {% endif %}
+                {% if order.metadata.receipt_analysis %}
+                    {% if order.metadata.receipt_analysis.requires_admin_review %}
+                        <div class="mb-5 rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm leading-7 text-amber-100">
+                            {{ order.metadata.receipt_analysis.warning }}
+                        </div>
+                    {% else %}
+                        <div class="mb-5 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-3 text-sm leading-7 text-emerald-100">
+                            مبلغ رسید با مبلغ سفارش هماهنگ است.
+                        </div>
+                    {% endif %}
+                {% endif %}
+
+                <div class="mb-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
+                    <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-4" data-copy-scope>
+                        <p class="text-xs text-slate-500">کد پیگیری</p>
+                        <p class="mt-2 break-all font-mono text-base font-black text-sky-200" dir="ltr">{{ order.order_tracking_code }}</p>
+                        <div class="mt-3 flex flex-wrap items-center gap-2">
+                            <button type="button" data-copy-access-link data-copy-value="{{ order.order_tracking_code }}" class="rounded-xl bg-sky-500 px-3 py-2 text-xs font-black text-slate-950">کپی کد</button>
+                            <span data-copy-status class="text-xs text-slate-500">آماده کپی</span>
+                        </div>
+                        <p class="mt-3 text-xs text-slate-500">
+                            پرداخت: {{ order.payment_date|jalali_date }}، ساعت {{ order.payment_time|jalali_time }}
+                        </p>
+                    </div>
+
+                    <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-4 lg:col-span-2">
+                        <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                            <h3 class="text-base font-black text-white">لینک اصلی دسترسی</h3>
+                            {% if order.status != 'completed' %}
+                                <span class="text-xs font-bold text-amber-200">در انتظار تایید</span>
+                            {% endif %}
+                        </div>
+
+                        <div class="space-y-4">
+                            {% for client in order_clients %}
+                                <div class="space-y-3" data-copy-scope>
+                                    {% if client.sub_link %}
+                                        <a href="{{ client.sub_link }}" target="_blank" rel="noopener" class="block break-all rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-3 font-mono text-sm text-sky-100" dir="ltr">{{ client.sub_link }}</a>
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <button type="button" data-copy-access-link data-copy-value="{{ client.sub_link }}" class="rounded-xl bg-sky-500 px-4 py-2 text-xs font-black text-slate-950">کپی لینک</button>
+                                            <span data-copy-status class="text-xs text-slate-500">آماده کپی</span>
+                                        </div>
+                                    {% else %}
+                                        <p class="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm leading-7 text-amber-100">لینک بعد از تایید فعال می‌شود.</p>
+                                    {% endif %}
+                                    <details class="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                                        <summary class="cursor-pointer list-none text-sm font-black text-white [&::-webkit-details-marker]:hidden">لینک جایگزین و جزئیات</summary>
+                                        <div class="mt-3">
+                                            {% include 'includes/config_links.html' with sub_link=client.sub_link direct_link=client.direct_link %}
+                                        </div>
+                                    </details>
+                                </div>
+                            {% empty %}
+                                <div class="space-y-3" data-copy-scope>
+                                    {% if order.sub_link %}
+                                        <a href="{{ order.sub_link }}" target="_blank" rel="noopener" class="block break-all rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-3 font-mono text-sm text-sky-100" dir="ltr">{{ order.sub_link }}</a>
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <button type="button" data-copy-access-link data-copy-value="{{ order.sub_link }}" class="rounded-xl bg-sky-500 px-4 py-2 text-xs font-black text-slate-950">کپی لینک</button>
+                                            <span data-copy-status class="text-xs text-slate-500">آماده کپی</span>
+                                        </div>
+                                    {% else %}
+                                        <p class="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm leading-7 text-amber-100">لینک بعد از تایید فعال می‌شود.</p>
+                                    {% endif %}
+                                    <details class="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                                        <summary class="cursor-pointer list-none text-sm font-black text-white [&::-webkit-details-marker]:hidden">لینک جایگزین و جزئیات</summary>
+                                        <div class="mt-3">
+                                            {% include 'includes/config_links.html' with sub_link=order.sub_link direct_link=order.direct_link %}
+                                        </div>
+                                    </details>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mb-5 grid gap-3 sm:grid-cols-3">
+                    <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+                        <span class="mb-3 grid h-8 w-8 place-items-center rounded-xl bg-sky-400 text-sm font-black text-slate-950">۱</span>
+                        <h3 class="text-sm font-black text-white">لینک را کپی کن</h3>
+                        <p class="mt-2 text-xs leading-6 text-slate-400">از دکمه کپی بالا استفاده کن.</p>
+                    </div>
+                    <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+                        <span class="mb-3 grid h-8 w-8 place-items-center rounded-xl bg-emerald-400 text-sm font-black text-slate-950">۲</span>
+                        <h3 class="text-sm font-black text-white">اپ را باز کن</h3>
+                        <p class="mt-2 text-xs leading-6 text-slate-400">داخل اپ، گزینه افزودن یا Import را بزن.</p>
+                    </div>
+                    <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+                        <span class="mb-3 grid h-8 w-8 place-items-center rounded-xl bg-amber-300 text-sm font-black text-slate-950">۳</span>
+                        <h3 class="text-sm font-black text-white">Paste و اتصال</h3>
+                        <p class="mt-2 text-xs leading-6 text-slate-400">لینک را وارد کن، ذخیره کن و اتصال را بزن.</p>
+                    </div>
+                </div>
+
+                {% if order.status != 'completed' %}
+                    <details class="rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+                        <summary class="cursor-pointer list-none font-black text-white [&::-webkit-details-marker]:hidden">ویرایش اطلاعات پرداخت</summary>
+                        <form action="{% url 'checkout' tracking_code=order.order_tracking_code %}#confirmation" method="POST" enctype="multipart/form-data" class="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                            {% csrf_token %}
+                            <div>
+                                <label class="mb-2 block text-sm font-bold text-slate-400">نام صاحب کارت</label>
+                                <input type="text" name="sender_card_name" value="{{ order.sender_card_name }}" required class="w-full rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3 text-white placeholder:text-slate-600 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400">
+                            </div>
+                            <div>
+                                <label class="mb-2 block text-sm font-bold text-slate-400">ساعت پرداخت</label>
+                                <input type="time" name="payment_time" value="{{ order.payment_time|time:'H:i' }}" step="60" required class="w-full rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3 font-mono text-white focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400" dir="ltr">
+                            </div>
+                            <div class="rounded-2xl border border-white/10 bg-white/[0.03] p-4 md:col-span-2" data-receipt-switcher data-receipt-optional="{% if order.payment_receipt_image or order.metadata.receipt_text %}true{% endif %}" data-expected-rial="{% if order.currency == 'TOMAN' %}{{ order.amount }}0{% elif order.currency == 'IRR' %}{{ order.amount }}{% endif %}">
+                                <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                        <p class="text-sm font-black text-white">رسید پرداخت</p>
+                                        <p class="mt-1 text-xs leading-6 text-slate-500">متن جدید بفرست یا عکس رسید را جایگزین کن.</p>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2 rounded-2xl border border-white/10 bg-slate-950/35 p-1 text-xs font-black">
+                                        <label class="cursor-pointer rounded-xl px-3 py-2 text-center text-slate-300 has-[:checked]:bg-sky-500 has-[:checked]:text-slate-950">
+                                            <input type="radio" name="receipt_mode_update" value="text" class="sr-only" checked data-receipt-mode>
+                                            متن رسید
+                                        </label>
+                                        <label class="cursor-pointer rounded-xl px-3 py-2 text-center text-slate-300 has-[:checked]:bg-sky-500 has-[:checked]:text-slate-950">
+                                            <input type="radio" name="receipt_mode_update" value="image" class="sr-only" data-receipt-mode>
+                                            عکس رسید
+                                        </label>
+                                    </div>
+                                </div>
+                                <div data-receipt-panel="text">
+                                    <label class="mb-2 block text-xs font-bold text-slate-500">متن رسید</label>
+                                    <textarea name="payment_receipt_text" rows="4" maxlength="1200" class="w-full resize-y rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3 text-sm leading-7 text-white placeholder:text-slate-600 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400" placeholder="متن رسید یا شناسه پرداخت">{{ order.metadata.receipt_text }}</textarea>
+                                    <p class="mt-2 min-h-5 text-xs text-slate-500" data-receipt-status></p>
+                                </div>
+                                <div class="hidden" data-receipt-panel="image">
+                                    <label class="mb-2 block text-xs font-bold text-slate-500">عکس رسید</label>
+                                    <input type="file" name="payment_receipt_image" accept=".jpg,.jpeg,.png,.webp,.gif,image/jpeg,image/png,image/webp,image/gif" class="w-full rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3 text-sm text-slate-300 file:ml-4 file:rounded-xl file:border-0 file:bg-sky-500 file:px-4 file:py-2 file:text-sm file:font-black file:text-slate-950 hover:file:bg-sky-400">
+                                </div>
+                            </div>
+                            <div class="md:col-span-2">
+                                <button type="submit" class="w-full rounded-2xl bg-sky-500 px-5 py-3 text-sm font-black text-slate-950 transition-colors hover:bg-sky-400">
+                                    ذخیره تغییرات
+                                </button>
+                            </div>
+                        </form>
+                    </details>
+                {% endif %}
+
+                <a href="{% url 'dashboard' %}" class="mt-5 inline-flex rounded-2xl bg-sky-500 px-5 py-3 text-sm font-black text-slate-950 transition-colors hover:bg-sky-400">
+                    دیدن داشبورد
+                </a>
+            </div>
+        {% endif %}
+    </section>
+</div>
+
+<script>
+    document.addEventListener("DOMContentLoaded", function () {
+        const flow = document.getElementById("checkout-flow");
+        const checkout = document.getElementById("checkout");
+        const planInput = document.getElementById("selected-plan-id");
+        const submitButton = document.getElementById("checkout-submit");
+        const emptyState = document.getElementById("selected-plan-empty");
+        const summary = document.getElementById("selected-plan-summary");
+        const selectedPlanId = flow.dataset.selectedPlanId;
+        const scrollTo = flow.dataset.scrollTo;
+        const discountInput = document.getElementById("discount-code");
+        const discountMessage = document.getElementById("discount-message");
+        const discountSummary = document.getElementById("discount-summary");
+        const discountAmount = document.getElementById("discount-amount");
+        const quantityInput = document.getElementById("quantity");
+        const priceFormatter = new Intl.NumberFormat("en-US");
+        const wholesaleDiscountPercent = Number(flow.dataset.wholesaleDiscountPercent || 0);
+        let activePlan = { id: "", price: 0, currency: "", currencyCode: "" };
+        let activePayableAmount = 0;
+        let discountTimer = null;
+
+        function normalizeReceiptDigits(value) {
+            const source = "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩";
+            const target = "01234567890123456789";
+            return String(value || "").replace(/[۰-۹٠-٩]/g, (digit) => target[source.indexOf(digit)]);
+        }
+
+        function extractReceiptAmounts(text) {
+            const normalized = normalizeReceiptDigits(text);
+            const matches = normalized.match(/[0-9][0-9,\s،٬.]{2,}[0-9]|[0-9]{4,}/g) || [];
+            return matches
+                .map((raw) => {
+                    const amount = Number(raw.replace(/\D/g, ""));
+                    const index = normalized.indexOf(raw);
+                    const context = normalized.slice(Math.max(0, index - 28), index + raw.length + 28);
+                    const amountInRial = context.includes("تومان") && !context.includes("ریال") ? amount * 10 : amount;
+                    return { raw, amountInRial, context };
+                })
+                .filter((item) => item.amountInRial >= 1000);
+        }
+
+        function expectedReceiptAmountFor(switcher) {
+            if (switcher.dataset.expectedRial) {
+                const savedExpected = Number(switcher.dataset.expectedRial);
+                return Number.isFinite(savedExpected) && savedExpected > 0 ? savedExpected : null;
+            }
+            if (!activePlan.id) return null;
+            if (activePlan.currencyCode === "TOMAN") return activePayableAmount * 10;
+            if (activePlan.currencyCode === "IRR") return activePayableAmount;
+            return null;
+        }
+
+        function setReceiptStatus(statusNode, message, colorClass) {
+            if (!statusNode) return;
+            statusNode.textContent = message || "";
+            statusNode.className = `mt-2 min-h-5 text-xs ${colorClass || "text-slate-500"}`;
+        }
+
+        function updateReceiptWarning(switcher) {
+            const statusNode = switcher.querySelector("[data-receipt-status]");
+            const activeMode = switcher.querySelector("[data-receipt-mode]:checked")?.value || "text";
+            const textarea = switcher.querySelector("textarea[name='payment_receipt_text']");
+            if (activeMode !== "text" || !textarea || textarea.disabled) {
+                setReceiptStatus(statusNode, "", "text-slate-500");
+                return;
+            }
+
+            const text = textarea.value.trim();
+            if (!text) {
+                setReceiptStatus(statusNode, "", "text-slate-500");
+                return;
+            }
+
+            const expected = expectedReceiptAmountFor(switcher);
+            if (!expected) {
+                setReceiptStatus(statusNode, "بعد از انتخاب پلن، مبلغ رسید همین‌جا چک می‌شود.", "text-slate-500");
+                return;
+            }
+
+            const amounts = extractReceiptAmounts(text);
+            if (amounts.some((item) => item.amountInRial === expected)) {
+                setReceiptStatus(statusNode, "مبلغ رسید با مبلغ سفارش هماهنگ است.", "text-emerald-300");
+                return;
+            }
+
+            if (amounts.length) {
+                const detected = formatAmount(amounts[0].amountInRial);
+                const expectedLabel = formatAmount(expected);
+                setReceiptStatus(
+                    statusNode,
+                    `هشدار: مبلغ پیداشده ${detected} ریال است، اما مبلغ سفارش ${expectedLabel} ریال است. سفارش ثبت می‌شود و ادمین دستی چک می‌کند.`,
+                    "text-amber-300",
+                );
+                return;
+            }
+
+            setReceiptStatus(
+                statusNode,
+                "هشدار: مبلغی داخل متن رسید پیدا نشد. سفارش ثبت می‌شود و ادمین دستی چک می‌کند.",
+                "text-amber-300",
+            );
+        }
+
+        function updateAllReceiptWarnings() {
+            document.querySelectorAll("[data-receipt-switcher]").forEach(updateReceiptWarning);
+        }
+
+        function setupReceiptSwitcher(switcher) {
+            const optional = switcher.dataset.receiptOptional === "true";
+            const modes = switcher.querySelectorAll("[data-receipt-mode]");
+            const panels = switcher.querySelectorAll("[data-receipt-panel]");
+            const textInput = switcher.querySelector("textarea[name='payment_receipt_text']");
+
+            function syncReceiptMode() {
+                const checkedMode = switcher.querySelector("[data-receipt-mode]:checked");
+                const activeMode = checkedMode ? checkedMode.value : "text";
+
+                panels.forEach((panel) => {
+                    const isActive = panel.dataset.receiptPanel === activeMode;
+                    panel.classList.toggle("hidden", !isActive);
+                    panel.querySelectorAll("input, textarea").forEach((field) => {
+                        field.disabled = !isActive;
+                        field.required = isActive && !optional;
+                    });
+                });
+                updateReceiptWarning(switcher);
+            }
+
+            modes.forEach((mode) => mode.addEventListener("change", syncReceiptMode));
+            if (textInput) textInput.addEventListener("input", () => updateReceiptWarning(switcher));
+            syncReceiptMode();
+        }
+
+        const fields = {
+            name: document.getElementById("selected-plan-name"),
+            price: document.getElementById("selected-plan-price"),
+            currency: document.getElementById("selected-plan-currency"),
+            payable: document.getElementById("payable-amount"),
+            payableCurrency: document.getElementById("payable-currency"),
+            volume: document.getElementById("selected-plan-volume"),
+            duration: document.getElementById("selected-plan-duration"),
+        };
+
+        function formatAmount(value) {
+            return priceFormatter.format(Number(value || 0));
+        }
+
+        function getQuantity() {
+            const rawValue = Number(quantityInput ? quantityInput.value : 1);
+            if (!Number.isFinite(rawValue)) return 1;
+            return Math.min(Math.max(Math.trunc(rawValue), 1), 50);
+        }
+
+        function getSubtotal() {
+            return activePlan.price * getQuantity();
+        }
+
+        function getWholesaleDiscountAmount() {
+            if (!wholesaleDiscountPercent) return 0;
+            return Math.min(Math.floor(getSubtotal() * wholesaleDiscountPercent / 100), getSubtotal());
+        }
+
+        function scheduleDiscountPreview() {
+            clearTimeout(discountTimer);
+            discountTimer = setTimeout(updateDiscountPreview, 350);
+        }
+
+        function setDiscountMessage(message, colorClass) {
+            if (!discountMessage) return;
+            discountMessage.textContent = message || "";
+            discountMessage.className = `mt-2 min-h-5 text-xs ${colorClass || "text-slate-500"}`;
+        }
+
+        function resetDiscountPreview(options) {
+            const shouldApplyWholesale = Boolean(options && options.applyWholesale);
+            const automaticDiscount = shouldApplyWholesale ? getWholesaleDiscountAmount() : 0;
+            activePayableAmount = getSubtotal() - automaticDiscount;
+            if (discountSummary) discountSummary.classList.toggle("hidden", !automaticDiscount);
+            if (discountAmount) discountAmount.textContent = formatAmount(automaticDiscount);
+            if (fields.payable) fields.payable.textContent = formatAmount(activePayableAmount);
+            if (fields.payableCurrency) fields.payableCurrency.textContent = activePlan.currency;
+            updateAllReceiptWarnings();
+        }
+
+        async function updateDiscountPreview() {
+            if (!discountInput || !activePlan.id) {
+                resetDiscountPreview();
+                return;
+            }
+
+            const code = discountInput.value.trim();
+            if (!code) {
+                resetDiscountPreview({ applyWholesale: true });
+                setDiscountMessage("", "text-slate-500");
+                return;
+            }
+
+            resetDiscountPreview();
+            setDiscountMessage("داریم کد رو چک می‌کنیم...", "text-slate-500");
+            const params = new URLSearchParams({
+                plan_id: activePlan.id,
+                code: code,
+                quantity: String(getQuantity()),
+            });
+
+            try {
+                const response = await fetch(`${flow.dataset.discountUrl}?${params.toString()}`, {
+                    headers: { "X-Requested-With": "XMLHttpRequest" },
+                });
+                const data = await response.json();
+
+                if (!data.ok || !data.valid) {
+                    setDiscountMessage(data.message || "این کد معتبر نیست.", "text-red-300");
+                    return;
+                }
+
+                if (discountSummary) discountSummary.classList.remove("hidden");
+                if (discountAmount) discountAmount.textContent = formatAmount(data.discount_amount);
+                activePayableAmount = Number(data.payable_amount || 0);
+                if (fields.payable) fields.payable.textContent = formatAmount(data.payable_amount);
+                setDiscountMessage(data.message || "کد تخفیف اعمال شد.", "text-emerald-300");
+                updateAllReceiptWarnings();
+            } catch (error) {
+                setDiscountMessage("الان امکان بررسی کد نیست.", "text-red-300");
+            }
+        }
+
+        function selectPlan(button, shouldScroll) {
+            document.querySelectorAll(".js-plan-select").forEach((item) => {
+                item.classList.remove("ring-2", "ring-sky-300/50", "bg-sky-300");
+                item.setAttribute("aria-pressed", "false");
+            });
+
+            button.classList.add("ring-2", "ring-sky-300/50", "bg-sky-300");
+            button.setAttribute("aria-pressed", "true");
+
+            planInput.value = button.dataset.planId;
+            fields.name.textContent = button.dataset.planName;
+            const planPrice = Number(button.dataset.planRawPrice || 0);
+            activePlan = {
+                id: button.dataset.planId,
+                price: planPrice,
+                currency: button.dataset.planCurrency,
+                currencyCode: button.dataset.planCurrencyCode,
+            };
+
+            fields.price.textContent = button.dataset.planPrice;
+            fields.currency.textContent = button.dataset.planCurrency;
+            activePayableAmount = getSubtotal();
+            fields.payable.textContent = formatAmount(activePayableAmount);
+            fields.payableCurrency.textContent = button.dataset.planCurrency;
+            fields.volume.textContent = button.dataset.planVolume;
+            fields.duration.textContent = button.dataset.planDuration;
+            updateDiscountPreview();
+            updateAllReceiptWarnings();
+
+            emptyState.classList.add("hidden");
+            summary.classList.remove("hidden");
+            submitButton.disabled = false;
+
+            if (shouldScroll) {
+                checkout.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+        }
+
+        document.querySelectorAll(".js-plan-select").forEach((button) => {
+            button.setAttribute("aria-pressed", "false");
+            button.addEventListener("click", function () {
+                selectPlan(button, true);
+            });
+
+            if (selectedPlanId && button.dataset.planId === selectedPlanId) {
+                selectPlan(button, false);
+            }
+        });
+
+        if (discountInput) {
+            discountInput.addEventListener("input", function () {
+                scheduleDiscountPreview();
+            });
+        }
+
+        if (quantityInput) {
+            quantityInput.addEventListener("input", function () {
+                scheduleDiscountPreview();
+            });
+            quantityInput.addEventListener("change", function () {
+                quantityInput.value = getQuantity();
+                updateDiscountPreview();
+            });
+        }
+
+        document.querySelectorAll("[data-receipt-switcher]").forEach(setupReceiptSwitcher);
+
+        if (scrollTo) {
+            const target = document.getElementById(scrollTo);
+            if (target) {
+                setTimeout(() => {
+                    target.scrollIntoView({ behavior: "smooth", block: "start" });
+                }, 120);
+            }
+        }
+    });
+</script>
+{% endblock %}

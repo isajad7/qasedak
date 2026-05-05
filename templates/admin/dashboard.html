@@ -1,0 +1,24 @@
+{% extends "admin/index.html" %}
+{% load i18n admin_metrics %}
+
+{% block content %}
+    {% admin_dashboard_stats as dashboard_stats %}
+    <div class="col-12">
+        <div class="row admin-metric-row">
+            {% for stat in dashboard_stats %}
+                <div class="col-xl-3 col-md-6 col-12">
+                    <div class="small-box bg-{{ stat.tone }} admin-metric-card">
+                        <div class="inner">
+                            <h3>{{ stat.value }}</h3>
+                            <p>{{ stat.label }}</p>
+                        </div>
+                        <div class="icon">
+                            <i class="{{ stat.icon }}"></i>
+                        </div>
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+    {{ block.super }}
+{% endblock %}

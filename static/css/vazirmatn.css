@@ -1,0 +1,19 @@
+@font-face {
+    font-family: 'Vazirmatn';
+    src: url('/static/fonts/vazirmatn/Vazirmatn-Regular.woff2') format('woff2'),
+         url('/static/fonts/vazirmatn/Vazirmatn-Regular.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Vazirmatn';
+    src: url('/static/fonts/vazirmatn/Vazirmatn-Bold.woff2') format('woff2'),
+         url('/static/fonts/vazirmatn/Vazirmatn-Bold.woff2') format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+/* اگر وزن‌های بیشتری می‌خواهید، مشابه همین اضافه کنید */

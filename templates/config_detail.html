@@ -1,0 +1,171 @@
+{% extends 'base.html' %}
+{% load store_formatters %}
+
+{% block title %}جزئیات دسترسی{% endblock %}
+
+{% block content %}
+<section class="space-y-5">
+    <div class="rounded-3xl border border-white/10 bg-white/[0.05] p-4 sm:p-5">
+        <a href="{% url 'dashboard' %}" class="mb-4 inline-flex rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2 text-sm font-bold text-slate-300 transition-colors hover:bg-white/10 hover:text-white">
+            بازگشت به داشبورد
+        </a>
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div class="min-w-0">
+                <p class="text-xs font-black text-sky-300">دسترسی</p>
+                <h1 class="mt-1 break-all text-lg font-black text-white sm:text-xl" dir="ltr">{{ client.xui_email|default:client.username }}</h1>
+                <p class="mt-2 text-xs text-slate-500">کد پیگیری: <span class="font-mono text-sky-200" dir="ltr">{{ order.order_tracking_code }}</span></p>
+            </div>
+
+            {% if stats.is_expired %}
+                <span class="w-fit rounded-full border border-red-400/20 bg-red-400/10 px-3 py-1 text-xs font-bold text-red-200">تمام‌شده</span>
+            {% elif stats.is_enabled %}
+                <span class="w-fit rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-bold text-emerald-200">فعال</span>
+            {% else %}
+                <span class="w-fit rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-xs font-bold text-amber-200">در انتظار تایید</span>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="rounded-3xl border border-sky-400/15 bg-sky-400/10 p-4" data-copy-scope>
+        <h2 class="text-lg font-black text-white">لینک اصلی</h2>
+        <p class="mt-2 text-sm leading-7 text-sky-50/80">این لینک را کپی کن و داخل اپ از گزینه افزودن یا Import وارد کن.</p>
+        {% if client.sub_link %}
+            <a href="{{ client.sub_link }}" target="_blank" rel="noopener" class="mt-4 block break-all rounded-2xl border border-sky-300/20 bg-slate-950/45 px-4 py-3 font-mono text-sm text-sky-100" dir="ltr">{{ client.sub_link }}</a>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+                <button type="button" data-copy-access-link data-copy-value="{{ client.sub_link }}" class="rounded-xl bg-sky-500 px-4 py-2 text-xs font-black text-slate-950">کپی لینک</button>
+                <span data-copy-status class="text-xs text-slate-400">آماده کپی</span>
+            </div>
+        {% else %}
+            <p class="mt-4 rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm leading-7 text-amber-100">لینک بعد از تایید پشتیبانی فعال می‌شود.</p>
+        {% endif %}
+    </div>
+
+    <div class="grid gap-3 sm:grid-cols-3">
+        <div class="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+            <span class="mb-3 grid h-8 w-8 place-items-center rounded-xl bg-sky-400 text-sm font-black text-slate-950">۱</span>
+            <h3 class="text-sm font-black text-white">کپی کن</h3>
+            <p class="mt-2 text-xs leading-6 text-slate-400">لینک اصلی را با دکمه بالا بردار.</p>
+        </div>
+        <div class="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+            <span class="mb-3 grid h-8 w-8 place-items-center rounded-xl bg-emerald-400 text-sm font-black text-slate-950">۲</span>
+            <h3 class="text-sm font-black text-white">اضافه کن</h3>
+            <p class="mt-2 text-xs leading-6 text-slate-400">در اپ، Add یا Import را بزن و لینک را وارد کن.</p>
+        </div>
+        <div class="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+            <span class="mb-3 grid h-8 w-8 place-items-center rounded-xl bg-amber-300 text-sm font-black text-slate-950">۳</span>
+            <h3 class="text-sm font-black text-white">متصل شو</h3>
+            <p class="mt-2 text-xs leading-6 text-slate-400">ذخیره کن و گزینه اتصال را بزن.</p>
+        </div>
+    </div>
+
+    <div class="rounded-3xl border border-white/10 bg-white/[0.045] p-4">
+        <div class="mb-3 flex items-center justify-between text-xs">
+            <span class="text-slate-500">مصرف</span>
+            <span class="font-bold text-slate-300" dir="ltr">{{ stats.used_traffic_bytes|percent_of:stats.total_traffic_bytes }}%</span>
+        </div>
+        <div class="h-2 overflow-hidden rounded-full bg-slate-800">
+            <div class="h-full rounded-full bg-gradient-to-r from-sky-400 to-emerald-400" style="width: {{ stats.used_traffic_bytes|percent_of:stats.total_traffic_bytes }}%"></div>
+        </div>
+        <p class="mt-2 text-xs text-slate-500" dir="ltr">{{ stats.remaining_traffic_bytes|traffic_gb }} GB باقی‌مانده</p>
+    </div>
+
+    {% if not stats.panel_available %}
+        <div class="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-4 text-sm text-amber-100">
+            ارتباط لحظه‌ای برقرار نشد. آخرین اطلاعات ذخیره‌شده نمایش داده شده است.
+        </div>
+    {% endif %}
+
+    <details class="group rounded-3xl border border-white/10 bg-white/[0.045] p-4">
+        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-black text-white [&::-webkit-details-marker]:hidden">
+            <span>جزئیات مصرف، انقضا و لینک جایگزین</span>
+            <span class="text-xs text-slate-500 group-open:hidden">نمایش</span>
+            <span class="hidden text-xs text-slate-500 group-open:inline">بستن</span>
+        </summary>
+        <div class="mt-4 space-y-4">
+            <div class="grid grid-cols-2 gap-2 lg:grid-cols-4">
+                <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                    <p class="text-xs text-slate-500">حجم کل</p>
+                    <p class="mt-1 text-sm font-black text-white" dir="ltr">{{ stats.total_traffic_bytes|traffic_gb }} GB</p>
+                </div>
+                <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                    <p class="text-xs text-slate-500">مصرف‌شده</p>
+                    <p class="mt-1 text-sm font-black text-sky-200" dir="ltr">{{ stats.used_traffic_bytes|traffic_gb }} GB</p>
+                </div>
+                <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                    <p class="text-xs text-slate-500">باقی‌مانده</p>
+                    <p class="mt-1 text-sm font-black text-emerald-200" dir="ltr">{{ stats.remaining_traffic_bytes|traffic_gb }} GB</p>
+                </div>
+                <div class="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+                    <p class="text-xs text-slate-500">انقضا</p>
+                    <p class="mt-1 text-xs font-bold text-white">
+                        {% if stats.expiry_at %}{{ stats.expiry_at|jalali_datetime }}{% else %}بعد از فعال‌سازی{% endif %}
+                    </p>
+                </div>
+            </div>
+
+            {% include 'includes/config_links.html' with sub_link=client.sub_link direct_link=client.direct_link %}
+
+            <div class="h-64 rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+                <canvas
+                    id="usage-chart"
+                    data-usage-url="{% url 'config_usage' tracking_code=order.order_tracking_code config_id=client.public_id %}"
+                    aria-label="Usage chart"
+                ></canvas>
+            </div>
+        </div>
+    </details>
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+    document.addEventListener("DOMContentLoaded", async function () {
+        const canvas = document.getElementById("usage-chart");
+        if (!canvas || !window.Chart) return;
+
+        try {
+            const response = await fetch(canvas.dataset.usageUrl, {
+                headers: { "X-Requested-With": "XMLHttpRequest" },
+            });
+            const payload = await response.json();
+            if (!payload.ok) return;
+
+            new Chart(canvas, {
+                type: "line",
+                data: {
+                    labels: payload.usage.labels,
+                    datasets: [
+                        {
+                            label: "مصرف‌شده (GB)",
+                            data: payload.usage.used_gb,
+                            borderColor: "#38bdf8",
+                            backgroundColor: "rgba(56,189,248,0.14)",
+                            tension: 0.35,
+                            fill: true,
+                        },
+                        {
+                            label: "باقی‌مانده (GB)",
+                            data: payload.usage.remaining_gb,
+                            borderColor: "#34d399",
+                            backgroundColor: "rgba(52,211,153,0.10)",
+                            tension: 0.35,
+                            fill: true,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { intersect: false, mode: "index" },
+                    plugins: { legend: { labels: { color: "#cbd5e1", usePointStyle: true } } },
+                    scales: {
+                        x: { ticks: { color: "#94a3b8" }, grid: { color: "rgba(148,163,184,0.12)" } },
+                        y: { ticks: { color: "#94a3b8" }, grid: { color: "rgba(148,163,184,0.12)" } },
+                    },
+                },
+            });
+        } catch (error) {
+            return;
+        }
+    });
+</script>
+{% endblock %}

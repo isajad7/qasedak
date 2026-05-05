@@ -1,0 +1,49 @@
+@import url("/static/css/vazirmatn.css");
+
+html[dir="rtl"],
+html[dir="rtl"] body,
+html[lang^="fa"],
+html[lang^="fa"] body {
+    font-family: "Vazirmatn", "Source Sans Pro", system-ui, sans-serif;
+}
+
+html[dir="rtl"] .ms-auto {
+    margin-left: 0 !important;
+    margin-right: auto !important;
+}
+
+html[dir="rtl"] .me-2 {
+    margin-right: 0 !important;
+    margin-left: .5rem !important;
+}
+
+html[dir="rtl"] .dropdown-menu-end {
+    right: auto;
+    left: 0;
+}
+
+.admin-metric-row {
+    margin-bottom: 1rem;
+}
+
+.admin-metric-card {
+    border-radius: .5rem;
+    min-height: 126px;
+    overflow: hidden;
+}
+
+.admin-metric-card .inner h3 {
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1.1;
+}
+
+.admin-metric-card .inner p {
+    font-size: .95rem;
+    margin-bottom: 0;
+}
+
+html[dir="rtl"] .admin-metric-card .icon {
+    right: auto;
+    left: 15px;
+}

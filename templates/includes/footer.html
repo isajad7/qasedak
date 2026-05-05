@@ -1,0 +1,68 @@
+<footer class="border-t border-white/10 bg-[#060b16]/80">
+    <div class="mx-auto max-w-6xl px-4 py-8 pb-28 sm:px-6 sm:py-10">
+        <div class="grid grid-cols-1 gap-8 md:grid-cols-3">
+            <section class="md:col-span-1">
+                <a href="{% url 'home' %}" class="flex items-center gap-3">
+                    <span class="grid h-10 w-10 place-items-center rounded-xl border border-cyan-400/20 bg-cyan-400/10 text-cyan-300">
+                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <path d="M12 3.5 19 6v5.2c0 4.3-2.8 7.9-7 9.3-4.2-1.4-7-5-7-9.3V6l7-2.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                            <path d="m9.4 12 1.8 1.8 3.7-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </span>
+                    <span>
+                        <span class="block text-lg font-black text-white">{{ store.name|default:"آزادنت" }}</span>
+                        <span class="block text-xs text-slate-500" dir="ltr">{{ store.english_name|default:"AzadNet" }}</span>
+                    </span>
+                </a>
+                <p class="mt-4 text-sm leading-7 text-slate-400">
+                    پلن مناسب را انتخاب کن، پرداخت را ثبت کن و بعد از تایید، لینک‌های دسترسی آماده می‌شوند.
+                </p>
+            </section>
+
+            <section>
+                <h2 class="text-sm font-bold text-white">دسترسی سریع</h2>
+                <ul class="mt-4 space-y-3 text-sm text-slate-400">
+                    <li><a href="{% url 'home' %}" class="transition-colors hover:text-white">خرید و صفحه اصلی</a></li>
+                    {% if current_customer_has_orders %}
+                        <li><a href="{% url 'dashboard' %}" class="transition-colors hover:text-white">داشبورد</a></li>
+                    {% endif %}
+                    {% if store.telegram_channel %}
+                        <li><a href="{{ store.telegram_channel }}" target="_blank" rel="noopener" class="transition-colors hover:text-white">کانال تلگرام</a></li>
+                    {% endif %}
+                </ul>
+            </section>
+
+            <section>
+                <h2 class="text-sm font-bold text-white">ارتباط با ما</h2>
+                <div class="mt-4 space-y-3 text-sm text-slate-400">
+                    {% if store.telegram_support %}
+                        <a href="{{ store.telegram_support_url }}" target="_blank" rel="noopener" class="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3 transition-colors hover:border-indigo-500/40 hover:bg-white/10 hover:text-white">
+                            <span>پشتیبانی تلگرام</span>
+                            <span dir="ltr">@{{ store.telegram_support|cut:'@' }}</span>
+                        </a>
+                    {% endif %}
+                    {% if store.bale_support %}
+                        <a href="{{ store.bale_support_url }}" target="_blank" rel="noopener" class="flex items-center justify-between gap-3 rounded-xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-emerald-100 transition-colors hover:border-emerald-400/40 hover:bg-emerald-500/20">
+                            <span>پشتیبانی بله</span>
+                            <span dir="ltr">@{{ store.bale_support_handle }}</span>
+                        </a>
+                    {% endif %}
+                    {% if store.telegram_channel %}
+                        <a href="{{ store.telegram_channel }}" target="_blank" rel="noopener" class="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3 transition-colors hover:border-cyan-400/40 hover:bg-white/10 hover:text-white">
+                            <span>کانال اطلاع‌رسانی</span>
+                            <span dir="ltr">Telegram</span>
+                        </a>
+                    {% endif %}
+                    {% if not store.telegram_support and not store.bale_support and not store.telegram_channel %}
+                        <p class="rounded-xl border border-white/10 bg-white/5 px-4 py-3">راه ارتباطی هنوز ثبت نشده است.</p>
+                    {% endif %}
+                </div>
+            </section>
+        </div>
+
+        <div class="mt-8 flex flex-col items-center justify-between gap-3 border-t border-white/10 pt-5 text-center text-xs text-slate-500 sm:flex-row">
+            <p>© {% now "Y" %} {{ store.name|default:"آزادنت" }}. همه حقوق محفوظ است.</p>
+            <p>تحویل پس از تایید پرداخت انجام می‌شود.</p>
+        </div>
+    </div>
+</footer>

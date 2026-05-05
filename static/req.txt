@@ -1,0 +1,15 @@
+asgiref==3.11.1
+certifi==2026.4.22
+charset-normalizer==3.4.7
+diff-match-patch==20241021
+Django==6.0.4
+django-import-export==4.4.0
+django-jazzmin==3.0.4
+et_xmlfile==2.0.0
+idna==3.13
+openpyxl==3.1.5
+pillow==12.2.0
+requests==2.33.1
+sqlparse==0.5.5
+tablib==3.9.0
+urllib3==2.6.3

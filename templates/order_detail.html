@@ -1,0 +1,76 @@
+{% extends 'base.html' %}
+{% load store_formatters %}
+
+{% block title %}جزئیات سفارش{% endblock %}
+
+{% block content %}
+<section class="mb-8 rounded-3xl border border-white/10 bg-white/5 p-6 sm:p-8">
+    <div class="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+            <a href="{% url 'dashboard' %}" class="mb-4 inline-flex rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-slate-300 transition-colors hover:bg-white/10 hover:text-white">
+                بازگشت به داشبورد
+            </a>
+            <h1 class="text-2xl sm:text-3xl font-black text-white">جزئیات سفارش</h1>
+            <p class="mt-3 break-all font-mono text-sm text-indigo-300" dir="ltr">{{ order.order_tracking_code }}</p>
+        </div>
+        {% if order.status == 'completed' %}
+            <span class="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm font-bold text-emerald-300">فعال شده</span>
+        {% else %}
+            <span class="rounded-full border border-yellow-400/20 bg-yellow-400/10 px-4 py-2 text-sm font-bold text-yellow-300">در انتظار فعال‌سازی</span>
+        {% endif %}
+    </div>
+</section>
+
+<section class="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-5">
+        <p class="text-xs text-slate-500">پلن</p>
+        <p class="mt-2 font-black text-white">{{ order.plan.name }}</p>
+    </div>
+    <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-5">
+        <p class="text-xs text-slate-500">وضعیت سفارش</p>
+        <p class="mt-2 font-black text-white">{{ order.get_status_display }}</p>
+    </div>
+    <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-5">
+        <p class="text-xs text-slate-500">وضعیت تایید</p>
+        <p class="mt-2 font-black text-white">{{ order.get_verification_status_display }}</p>
+    </div>
+    <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-5">
+        <p class="text-xs text-slate-500">مبلغ نهایی</p>
+        <p class="mt-2 font-black text-white" dir="ltr">{{ order.amount|commafy }} {{ order.currency|currency_label }}</p>
+    </div>
+</section>
+
+<section class="mb-8 rounded-3xl border border-yellow-400/20 bg-yellow-400/10 p-6">
+    <h2 class="text-lg font-black text-white">وضعیت فعال‌سازی</h2>
+    {% if order.status == 'completed' %}
+        <p class="mt-2 text-sm leading-7 text-slate-300">سفارش شما تایید شده و لینک‌ها فعال هستند.</p>
+    {% else %}
+        <p class="mt-2 text-sm leading-7 text-slate-300">لینک‌ها ساخته شده‌اند، اما تا زمان تایید پشتیبانی قابل استفاده نیستند.</p>
+    {% endif %}
+</section>
+
+<section class="space-y-5">
+    <h2 class="text-xl font-black text-white">دسترسی‌ها</h2>
+    {% for client in access_clients %}
+        <article class="rounded-3xl border border-white/10 bg-white/5 p-6">
+            <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                    <h3 class="break-all font-mono text-lg font-black text-white" dir="ltr">{{ client.xui_email|default:client.username }}</h3>
+                    <p class="mt-1 text-sm text-slate-400">{{ client.get_status_display }}</p>
+                </div>
+                {% if client.status == 'active' %}
+                    <span class="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-bold text-emerald-300">فعال</span>
+                {% else %}
+                    <span class="rounded-full border border-yellow-400/20 bg-yellow-400/10 px-3 py-1 text-xs font-bold text-yellow-300">در انتظار تایید</span>
+                {% endif %}
+            </div>
+
+            {% include 'includes/config_links.html' with sub_link=client.sub_link direct_link=client.direct_link %}
+        </article>
+    {% empty %}
+        <div class="rounded-3xl border border-white/10 bg-white/5 p-8 text-center text-sm text-slate-400">
+            هنوز موردی برای این سفارش ثبت نشده است.
+        </div>
+    {% endfor %}
+</section>
+{% endblock %}

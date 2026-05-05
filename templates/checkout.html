@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<section class="max-w-2xl mx-auto rounded-3xl border border-white/10 bg-white/5 p-6 sm:p-8 text-center">
+    <h1 class="text-2xl font-black text-white mb-3">پرداخت داخل صفحه اصلی انجام می‌شود</h1>
+    <p class="text-slate-400 leading-7 mb-6">
+        برای انتخاب پلن و ثبت پرداخت، از صفحه اصلی استفاده کن.
+    </p>
+    <a href="{% url 'home' %}#plans" class="inline-flex rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-indigo-500">
+        برگشت به پلن‌ها
+    </a>
+</section>
+{% endblock %}

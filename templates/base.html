@@ -1,0 +1,61 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ store.name|default:"آزادنت" }}{% endblock %}</title>
+    <link href="{% static 'css/output.css' %}?v={{ static_version }}" rel="stylesheet">
+    <link href="{% static 'css/vazirmatn.css' %}?v={{ static_version }}" rel="stylesheet">
+    <style>
+        body { font-family: 'Vazirmatn', sans-serif; }
+        .site-bg { background: linear-gradient(180deg, #07111f 0%, #0d1726 48%, #060b14 100%); }
+    </style>
+</head>
+<body class="site-bg text-slate-300 min-h-screen flex flex-col overflow-x-hidden">
+    {% include 'includes/header.html' %}
+
+    <main id="page-content" class="z-10 mx-auto w-full max-w-6xl flex-grow px-4 pb-28 pt-6 sm:px-6 sm:pb-10 sm:pt-8">
+        {% if messages %}
+            <div class="pointer-events-none fixed inset-x-0 top-20 z-[60] mx-auto w-full max-w-md px-4">
+                <div class="space-y-2">
+                    {% for message in messages %}
+                        <div class="pointer-events-auto rounded-2xl border px-4 py-3 text-sm font-bold shadow-[0_18px_50px_rgba(0,0,0,0.25)] backdrop-blur-xl {% if message.tags == 'error' %}border-red-400/20 bg-red-400/15 text-red-100{% else %}border-emerald-400/20 bg-emerald-400/15 text-emerald-100{% endif %}">
+                            {{ message }}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+        {% endif %}
+        {% block content %}{% endblock %}
+    </main>
+
+    {% include 'includes/footer.html' %}
+    <script>
+        document.addEventListener("click", function (event) {
+            const link = event.target.closest("[data-copy-access-link]");
+            if (!link) return;
+            event.preventDefault();
+
+            const value = link.dataset.copyValue || link.getAttribute("href") || "";
+            if (!value || !navigator.clipboard) return;
+
+            navigator.clipboard.writeText(value).then(() => {
+                const wrapper = link.closest("[data-copy-scope]") || link.closest(".space-y-3") || document;
+                const status = wrapper.querySelector("[data-copy-status]");
+                if (!status) return;
+
+                const previousText = status.textContent;
+                status.textContent = "کپی شد";
+                status.classList.remove("text-slate-500");
+                status.classList.add("text-emerald-300");
+                window.setTimeout(() => {
+                    status.textContent = previousText || "کلیک برای کپی";
+                    status.classList.remove("text-emerald-300");
+                    status.classList.add("text-slate-500");
+                }, 1600);
+            }).catch(() => {});
+        });
+    </script>
+</body>
+</html>

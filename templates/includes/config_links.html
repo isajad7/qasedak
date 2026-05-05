@@ -1,0 +1,34 @@
+<div class="space-y-3">
+    <div>
+        <label class="mb-2 block text-xs font-bold text-slate-500">لینک اصلی</label>
+        {% if sub_link %}
+            <a
+                href="{{ sub_link }}"
+                target="_blank"
+                rel="noopener"
+                class="block w-full break-all rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3 font-mono text-xs text-sky-100 transition-colors hover:border-sky-400/40 hover:bg-sky-400/10 sm:text-sm"
+                dir="ltr"
+            >{{ sub_link }}</a>
+        {% else %}
+            <div class="rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3 text-sm text-slate-500">هنوز آماده نیست</div>
+        {% endif %}
+    </div>
+
+    <div>
+        <div class="mb-2 flex items-center justify-between gap-3">
+            <label class="block text-xs font-bold text-slate-500">لینک جایگزین</label>
+            <span data-copy-status class="text-xs text-slate-500">کلیک برای کپی</span>
+        </div>
+        {% if direct_link %}
+            <a
+                href="{{ direct_link }}"
+                data-copy-access-link
+                data-copy-value="{{ direct_link }}"
+                class="block max-h-32 w-full overflow-y-auto break-all rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3 font-mono text-xs text-emerald-100 transition-colors hover:border-emerald-400/40 hover:bg-emerald-400/10 sm:text-sm"
+                dir="ltr"
+            >{{ direct_link }}</a>
+        {% else %}
+            <div class="rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3 text-sm text-slate-500">هنوز آماده نیست</div>
+        {% endif %}
+    </div>
+</div>
