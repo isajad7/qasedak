@@ -4,6 +4,19 @@
 {% block content %}
     {% admin_dashboard_stats as dashboard_stats %}
     <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
+                <div>
+                    <h3 class="h5 mb-1">گزارش دریافتی کارت‌ها</h3>
+                    <p class="mb-0 text-muted">جمع رسیدهای ثبت شده برای هر شماره کارت را با فیلتر بازه زمانی ببین.</p>
+                </div>
+                <a href="{% url 'admin_card_receipts_report' %}" class="btn btn-primary mt-3 mt-sm-0">
+                    مشاهده گزارش
+                </a>
+            </div>
+        </div>
+    </div>
+    <div class="col-12">
         <div class="row admin-metric-row">
             {% for stat in dashboard_stats %}
                 <div class="col-xl-3 col-md-6 col-12">

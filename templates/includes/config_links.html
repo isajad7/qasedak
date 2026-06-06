@@ -1,34 +1,51 @@
-<div class="space-y-3">
-    <div>
-        <label class="mb-2 block text-xs font-bold text-slate-500">لینک اصلی</label>
-        {% if sub_link %}
-            <a
-                href="{{ sub_link }}"
-                target="_blank"
-                rel="noopener"
-                class="block w-full break-all rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3 font-mono text-xs text-sky-100 transition-colors hover:border-sky-400/40 hover:bg-sky-400/10 sm:text-sm"
-                dir="ltr"
-            >{{ sub_link }}</a>
+<div class="grid gap-3 lg:grid-cols-[1.08fr_0.92fr]">
+    <div class="rounded-2xl border border-emerald-300/25 bg-emerald-400/10 p-4 transition-all duration-300 hover:-translate-y-0.5 hover:border-emerald-200/50 hover:bg-emerald-400/15" data-copy-scope>
+        <div class="mb-4 flex items-start justify-between gap-3">
+            <div class="min-w-0">
+                <p class="text-xs font-black text-emerald-200">پیشنهادی</p>
+                <h4 class="mt-1 text-base font-black text-white">کانفیگ مستقیم</h4>
+                <p class="mt-1 text-xs leading-6 text-emerald-50/75">برای بیشتر اپ‌ها همین گزینه را کپی کن.</p>
+            </div>
+            <span data-copy-status class="shrink-0 rounded-full border border-white/10 bg-slate-950/35 px-2.5 py-1 text-[11px] font-bold text-emerald-100">آماده کپی</span>
+        </div>
+
+        {% if direct_link %}
+            <button
+                type="button"
+                data-copy-access-link
+                data-copy-value="{{ direct_link }}"
+                data-copy-success="کانفیگ کپی شد"
+                class="inline-flex w-full items-center justify-center rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-black text-slate-950 shadow-[0_16px_38px_rgba(52,211,153,0.22)] transition-all duration-300 hover:-translate-y-0.5 hover:bg-emerald-300 focus:outline-none focus:ring-2 focus:ring-emerald-100/60"
+            >
+                <span data-copy-button-text>کلیک برای کپی کانفیگ</span>
+            </button>
         {% else %}
-            <div class="rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3 text-sm text-slate-500">هنوز آماده نیست</div>
+            <div class="rounded-2xl border border-white/10 bg-slate-950/35 px-4 py-3 text-sm font-bold text-emerald-50/70">در حال آماده‌سازی</div>
         {% endif %}
     </div>
 
-    <div>
-        <div class="mb-2 flex items-center justify-between gap-3">
-            <label class="block text-xs font-bold text-slate-500">لینک جایگزین</label>
-            <span data-copy-status class="text-xs text-slate-500">کلیک برای کپی</span>
+    <div class="rounded-2xl border border-sky-300/20 bg-sky-400/10 p-4 transition-all duration-300 hover:-translate-y-0.5 hover:border-sky-200/45 hover:bg-sky-400/15" data-copy-scope>
+        <div class="mb-4 flex items-start justify-between gap-3">
+            <div class="min-w-0">
+                <p class="text-xs font-black text-sky-200">گزینه دوم</p>
+                <h4 class="mt-1 text-base font-black text-white">لینک اشتراک</h4>
+                <p class="mt-1 text-xs leading-6 text-sky-50/75">اگر اپ لینک اشتراک خواست، این را کپی کن.</p>
+            </div>
+            <span data-copy-status class="shrink-0 rounded-full border border-white/10 bg-slate-950/35 px-2.5 py-1 text-[11px] font-bold text-sky-100">آماده کپی</span>
         </div>
-        {% if direct_link %}
-            <a
-                href="{{ direct_link }}"
+
+        {% if sub_link %}
+            <button
+                type="button"
                 data-copy-access-link
-                data-copy-value="{{ direct_link }}"
-                class="block max-h-32 w-full overflow-y-auto break-all rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3 font-mono text-xs text-emerald-100 transition-colors hover:border-emerald-400/40 hover:bg-emerald-400/10 sm:text-sm"
-                dir="ltr"
-            >{{ direct_link }}</a>
+                data-copy-value="{{ sub_link }}"
+                data-copy-success="لینک اشتراک کپی شد"
+                class="inline-flex w-full items-center justify-center rounded-2xl border border-sky-200/25 bg-slate-950/35 px-4 py-3 text-sm font-black text-sky-50 transition-all duration-300 hover:-translate-y-0.5 hover:border-sky-100/45 hover:bg-sky-400/20 focus:outline-none focus:ring-2 focus:ring-sky-100/40"
+            >
+                <span data-copy-button-text>کلیک برای کپی لینک</span>
+            </button>
         {% else %}
-            <div class="rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3 text-sm text-slate-500">هنوز آماده نیست</div>
+            <div class="rounded-2xl border border-white/10 bg-slate-950/35 px-4 py-3 text-sm font-bold text-sky-50/60">در حال آماده‌سازی</div>
         {% endif %}
     </div>
 </div>

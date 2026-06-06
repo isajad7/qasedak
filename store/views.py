@@ -1,5 +1,6 @@
 import logging
 import re
+from datetime import timedelta
 
 from django.contrib import messages
 from django.conf import settings
@@ -12,21 +13,41 @@ from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
-from django.views.decorators.http import require_GET
+from django.views.decorators.http import require_GET, require_POST
 
 from .models import (
     CustomerReward,
     DiscountCode,
-    Inbound,
     Order,
     Plan,
     Store,
+    SupportConversation,
+    SupportMessage,
+    VPNClient,
     parse_payment_time,
 )
 from .order_services import (
+    CUSTOM_VOLUME_DEFAULT_GB,
+    CUSTOM_VOLUME_DURATION_DAYS,
+    CUSTOM_VOLUME_MAX_GB,
+    CUSTOM_VOLUME_MIN_GB,
+    OPERATOR_NO_PLANS_MESSAGE,
+    calculate_custom_volume_price,
     calculate_percentage_discount,
     create_manual_payment_order,
+    create_renewal_payment_order,
+    custom_volume_is_available,
+    format_custom_volume_label,
     get_customer_wholesale_discount_percent,
+    get_custom_volume_currency,
+    get_active_operator,
+    get_active_operators,
+    get_available_inbound as service_get_available_inbound,
+    get_store_plans as service_get_store_plans,
+    normalize_custom_volume_gb,
+    operator_has_available_plans,
+    sales_mode_requires_operator,
+    store_custom_volume_price_per_gb,
     validate_order_quantity,
 )
 from .jalali import TEHRAN_TZ, format_jalali_chart_label
@@ -34,6 +55,12 @@ from .referrals import (
     assign_referrer,
     build_referral_link,
     get_referral_code_from_request,
+)
+from .referral_services import (
+    apply_referral_code,
+    get_active_referral_configs,
+    get_referral_summary,
+    redeem_referral_rewards,
 )
 from .xui_api import sync_vpn_client_stats
 
@@ -43,6 +70,9 @@ TRACKING_COOKIE_SALT = "order-lookup"
 LEGACY_TRACKING_COOKIE_NAME = "vpn_tracking_code"
 LEGACY_TRACKING_COOKIE_SALT = "vpn-config-lookup"
 TRACKING_CODE_RE = re.compile(r"^([A-Za-z0-9]{8}|[0-9a-fA-F]{32}|[0-9a-fA-F-]{36})$")
+ORDER_TRACKING_RECOVERY_WINDOW = timedelta(minutes=15)
+SUPPORT_MESSAGE_MAX_LENGTH = 2000
+SUPPORT_CONTACT_MAX_LENGTH = 120
 logger = logging.getLogger(__name__)
 
 
@@ -50,11 +80,36 @@ def get_current_store():
     return Store.objects.filter(is_active=True).first() or Store.objects.first()
 
 
-def get_store_plans(store):
-    plans = Plan.objects.filter(is_active=True, is_public=True)
-    if store:
-        plans = plans.filter(models.Q(store=store) | models.Q(store__isnull=True))
-    return plans
+def get_store_plans(store, operator=None):
+    return service_get_store_plans(store, public_only=True, operator=operator)
+
+
+def get_custom_volume_offer(store, plans=None):
+    if not custom_volume_is_available(store):
+        return None
+    price_per_gb = store_custom_volume_price_per_gb(store)
+    default_volume = CUSTOM_VOLUME_DEFAULT_GB
+    currency = get_custom_volume_currency(store)
+    return {
+        "price_per_gb": price_per_gb,
+        "price_per_gb_raw": format(price_per_gb.normalize(), "f"),
+        "default_volume": format(default_volume.normalize(), "f"),
+        "default_volume_label": format_custom_volume_label(default_volume),
+        "default_price": calculate_custom_volume_price(default_volume, price_per_gb),
+        "duration_days": CUSTOM_VOLUME_DURATION_DAYS,
+        "currency": currency,
+        "min_gb": format(CUSTOM_VOLUME_MIN_GB.normalize(), "f"),
+        "max_gb": format(CUSTOM_VOLUME_MAX_GB.normalize(), "f"),
+        "card_count": 1,
+    }
+
+
+def plan_card_count(plans, custom_volume_offer=None):
+    try:
+        count = plans.count()
+    except (AttributeError, TypeError):
+        count = len(plans or [])
+    return count + (1 if custom_volume_offer else 0)
 
 
 def current_payment_time_value():
@@ -62,20 +117,7 @@ def current_payment_time_value():
 
 
 def get_available_inbound(store):
-    inbound_qs = Inbound.objects.filter(
-        is_active=True,
-        panel__is_active=True,
-    ).select_related("panel")
-
-    if store:
-        inbound_qs = inbound_qs.filter(
-            models.Q(panel__store=store) | models.Q(panel__store__isnull=True)
-        )
-
-    for inbound in inbound_qs.order_by("current_users", "id"):
-        if inbound.has_capacity:
-            return inbound
-    return None
+    return service_get_available_inbound(store)
 
 
 def get_current_customer(request):
@@ -94,7 +136,7 @@ def apply_referral_from_request(request):
     customer = get_current_customer(request)
     referral_code = get_referral_code_from_request(request)
     if customer and referral_code:
-        assign_referrer(customer, referral_code)
+        apply_referral_code(customer, referral_code)
     return referral_code
 
 
@@ -131,7 +173,7 @@ def get_order_by_tracking_code(tracking_code):
     if not normalized:
         return None
     return (
-        Order.objects.select_related("store", "plan")
+        Order.objects.select_related("store", "plan", "operator", "customer")
         .filter(order_tracking_code=normalized)
         .first()
     )
@@ -170,6 +212,36 @@ def get_tracking_code_from_cookie(request):
         except (KeyError, BadSignature):
             continue
     return ""
+
+
+def recover_customer_from_tracked_order(request, order):
+    if not order:
+        return None
+
+    customer = get_current_customer(request)
+    if not order.customer_id or (customer and order.customer_id == customer.pk):
+        return order
+
+    if customer_has_orders(customer):
+        return None
+
+    tracking_cookie = get_tracking_code_from_cookie(request)
+    source = str((order.metadata or {}).get("source") or "")
+    is_recent_web_order = (
+        source.startswith("web_")
+        and order.created_at >= timezone.now() - ORDER_TRACKING_RECOVERY_WINDOW
+    )
+    if tracking_cookie != normalize_tracking_code(order.order_tracking_code) and not is_recent_web_order:
+        return None
+
+    request.customer = order.customer
+    logger.info(
+        "Recovered customer cookie from order tracking code order=%s previous_customer=%s recovered_customer=%s",
+        order.pk,
+        customer.pk if customer else None,
+        order.customer_id,
+    )
+    return order
 
 
 def validate_reward_discount_owner(discount, customer, *, lock=False):
@@ -252,6 +324,9 @@ def build_home_context(
     *,
     store,
     plans,
+    operators=None,
+    selected_operator=None,
+    operator_error="",
     selected_plan_id=None,
     order=None,
     checkout_error="",
@@ -259,6 +334,7 @@ def build_home_context(
     payment_receipt_text="",
     discount_code="",
     quantity="1",
+    custom_volume_gb="",
     referral_code="",
     order_update_error="",
     order_update_saved=False,
@@ -266,9 +342,26 @@ def build_home_context(
 ):
     if not payment_time:
         payment_time = current_payment_time_value()
+    operator_based = sales_mode_requires_operator(store)
+    operators = operators if operators is not None else get_active_operators(store) if operator_based else []
+    custom_volume_offer = (
+        get_custom_volume_offer(store, plans)
+        if not operator_based or selected_operator
+        else None
+    )
+    if custom_volume_offer and not custom_volume_gb:
+        custom_volume_gb = custom_volume_offer["default_volume"]
     return {
         "store": store,
         "plans": plans,
+        "operators": operators,
+        "sales_mode": getattr(store, "sales_mode", "tunnel") if store else "tunnel",
+        "sales_mode_operator_based": operator_based,
+        "selected_operator": selected_operator,
+        "selected_operator_id": str(selected_operator.pk if selected_operator else ""),
+        "operator_error": operator_error,
+        "custom_volume_offer": custom_volume_offer,
+        "plan_card_count": plan_card_count(plans, custom_volume_offer),
         "selected_plan_id": str(selected_plan_id or ""),
         "order": order,
         "order_clients": order.get_vpn_clients() if order else [],
@@ -277,6 +370,7 @@ def build_home_context(
         "payment_receipt_text": payment_receipt_text,
         "discount_code": discount_code,
         "quantity": quantity or "1",
+        "custom_volume_gb": custom_volume_gb,
         "referral_code": referral_code,
         "order_update_error": order_update_error,
         "order_update_saved": order_update_saved,
@@ -284,23 +378,39 @@ def build_home_context(
     }
 
 
-def create_order_from_checkout(request, *, store, plan, inbound, payment_time, discount_code=""):
-    sender_card_name = request.POST.get("sender_card_name", "").strip()
+def create_order_from_checkout(
+    request,
+    *,
+    store,
+    inbound,
+    payment_time,
+    plan=None,
+    operator=None,
+    custom_volume_gb=None,
+    discount_code="",
+):
+    sender_card_name = request.POST.get("sender_card_name", "").strip() or "رسید تصویری"
     try:
         result = create_manual_payment_order(
             store=store,
             customer=get_current_customer(request),
             plan=plan,
+            operator=operator,
+            custom_volume_gb=custom_volume_gb,
             inbound=inbound,
             sender_card_name=sender_card_name,
             sender_card_last4="",
             payment_time=payment_time,
             receipt_image=request.FILES.get("payment_receipt_image"),
-            receipt_text=request.POST.get("payment_receipt_text", "").strip(),
+            receipt_text="",
             require_receipt=True,
+            require_receipt_image=True,
             discount_code=discount_code,
-            quantity=request.POST.get("quantity", "1"),
-            metadata={"source": "web_checkout"},
+            quantity="1" if custom_volume_gb not in (None, "") else request.POST.get("quantity", "1"),
+            metadata={
+                "source": "web_checkout",
+                "payment_capture_mode": "receipt_image_only",
+            },
         )
     except ValidationError as exc:
         return None, exc.messages[0]
@@ -312,7 +422,13 @@ def create_order_from_checkout(request, *, store, plan, inbound, payment_time, d
 def home(request):
     referral_code = apply_referral_from_request(request)
     store = get_current_store()
-    plans = get_store_plans(store)
+    operator_based = sales_mode_requires_operator(store)
+    operators = get_active_operators(store) if operator_based else []
+    selected_operator_id = request.GET.get("operator", "")
+    selected_operator = get_active_operator(store, selected_operator_id) if operator_based else None
+    plans = get_store_plans(store, selected_operator if operator_based else None)
+    if operator_based and not selected_operator:
+        plans = Plan.objects.none()
     order = None
     scroll_to = ""
     selected_plan_id = request.GET.get("plan", "")
@@ -320,24 +436,98 @@ def home(request):
     tracking_code = request.GET.get("order")
     order_update_saved = request.GET.get("updated") == "1"
     if tracking_code:
-        order_qs = Order.objects.filter(order_tracking_code=tracking_code)
-        customer = get_current_customer(request)
-        if customer:
-            order_qs = order_qs.filter(customer=customer)
-        order = order_qs.first()
+        order = recover_customer_from_tracked_order(
+            request,
+            get_order_by_tracking_code(tracking_code),
+        )
         if order:
             scroll_to = "confirmation"
 
     if request.method == "POST":
+        selected_operator_id = request.POST.get("operator_id", "")
+        selected_operator = get_active_operator(store, selected_operator_id) if operator_based else None
+        plans = get_store_plans(store, selected_operator if operator_based else None)
+        if operator_based and not selected_operator:
+            plans = Plan.objects.none()
         selected_plan_id = request.POST.get("plan_id", "")
-        payment_time_value = request.POST.get("payment_time", "")
-        payment_receipt_text_value = request.POST.get("payment_receipt_text", "").strip()
+        payment_time_value = current_payment_time_value()
+        payment_receipt_text_value = ""
         discount_code_value = request.POST.get("discount_code", "")
         quantity_value = request.POST.get("quantity", "1")
+        custom_volume_selected = request.POST.get("custom_volume_selected") == "1"
+        custom_volume_value = request.POST.get("custom_volume_gb", "").strip()
         referral_code_value = request.POST.get("referral_code", "")
         if referral_code_value:
             assign_referrer(get_current_customer(request), referral_code_value)
-        plan = get_object_or_404(plans, id=selected_plan_id)
+        if operator_based and not selected_operator:
+            return render(
+                request,
+                "home.html",
+                build_home_context(
+                    store=store,
+                    plans=plans,
+                    operators=operators,
+                    selected_operator=selected_operator,
+                    selected_plan_id=selected_plan_id,
+                    checkout_error="برای خرید ابتدا اپراتور اینترنت خود را انتخاب کن.",
+                    payment_time=payment_time_value,
+                    payment_receipt_text=payment_receipt_text_value,
+                    discount_code=discount_code_value,
+                    quantity=quantity_value,
+                    custom_volume_gb=custom_volume_value,
+                    referral_code=referral_code_value or referral_code,
+                    scroll_to="plans",
+                ),
+            )
+        if operator_based and selected_operator and not operator_has_available_plans(store, selected_operator):
+            return render(
+                request,
+                "home.html",
+                build_home_context(
+                    store=store,
+                    plans=plans,
+                    operators=operators,
+                    selected_operator=selected_operator,
+                    selected_plan_id=selected_plan_id,
+                    checkout_error=OPERATOR_NO_PLANS_MESSAGE,
+                    payment_time=payment_time_value,
+                    payment_receipt_text=payment_receipt_text_value,
+                    discount_code=discount_code_value,
+                    quantity=quantity_value,
+                    custom_volume_gb=custom_volume_value,
+                    referral_code=referral_code_value or referral_code,
+                    scroll_to="plans",
+                ),
+            )
+        plan = None
+        custom_volume_gb = None
+        if custom_volume_selected:
+            selected_plan_id = "custom"
+            quantity_value = "1"
+            try:
+                custom_volume_gb = normalize_custom_volume_gb(custom_volume_value)
+            except ValidationError as exc:
+                return render(
+                    request,
+                    "home.html",
+                    build_home_context(
+                        store=store,
+                        plans=plans,
+                        operators=operators,
+                        selected_operator=selected_operator,
+                        selected_plan_id=selected_plan_id,
+                        checkout_error=exc.messages[0],
+                        payment_time=payment_time_value,
+                        payment_receipt_text=payment_receipt_text_value,
+                        discount_code=discount_code_value,
+                        quantity=quantity_value,
+                        custom_volume_gb=custom_volume_value,
+                        referral_code=referral_code_value or referral_code,
+                        scroll_to="checkout",
+                    ),
+                )
+        else:
+            plan = get_object_or_404(plans, id=selected_plan_id)
         inbound = get_available_inbound(store)
 
         try:
@@ -349,12 +539,15 @@ def home(request):
                 build_home_context(
                     store=store,
                     plans=plans,
+                    operators=operators,
+                    selected_operator=selected_operator,
                     selected_plan_id=selected_plan_id,
                     checkout_error=exc.messages[0],
                     payment_time=payment_time_value,
                     payment_receipt_text=payment_receipt_text_value,
                     discount_code=discount_code_value,
                     quantity=quantity_value,
+                    custom_volume_gb=custom_volume_value,
                     referral_code=referral_code_value or referral_code,
                     scroll_to="checkout",
                 ),
@@ -367,12 +560,15 @@ def home(request):
                 build_home_context(
                     store=store,
                     plans=plans,
+                    operators=operators,
+                    selected_operator=selected_operator,
                     selected_plan_id=selected_plan_id,
                     checkout_error="فعلا ظرفیت جدیدی آزاد نیست. چند دقیقه دیگر دوباره امتحان کن یا به پشتیبانی پیام بده.",
                     payment_time=payment_time_value,
                     payment_receipt_text=payment_receipt_text_value,
                     discount_code=discount_code_value,
                     quantity=quantity_value,
+                    custom_volume_gb=custom_volume_value,
                     referral_code=referral_code_value or referral_code,
                     scroll_to="checkout",
                 ),
@@ -381,9 +577,11 @@ def home(request):
         order, create_error = create_order_from_checkout(
             request,
             store=store,
-            plan=plan,
             inbound=inbound,
             payment_time=payment_time,
+            plan=plan,
+            operator=selected_operator,
+            custom_volume_gb=custom_volume_gb,
             discount_code=discount_code_value,
         )
         if not order:
@@ -393,25 +591,32 @@ def home(request):
                 build_home_context(
                     store=store,
                     plans=plans,
+                    operators=operators,
+                    selected_operator=selected_operator,
                     selected_plan_id=selected_plan_id,
                     checkout_error=create_error,
                     payment_time=payment_time_value,
                     payment_receipt_text=payment_receipt_text_value,
                     discount_code=discount_code_value,
                     quantity=quantity_value,
+                    custom_volume_gb=custom_volume_value,
                     referral_code=referral_code_value or referral_code,
                     scroll_to="checkout",
                 ),
             )
 
-        return redirect(f"{reverse('home')}?order={order.order_tracking_code}#confirmation")
+        response = redirect(f"{reverse('order_detail', kwargs={'order_id': order.public_id})}?created=1")
+        set_tracking_cookie(response, order.order_tracking_code)
+        return response
 
-    return render(
+    response = render(
         request,
         "home.html",
         build_home_context(
             store=store,
             plans=plans,
+            operators=operators,
+            selected_operator=selected_operator,
             selected_plan_id=selected_plan_id,
             order=order,
             order_update_saved=order_update_saved,
@@ -421,6 +626,9 @@ def home(request):
             scroll_to=scroll_to or ("checkout" if selected_plan_id else ""),
         ),
     )
+    if order:
+        set_tracking_cookie(response, order.order_tracking_code)
+    return response
 
 
 def create_order(request, plan_id):
@@ -431,27 +639,37 @@ def checkout(request, tracking_code):
     customer = get_current_customer(request)
     if not customer_has_orders(customer):
         return first_time_redirect()
-    order = get_object_or_404(Order, order_tracking_code=tracking_code, customer=customer)
+    order = get_object_or_404(
+        Order.objects.select_related("store", "operator"),
+        order_tracking_code=tracking_code,
+        customer=customer,
+    )
 
     if request.method == "POST":
         if order.status == Order.Status.COMPLETED:
-            return redirect(f"{reverse('home')}?order={order.order_tracking_code}#confirmation")
+            return redirect(reverse("order_detail", kwargs={"order_id": order.public_id}))
         try:
+            receipt_image_only = bool(order.store and order.store.receipt_image_only_payment)
             existing_receipt_text = (order.metadata or {}).get("receipt_text")
             order.submit_manual_payment(
-                sender_card_name=request.POST.get("sender_card_name", ""),
+                sender_card_name="رسید تصویری" if receipt_image_only else request.POST.get("sender_card_name", ""),
                 sender_card_last4="",
-                payment_time=request.POST.get("payment_time", ""),
+                payment_time=current_payment_time_value() if receipt_image_only else request.POST.get("payment_time", ""),
                 receipt_image=request.FILES.get("payment_receipt_image"),
-                receipt_text=request.POST.get("payment_receipt_text", "").strip(),
-                require_receipt=not bool(order.payment_receipt_image or existing_receipt_text),
+                receipt_text="" if receipt_image_only else request.POST.get("payment_receipt_text", "").strip(),
+                require_receipt=not receipt_image_only and not bool(order.payment_receipt_image or existing_receipt_text),
+                require_receipt_image=receipt_image_only and not bool(order.payment_receipt_image),
             )
             order.save()
+            from .admin_notifications import schedule_notify_admins_payment_receipt
+
+            schedule_notify_admins_payment_receipt(order.pk)
         except (ValidationError, SuspiciousFileOperation, OSError) as exc:
             if not isinstance(exc, ValidationError):
                 logger.exception("Could not update manual payment details for order=%s", order.order_tracking_code)
             store = get_current_store()
-            plans = get_store_plans(store)
+            selected_operator = order.operator if sales_mode_requires_operator(store) else None
+            plans = get_store_plans(store, selected_operator)
             message = (
                 exc.messages[0]
                 if isinstance(exc, ValidationError)
@@ -463,6 +681,7 @@ def checkout(request, tracking_code):
                 build_home_context(
                     store=store,
                     plans=plans,
+                    selected_operator=selected_operator,
                     selected_plan_id=order.plan_id,
                     order=order,
                     order_update_error=message,
@@ -472,7 +691,7 @@ def checkout(request, tracking_code):
                 ),
             )
 
-    return redirect(f"{reverse('home')}?order={order.order_tracking_code}&updated=1#confirmation")
+    return redirect(reverse("order_detail", kwargs={"order_id": order.public_id}))
 
 
 def build_config_context(order, *, lookup_error="", tracking_code=""):
@@ -490,10 +709,177 @@ def build_config_context(order, *, lookup_error="", tracking_code=""):
     }
 
 
+def visible_customer_orders(customer):
+    return customer.orders.select_related("plan", "operator", "store", "discount_code")
+
+
+def renewal_state_for(stats):
+    if stats.get("is_expired"):
+        return True, "تمام شده و آماده تمدید است."
+
+    expiry_at = stats.get("expiry_at")
+    if expiry_at:
+        remaining_seconds = (expiry_at - timezone.now()).total_seconds()
+        if 0 < remaining_seconds <= 7 * 24 * 60 * 60:
+            remaining_days = max(int(remaining_seconds // (24 * 60 * 60)), 0)
+            return True, f"{remaining_days} روز تا پایان مانده است."
+
+    total = stats.get("total_traffic_bytes", 0) or 0
+    remaining = stats.get("remaining_traffic_bytes", 0) or 0
+    if total and remaining <= total * 0.15:
+        return True, "حجم باقی‌مانده رو به پایان است."
+
+    return False, ""
+
+
 def my_configurations(request):
     if not customer_has_orders(get_current_customer(request)):
         return first_time_redirect()
     return redirect(f"{reverse('dashboard')}#access")
+
+
+def latest_support_conversation(customer, store, *, include_closed=True):
+    if not customer:
+        return None
+    conversations = SupportConversation.objects.filter(customer=customer).select_related("store", "customer")
+    if store:
+        conversations = conversations.filter(models.Q(store=store) | models.Q(store__isnull=True))
+    else:
+        conversations = conversations.filter(store__isnull=True)
+    if not include_closed:
+        conversations = conversations.exclude(status=SupportConversation.Status.CLOSED)
+    return conversations.order_by("-updated_at", "-created_at").first()
+
+
+def support_contact_initial_value(customer, conversation=None):
+    if conversation and conversation.contact_value:
+        return conversation.contact_value
+    if not customer:
+        return ""
+    return customer.phone_number or (f"@{customer.username.lstrip('@')}" if customer.username else "")
+
+
+def serialize_support_message(message):
+    created_at = timezone.localtime(message.created_at).strftime("%Y-%m-%d %H:%M")
+    return {
+        "id": message.pk,
+        "sender": message.sender_type,
+        "sender_label": message.get_sender_type_display(),
+        "body": message.body,
+        "created_at": created_at,
+    }
+
+
+def serialize_support_conversation(conversation):
+    if not conversation:
+        return None
+    return {
+        "id": conversation.pk,
+        "status": conversation.status,
+        "status_label": conversation.get_status_display(),
+        "contact_value": conversation.contact_value,
+        "updated_at": timezone.localtime(conversation.updated_at).strftime("%Y-%m-%d %H:%M"),
+    }
+
+
+def support(request):
+    store = get_current_store()
+    customer = get_current_customer(request)
+    conversation = latest_support_conversation(customer, store)
+    return render(
+        request,
+        "support.html",
+        {
+            "customer": customer,
+            "conversation": conversation,
+            "support_contact_value": support_contact_initial_value(customer, conversation),
+        },
+    )
+
+
+@require_GET
+def support_messages(request):
+    customer = get_current_customer(request)
+    if not customer:
+        return JsonResponse({"ok": False, "message": "حساب مرورگر پیدا نشد."}, status=403)
+    conversation = latest_support_conversation(customer, get_current_store())
+    messages_qs = (
+        conversation.messages.order_by("created_at", "id")
+        if conversation
+        else SupportMessage.objects.none()
+    )
+    return JsonResponse(
+        {
+            "ok": True,
+            "conversation": serialize_support_conversation(conversation),
+            "messages": [serialize_support_message(item) for item in messages_qs],
+        }
+    )
+
+
+@require_POST
+def support_send_message(request):
+    customer = get_current_customer(request)
+    if not customer:
+        return JsonResponse({"ok": False, "message": "حساب مرورگر پیدا نشد."}, status=403)
+    if is_rate_limited(request, scope="support_message", limit=8, window=60):
+        return JsonResponse({"ok": False, "message": "پیام‌ها زیاد شد. کمی بعد دوباره امتحان کن."}, status=429)
+
+    contact_value = request.POST.get("contact_value", "").strip()
+    body = request.POST.get("body", "").strip()
+    if not contact_value:
+        return JsonResponse({"ok": False, "message": "شماره موبایل یا آیدی تلگرام را وارد کن."}, status=400)
+    if len(contact_value) > SUPPORT_CONTACT_MAX_LENGTH:
+        return JsonResponse({"ok": False, "message": "فیلد تماس بیش از حد طولانی است."}, status=400)
+    if not body:
+        return JsonResponse({"ok": False, "message": "متن پیام را وارد کن."}, status=400)
+    if len(body) > SUPPORT_MESSAGE_MAX_LENGTH:
+        return JsonResponse({"ok": False, "message": "متن پیام باید حداکثر ۲۰۰۰ کاراکتر باشد."}, status=400)
+
+    store = get_current_store()
+    with transaction.atomic():
+        conversation = latest_support_conversation(customer, store, include_closed=False)
+        if not conversation:
+            conversation = SupportConversation.objects.create(
+                store=store,
+                customer=customer,
+                contact_value=contact_value,
+                status=SupportConversation.Status.OPEN,
+            )
+        support_message = SupportMessage.objects.create(
+            conversation=conversation,
+            sender_type=SupportMessage.SenderType.CUSTOMER,
+            customer=customer,
+            body=body,
+            metadata={
+                "ip": get_client_ip(request),
+                "user_agent": request.META.get("HTTP_USER_AGENT", "")[:500],
+            },
+        )
+        conversation.contact_value = contact_value
+        conversation.status = SupportConversation.Status.WAITING_ADMIN
+        conversation.last_customer_message_at = timezone.now()
+        conversation.closed_at = None
+        conversation.save(update_fields=["contact_value", "status", "last_customer_message_at", "closed_at", "updated_at"])
+
+    try:
+        from .bots import notify_support_message
+
+        notified_count = notify_support_message(conversation, support_message)
+    except Exception as exc:
+        notified_count = 0
+        logger.exception("Could not notify admins about support conversation=%s: %s", conversation.pk, exc)
+
+    messages_qs = conversation.messages.order_by("created_at", "id")
+    return JsonResponse(
+        {
+            "ok": True,
+            "message": "پیام ارسال شد.",
+            "admin_notified": notified_count > 0,
+            "conversation": serialize_support_conversation(conversation),
+            "messages": [serialize_support_message(item) for item in messages_qs],
+        }
+    )
 
 
 def dashboard(request):
@@ -501,16 +887,80 @@ def dashboard(request):
     if not customer_has_orders(customer):
         return first_time_redirect()
 
-    orders = list(
-        customer.orders.select_related("plan", "store", "discount_code")
+    orders = [
+        order
+        for order in visible_customer_orders(customer)
         .prefetch_related("vpn_clients")
         .order_by("-created_at")
-    )
+        if not (order.metadata or {}).get("customer_hidden")
+    ]
+    pending_renewals_by_client_pk = {
+        int((order.metadata or {}).get("renewal_client_pk"))
+        for order in orders
+        if (order.metadata or {}).get("renewal_client_pk")
+        and order.status
+        in {
+            Order.Status.PENDING_PAYMENT,
+            Order.Status.PENDING_VERIFICATION,
+            Order.Status.CONFIRMED,
+        }
+    }
     access_cards = []
+    dashboard_cards = []
     for order in orders:
-        for client in order.get_vpn_clients():
+        if order.status == Order.Status.CANCELLED:
+            continue
+        clients = list(order.get_vpn_clients())
+        if not clients:
+            total = order.plan.traffic_limit_bytes if order.plan_id else 0
+            dashboard_cards.append(
+                {
+                    "order": order,
+                    "client": None,
+                    "stats": {
+                        "total_traffic_bytes": total,
+                        "used_traffic_bytes": 0,
+                        "remaining_traffic_bytes": 0,
+                        "is_enabled": False,
+                        "is_expired": False,
+                        "panel_available": bool(order.inbound_id),
+                    },
+                    "remaining_percent": 0,
+                    "status_label": "در انتظار ساخت",
+                    "is_pending": True,
+                    "is_expired": False,
+                    "panel_available": bool(order.inbound_id),
+                }
+            )
+            continue
+
+        for client in clients:
             stats = sync_vpn_client_stats(client)
-            access_cards.append({"order": order, "client": client, "stats": stats})
+            can_renew, renewal_reason = renewal_state_for(stats)
+            total = stats.get("total_traffic_bytes", 0) or 0
+            remaining = stats.get("remaining_traffic_bytes", 0) or 0
+            remaining_percent = min(round((remaining / total) * 100), 100) if total else 0
+            card = {
+                "order": order,
+                "client": client,
+                "stats": stats,
+                "can_renew": can_renew,
+                "renewal_reason": renewal_reason,
+                "pending_renewal": client.pk in pending_renewals_by_client_pk,
+                "remaining_percent": remaining_percent,
+                "status_label": (
+                    "تمام شده"
+                    if stats.get("is_expired")
+                    else "فعال"
+                    if stats.get("is_enabled")
+                    else "در انتظار تایید"
+                ),
+                "is_pending": not stats.get("is_enabled") and not stats.get("is_expired"),
+                "is_expired": stats.get("is_expired"),
+                "panel_available": stats.get("panel_available", True),
+            }
+            access_cards.append(card)
+            dashboard_cards.append(card)
 
     active_access_cards = [
         item
@@ -529,6 +979,8 @@ def dashboard(request):
     rewards = (
         customer.rewards.select_related("discount_code", "plan", "referral").order_by("-earned_at")
     )
+    referral_summary = get_referral_summary(customer, request=request, store=get_current_store())
+    referral_active_configs = list(get_active_referral_configs(customer))
     return render(
         request,
         "dashboard.html",
@@ -536,6 +988,7 @@ def dashboard(request):
             "customer": customer,
             "orders": orders,
             "access_cards": access_cards,
+            "dashboard_cards": dashboard_cards,
             "active_access_cards": active_access_cards,
             "total_traffic_bytes": total_traffic_bytes,
             "used_traffic_bytes": used_traffic_bytes,
@@ -545,19 +998,117 @@ def dashboard(request):
             ),
             "rewards": rewards[:5],
             "referral_link": build_referral_link(request, customer),
+            "referral_summary": referral_summary,
+            "referral_active_configs": referral_active_configs,
         },
     )
 
 
 def order_detail(request, order_id):
-    customer = get_current_customer(request)
-    if not customer:
+    order = recover_customer_from_tracked_order(
+        request,
+        Order.objects.select_related("customer", "plan", "operator", "store").filter(public_id=order_id).first(),
+    )
+    if not order:
         raise Http404("Order not found.")
-    get_object_or_404(
-        customer.orders.select_related("plan", "store").prefetch_related("vpn_clients"),
+    order = get_object_or_404(
+        Order.objects.select_related("plan", "operator", "store").prefetch_related("vpn_clients"),
+        pk=order.pk,
+    )
+    response = render(
+        request,
+        "order_detail.html",
+        {
+            "order": order,
+            "access_clients": order.get_vpn_clients(),
+            "show_checkout_notice": request.GET.get("created") == "1",
+        },
+    )
+    set_tracking_cookie(response, order.order_tracking_code)
+    return response
+
+
+@require_POST
+def renew_config(request, config_id):
+    customer = get_current_customer(request)
+    if not customer_has_orders(customer):
+        return first_time_redirect()
+
+    vpn_client = get_object_or_404(
+        VPNClient.objects.select_related("plan", "store", "order", "order__store", "inbound", "inbound__panel"),
+        public_id=config_id,
+        order__customer=customer,
+    )
+    if Order.objects.filter(
+        customer=customer,
+        metadata__renewal_client_pk=vpn_client.pk,
+        status__in=[
+            Order.Status.PENDING_PAYMENT,
+            Order.Status.PENDING_VERIFICATION,
+            Order.Status.CONFIRMED,
+        ],
+    ).exists():
+        messages.info(request, "برای این کانفیگ یک تمدید در انتظار پرداخت یا تایید داری.")
+        return redirect(f"{reverse('dashboard')}#access")
+
+    result = create_renewal_payment_order(customer=customer, vpn_client=vpn_client)
+    if not result.success:
+        messages.error(request, result.message)
+        return redirect(f"{reverse('dashboard')}#access")
+
+    messages.success(request, "سفارش تمدید ساخته شد. اطلاعات پرداخت را ثبت کن تا برای تایید ارسال شود.")
+    return redirect(f"{reverse('home')}?order={result.order.order_tracking_code}#confirmation")
+
+
+@require_POST
+def redeem_referral_reward(request):
+    customer = get_current_customer(request)
+    if not customer_has_orders(customer):
+        return first_time_redirect()
+
+    active_configs = list(get_active_referral_configs(customer))
+    if not active_configs:
+        messages.error(request, "برای دریافت هدیه، ابتدا باید یک کانفیگ فعال داشته باشی.")
+        return redirect(f"{reverse('dashboard')}#referrals")
+
+    config_id = request.POST.get("config_id", "").strip()
+    if config_id:
+        vpn_config = next((item for item in active_configs if str(item.public_id) == config_id), None)
+        if not vpn_config:
+            messages.error(request, "کانفیگ انتخاب‌شده فعال نیست یا پیدا نشد.")
+            return redirect(f"{reverse('dashboard')}#referrals")
+    elif len(active_configs) == 1:
+        vpn_config = active_configs[0]
+    else:
+        messages.info(request, "برای دریافت هدیه، کانفیگ موردنظر را انتخاب کن.")
+        return redirect(f"{reverse('dashboard')}#referrals")
+
+    result = redeem_referral_rewards(customer, vpn_config)
+    if result.success:
+        messages.success(request, result.message)
+    else:
+        messages.error(request, result.message)
+    return redirect(f"{reverse('dashboard')}#referrals")
+
+
+@require_POST
+def delete_order(request, order_id):
+    customer = get_current_customer(request)
+    if not customer_has_orders(customer):
+        return first_time_redirect()
+
+    order = get_object_or_404(
+        customer.orders.select_related("plan", "store", "inbound", "inbound__panel").prefetch_related("vpn_clients"),
         public_id=order_id,
     )
-    return redirect(f"{reverse('dashboard')}#history")
+    from .order_actions import cancel_order
+
+    result = cancel_order(order)
+    if result.success:
+        messages.success(request, "سفارش از داشبورد حذف شد.")
+    else:
+        messages.error(request, result.message)
+    return redirect(f"{reverse('dashboard')}#access")
 
 
 def account(request):
@@ -694,17 +1245,38 @@ def discount_preview(request):
         return JsonResponse({"ok": False, "message": "چند بار پشت سر هم امتحان شد. کمی بعد دوباره بزن."}, status=429)
 
     store = get_current_store()
-    plans = get_store_plans(store)
+    selected_operator = None
+    if sales_mode_requires_operator(store):
+        selected_operator = get_active_operator(store, request.GET.get("operator_id", ""))
+        if not selected_operator:
+            return JsonResponse({"ok": False, "message": "برای بررسی تخفیف ابتدا اپراتور را انتخاب کن."}, status=400)
+    plans = get_store_plans(store, selected_operator)
+    custom_volume_selected = request.GET.get("custom_volume_selected") == "1"
     plan_id = request.GET.get("plan_id", "")
-    plan = plans.filter(pk=plan_id).first() if str(plan_id).isdigit() else None
+    plan = None
     code = request.GET.get("code", "")
-    if not plan:
+    if custom_volume_selected:
+        try:
+            custom_volume_gb = normalize_custom_volume_gb(request.GET.get("custom_volume_gb", ""))
+        except ValidationError as exc:
+            return JsonResponse({"ok": False, "message": exc.messages[0]}, status=400)
+        price_per_gb = store_custom_volume_price_per_gb(store)
+        if not price_per_gb:
+            return JsonResponse({"ok": False, "message": "خرید حجم دلخواه هنوز فعال نشده است."}, status=400)
+        unit_price = calculate_custom_volume_price(custom_volume_gb, price_per_gb)
+        currency = get_custom_volume_currency(store)
+    else:
+        plan = plans.filter(pk=plan_id).first() if str(plan_id).isdigit() else None
+        if plan:
+            unit_price = plan.price
+            currency = plan.currency
+    if not custom_volume_selected and not plan:
         return JsonResponse({"ok": False, "message": "اول یک پلن معتبر انتخاب کن."}, status=400)
     try:
         quantity = validate_order_quantity(request.GET.get("quantity", "1"))
     except ValidationError as exc:
         return JsonResponse({"ok": False, "message": exc.messages[0]}, status=400)
-    subtotal = plan.price * quantity
+    subtotal = unit_price * quantity
     if not code.strip():
         wholesale_percent = get_customer_wholesale_discount_percent(get_current_customer(request))
         discount_amount = calculate_percentage_discount(subtotal, wholesale_percent)
@@ -721,12 +1293,23 @@ def discount_preview(request):
         )
 
     try:
-        discount, discount_amount, payable_amount = preview_discount(
-            plan,
-            code,
-            customer=get_current_customer(request),
-            quantity=quantity,
-        )
+        if custom_volume_selected:
+            discount = DiscountCode.objects.filter(code=DiscountCode.normalize_code(code)).first()
+            if not discount:
+                raise ValidationError("کد تخفیف معتبر نیست.")
+            validate_reward_discount_owner(discount, get_current_customer(request))
+            discount.validate_basic()
+            if discount.applicable_plans.exists():
+                raise ValidationError("این کد تخفیف برای حجم دلخواه فعال نیست.")
+            discount_amount = discount.calculate_discount(subtotal)
+            payable_amount = max(subtotal - discount_amount, 0)
+        else:
+            discount, discount_amount, payable_amount = preview_discount(
+                plan,
+                code,
+                customer=get_current_customer(request),
+                quantity=quantity,
+            )
     except ValidationError as exc:
         return JsonResponse(
             {
@@ -749,5 +1332,6 @@ def discount_preview(request):
             "original_amount": subtotal,
             "discount_amount": discount_amount,
             "payable_amount": payable_amount,
+            "currency": currency,
         }
     )

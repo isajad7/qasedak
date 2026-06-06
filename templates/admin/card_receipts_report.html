@@ -1,0 +1,403 @@
+{% extends "admin/base_site.html" %}
+{% load i18n store_formatters %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+    .receipt-report {
+        direction: rtl;
+        text-align: right;
+        display: grid;
+        gap: 18px;
+    }
+
+    .receipt-report * {
+        box-sizing: border-box;
+    }
+
+    .report-hero,
+    .report-panel,
+    .report-summary-card {
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+    }
+
+    .report-hero {
+        padding: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+    }
+
+    .report-hero h1,
+    .report-panel h2 {
+        margin: 0;
+        color: #0f172a;
+        font-weight: 800;
+    }
+
+    .report-hero p {
+        margin: 6px 0 0;
+        color: #64748b;
+        font-size: 13px;
+        line-height: 1.8;
+    }
+
+    .report-total {
+        min-width: 210px;
+        border-radius: 10px;
+        background: #0f172a;
+        color: #fff;
+        padding: 14px;
+        text-align: center;
+    }
+
+    .report-total span {
+        display: block;
+        color: #94a3b8;
+        font-size: 12px;
+    }
+
+    .report-total strong {
+        display: block;
+        margin-top: 6px;
+        font-size: 22px;
+        font-weight: 900;
+    }
+
+    .report-panel {
+        padding: 16px;
+    }
+
+    .report-filter-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 12px;
+        align-items: end;
+    }
+
+    .report-field label {
+        display: block;
+        margin-bottom: 6px;
+        color: #475569;
+        font-size: 12px;
+        font-weight: 800;
+    }
+
+    .report-field input,
+    .report-field select {
+        width: 100%;
+        min-height: 40px;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        background: #fff;
+        color: #0f172a;
+        padding: 8px 10px;
+    }
+
+    .report-button {
+        min-height: 40px;
+        border: 0;
+        border-radius: 10px;
+        background: #0ea5e9;
+        color: #082f49;
+        cursor: pointer;
+        font-weight: 900;
+        padding: 9px 16px;
+    }
+
+    .report-errors {
+        margin-top: 12px;
+        border-radius: 10px;
+        background: #fef2f2;
+        color: #991b1b;
+        padding: 10px 12px;
+        font-size: 13px;
+    }
+
+    .report-cards-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 12px;
+    }
+
+    .report-summary-card {
+        padding: 14px;
+    }
+
+    .summary-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+    }
+
+    .summary-card-number {
+        margin: 0;
+        color: #0f172a;
+        direction: ltr;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 16px;
+        font-weight: 900;
+        text-align: left;
+    }
+
+    .summary-owner {
+        margin: 5px 0 0;
+        color: #64748b;
+        font-size: 12px;
+    }
+
+    .summary-amount {
+        margin: 14px 0 8px;
+        color: #0369a1;
+        direction: ltr;
+        font-size: 24px;
+        font-weight: 900;
+        text-align: left;
+    }
+
+    .summary-meta,
+    .summary-breakdown {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .summary-pill {
+        border-radius: 999px;
+        background: #f1f5f9;
+        color: #334155;
+        padding: 5px 9px;
+        font-size: 12px;
+        font-weight: 700;
+    }
+
+    .report-table-wrap {
+        overflow-x: auto;
+    }
+
+    .report-table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 860px;
+    }
+
+    .report-table th,
+    .report-table td {
+        border-bottom: 1px solid #e2e8f0;
+        padding: 10px 8px;
+        vertical-align: top;
+        color: #334155;
+    }
+
+    .report-table th {
+        color: #0f172a;
+        font-size: 12px;
+        font-weight: 900;
+    }
+
+    .report-table a {
+        color: #0284c7;
+        font-weight: 800;
+    }
+
+    .report-muted {
+        color: #64748b;
+        font-size: 12px;
+    }
+
+    .report-empty {
+        border: 1px dashed #cbd5e1;
+        border-radius: 12px;
+        color: #64748b;
+        padding: 18px;
+        text-align: center;
+    }
+
+    @media (max-width: 900px) {
+        .report-hero {
+            align-items: stretch;
+            flex-direction: column;
+        }
+
+        .report-total {
+            min-width: 0;
+        }
+
+        .report-filter-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="receipt-report">
+    <section class="report-hero">
+        <div>
+            <h1>{{ title }}</h1>
+            <p>
+                اینجا می‌توانی جمع رسیدهای ثبت شده برای هر شماره کارت را بر اساس بازه زمانی ببینی؛ مخصوصا برای کارت‌هایی که پیام واریز ندارند و با موجودی کارت چک می‌شوند.
+                {% if date_from_label or date_to_label %}
+                    بازه فعال:
+                    {% if date_from_label %}از {{ date_from_label }}{% endif %}
+                    {% if date_to_label %}تا {{ date_to_label }}{% endif %}
+                {% endif %}
+            </p>
+        </div>
+        <div class="report-total">
+            <span>جمع کل معادل ریال</span>
+            <strong dir="ltr">{{ grand_total_irr|commafy }}</strong>
+            <span>{{ grand_order_count|commafy }} رسید</span>
+        </div>
+    </section>
+
+    <section class="report-panel">
+        <form method="get" class="report-filter-grid">
+            <div class="report-field">
+                <label for="id_card">شماره کارت</label>
+                <select id="id_card" name="card">
+                    <option value="">همه کارت‌ها</option>
+                    {% for option in card_options %}
+                        <option value="{{ option.card_number }}" {% if option.card_number == selected_card %}selected{% endif %}>
+                            {{ option.card_number }}{% if option.card_owner %} - {{ option.card_owner }}{% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="report-field">
+                <label for="id_date_from">از تاریخ</label>
+                <input id="id_date_from" name="date_from" value="{{ date_from }}" placeholder="1405/02/16">
+            </div>
+            <div class="report-field">
+                <label for="id_date_to">تا تاریخ</label>
+                <input id="id_date_to" name="date_to" value="{{ date_to }}" placeholder="1405/02/16">
+            </div>
+            <div class="report-field">
+                <label for="id_status">وضعیت</label>
+                <select id="id_status" name="status">
+                    {% for key, item in status_filters.items %}
+                        <option value="{{ key }}" {% if key == selected_status %}selected{% endif %}>{{ item.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button type="submit" class="report-button">نمایش گزارش</button>
+        </form>
+        {% if filter_errors %}
+            <div class="report-errors">
+                {% for error in filter_errors %}
+                    <div>{{ error }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    </section>
+
+    {% if card_summaries %}
+        <section class="report-cards-grid">
+            {% for summary in card_summaries %}
+                <article class="report-summary-card">
+                    <div class="summary-head">
+                        <div>
+                            <p class="summary-card-number">{{ summary.card_number }}</p>
+                            <p class="summary-owner">
+                                {{ summary.card_owner }}
+                                {% if summary.bank_name %} / {{ summary.bank_name }}{% endif %}
+                            </p>
+                        </div>
+                        <span class="summary-pill">{{ summary.order_count|commafy }} رسید</span>
+                    </div>
+                    <p class="summary-amount">{{ summary.total_irr|commafy }} ریال</p>
+                    <div class="summary-meta">
+                        <span class="summary-pill">در انتظار: {{ summary.pending_count|commafy }}</span>
+                        <span class="summary-pill">تایید شده: {{ summary.completed_count|commafy }}</span>
+                        {% if summary.rejected_count %}
+                            <span class="summary-pill">رد شده: {{ summary.rejected_count|commafy }}</span>
+                        {% endif %}
+                    </div>
+                    <div class="summary-breakdown" style="margin-top: 8px;">
+                        {% for currency, amount in summary.totals_by_currency.items %}
+                            <span class="summary-pill">{{ amount|commafy }} {{ currency|currency_label }}</span>
+                        {% endfor %}
+                    </div>
+                    {% if summary.latest_payment_at %}
+                        <p class="report-muted" style="margin: 10px 0 0;">آخرین رسید: {{ summary.latest_payment_at|jalali_datetime }}</p>
+                    {% endif %}
+                </article>
+            {% endfor %}
+        </section>
+    {% else %}
+        <div class="report-empty">با این فیلتر هنوز رسیدی برای کارت‌ها ثبت نشده.</div>
+    {% endif %}
+
+    <section class="report-panel">
+        <h2>
+            {% if selected_card %}
+                جزئیات کارت انتخابی
+            {% else %}
+                ۲۰ رسید آخر در همین فیلتر
+            {% endif %}
+        </h2>
+        <div class="report-table-wrap" style="margin-top: 12px;">
+            <table class="report-table">
+                <thead>
+                    <tr>
+                        <th>سفارش</th>
+                        <th>زمان ثبت رسید</th>
+                        <th>مبلغ سفارش</th>
+                        <th>معادل ریال</th>
+                        <th>کارت مقصد</th>
+                        <th>وضعیت</th>
+                        <th>تحلیل رسید</th>
+                        <th>رسید</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in order_rows %}
+                        <tr>
+                            <td><a href="{{ row.admin_url }}">{{ row.order.order_tracking_code }}</a></td>
+                            <td>{{ row.order.payment_submitted_at|jalali_datetime }}</td>
+                            <td dir="ltr">{{ row.order.amount|commafy }} {{ row.order.currency|currency_label }}</td>
+                            <td dir="ltr">{{ row.amount_irr|commafy }} ریال</td>
+                            <td>
+                                <div dir="ltr">{{ row.card_number }}</div>
+                                <span class="report-muted">{{ row.card_owner }}</span>
+                            </td>
+                            <td>{{ row.order.get_status_display }}</td>
+                            <td>
+                                {{ row.analysis_status }}
+                                {% if row.requires_admin_review %}
+                                    <div class="report-muted">نیازمند بررسی ادمین</div>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if row.receipt_url %}
+                                    <a href="{{ row.receipt_url }}" target="_blank" rel="noopener">نمایش عکس</a>
+                                {% else %}
+                                    <span class="report-muted">متنی/بدون عکس</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="8" class="report-empty">برای دیدن جزئیات، فیلتر را تغییر بده یا یک کارت انتخاب کن.</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+{% endblock %}

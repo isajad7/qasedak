@@ -1,12 +1,13 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from store.models import Order, Plan, Store
+from store.models import BotConfiguration, Order, Plan, Store
 
 from .models import IncomingPaymentSMS
 from .payment_matching import confirm_incoming_payment_sms, find_matching_orders, process_incoming_payment_sms
@@ -19,6 +20,17 @@ SAMPLE_SMS = """بلو
 موجودی: 109,609,358 ریال
 ۱۸:۵۶
 ۱۴۰۵.۰۲.۱۴"""
+
+
+class DummyBotResponse:
+    def __init__(self, payload=None):
+        self.payload = payload or {"ok": True, "result": {}}
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.payload
 
 
 @override_settings(PAYMENT_SMS_TIME_ZONE="Asia/Tehran")
@@ -158,6 +170,98 @@ class PaymentMatchingTests(TestCase):
         self.assertEqual(list(payment_sms.matched_orders.all()), [order])
         self.assertEqual(order.status, Order.Status.PENDING_PAYMENT)
 
+    def test_process_sms_schedules_actionable_order_review_after_commit(self):
+        bot_config = BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="SMS review bot",
+            bot_token="telegram-token",
+            admin_user_id="999",
+            is_active=True,
+        )
+        order = self.create_order(created_at=self.sms_datetime)
+        payment_sms = IncomingPaymentSMS.objects.create(
+            raw_text=SAMPLE_SMS,
+            amount=4830000,
+            balance=109609358,
+            sms_datetime=self.sms_datetime,
+        )
+        post_calls = []
+        message_id = {"value": 500}
+
+        def post_side_effect(url, json=None, **kwargs):
+            post_calls.append({"url": url, "json": json, **kwargs})
+            if url.endswith("/sendMessage"):
+                message_id["value"] += 1
+                return DummyBotResponse({"ok": True, "result": {"message_id": message_id["value"]}})
+            return DummyBotResponse()
+
+        with patch("store.bots.requests.post", side_effect=post_side_effect):
+            with self.captureOnCommitCallbacks(execute=False) as callbacks:
+                matches = process_incoming_payment_sms(payment_sms, notify=True)
+                self.assertEqual(matches, [order])
+                self.assertEqual(post_calls, [])
+
+            self.assertGreaterEqual(len(callbacks), 1)
+            self.assertEqual(post_calls, [])
+            for callback in callbacks:
+                callback()
+
+        order.refresh_from_db()
+        self.assertIsNotNone(order.admin_receipt_notified_at)
+        actionable_messages = [
+            call["json"]
+            for call in post_calls
+            if call["url"].endswith("/sendMessage")
+            and "سفارش نیازمند بررسی پرداخت" in call.get("json", {}).get("text", "")
+        ]
+        self.assertEqual(len(actionable_messages), 1)
+        callback_values = [
+            button["callback_data"]
+            for row in actionable_messages[0]["reply_markup"]["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn(f"approve:{order.order_tracking_code}", callback_values)
+        self.assertIn(f"reject:{order.order_tracking_code}", callback_values)
+        self.assertEqual(bot_config.get_admin_user_ids(), ["999"])
+
+    def test_process_sms_notification_is_idempotent_for_same_matches(self):
+        BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="SMS review bot",
+            bot_token="telegram-token",
+            admin_user_id="999",
+            is_active=True,
+        )
+        order = self.create_order(created_at=self.sms_datetime)
+        payment_sms = IncomingPaymentSMS.objects.create(
+            raw_text=SAMPLE_SMS,
+            amount=4830000,
+            balance=109609358,
+            sms_datetime=self.sms_datetime,
+        )
+        post_calls = []
+
+        def post_side_effect(url, json=None, **kwargs):
+            post_calls.append({"url": url, "json": json, **kwargs})
+            return DummyBotResponse({"ok": True, "result": {"message_id": len(post_calls)}})
+
+        with patch("store.bots.requests.post", side_effect=post_side_effect):
+            with self.captureOnCommitCallbacks(execute=True):
+                self.assertEqual(process_incoming_payment_sms(payment_sms, notify=True), [order])
+            payment_sms.refresh_from_db()
+            with self.captureOnCommitCallbacks(execute=True):
+                self.assertEqual(process_incoming_payment_sms(payment_sms, notify=True), [order])
+
+        match_messages = [
+            call["json"]
+            for call in post_calls
+            if call["url"].endswith("/sendMessage")
+            and "Bank deposit SMS matched" in call.get("json", {}).get("text", "")
+        ]
+        self.assertEqual(len(match_messages), 1)
+
     def test_manual_confirmation_confirms_sms_and_order(self):
         order = self.create_order(created_at=self.sms_datetime)
         payment_sms = IncomingPaymentSMS.objects.create(
@@ -178,6 +282,67 @@ class PaymentMatchingTests(TestCase):
         self.assertEqual(order.status, Order.Status.CONFIRMED)
         self.assertTrue(order.is_paid)
         self.assertEqual(order.verification_status, Order.VerificationStatus.VERIFIED)
+
+    def test_manual_confirmation_preserves_completed_order_status(self):
+        verified_at = timezone.now() - timedelta(hours=1)
+        order = self.create_order(created_at=self.sms_datetime, status=Order.Status.COMPLETED)
+        Order.objects.filter(pk=order.pk).update(
+            is_paid=True,
+            verification_status=Order.VerificationStatus.VERIFIED,
+            verified_at=verified_at,
+        )
+        order.refresh_from_db()
+        payment_sms = IncomingPaymentSMS.objects.create(
+            raw_text=SAMPLE_SMS,
+            amount=4830000,
+            balance=109609358,
+            sms_datetime=self.sms_datetime,
+            status=IncomingPaymentSMS.Status.MATCHED,
+        )
+        payment_sms.matched_orders.add(order)
+
+        confirmed_order = confirm_incoming_payment_sms(payment_sms)
+        payment_sms.refresh_from_db()
+        order.refresh_from_db()
+
+        self.assertEqual(confirmed_order, order)
+        self.assertEqual(payment_sms.status, IncomingPaymentSMS.Status.CONFIRMED)
+        self.assertEqual(order.status, Order.Status.COMPLETED)
+        self.assertEqual(order.verification_status, Order.VerificationStatus.VERIFIED)
+        self.assertEqual(order.verified_at, verified_at)
+
+    def test_confirmed_sms_is_not_reprocessed_or_renotified(self):
+        BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="SMS review bot",
+            bot_token="telegram-token",
+            admin_user_id="999",
+            is_active=True,
+        )
+        order = self.create_order(created_at=self.sms_datetime, status=Order.Status.CONFIRMED)
+        payment_sms = IncomingPaymentSMS.objects.create(
+            raw_text=SAMPLE_SMS,
+            amount=4830000,
+            balance=109609358,
+            sms_datetime=self.sms_datetime,
+            status=IncomingPaymentSMS.Status.CONFIRMED,
+        )
+        payment_sms.matched_orders.add(order)
+        post_calls = []
+
+        def post_side_effect(url, json=None, **kwargs):
+            post_calls.append({"url": url, "json": json, **kwargs})
+            return DummyBotResponse()
+
+        with patch("store.bots.requests.post", side_effect=post_side_effect):
+            with self.captureOnCommitCallbacks(execute=True):
+                matches = process_incoming_payment_sms(payment_sms, notify=True)
+
+        payment_sms.refresh_from_db()
+        self.assertEqual(matches, [order])
+        self.assertEqual(payment_sms.status, IncomingPaymentSMS.Status.CONFIRMED)
+        self.assertEqual(post_calls, [])
 
 
 @override_settings(SMSFORWARDER_WEBHOOK_TOKEN="secret", PAYMENT_SMS_TIME_ZONE="Asia/Tehran")

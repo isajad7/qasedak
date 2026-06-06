@@ -48,6 +48,22 @@ def clean_gb(value):
 
 
 @register.filter
+def volume_label(value):
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return value
+
+    if number < Decimal("1"):
+        mb_value = number * Decimal("1000")
+        normalized = format(mb_value.normalize(), "f")
+        label = normalized.rstrip("0").rstrip(".") if "." in normalized else normalized
+        return f"{label} MB"
+
+    return f"{clean_gb(number)} GB"
+
+
+@register.filter
 def percent_of(value, total):
     try:
         total = int(total)

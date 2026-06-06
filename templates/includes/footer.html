@@ -23,11 +23,9 @@
                 <h2 class="text-sm font-bold text-white">دسترسی سریع</h2>
                 <ul class="mt-4 space-y-3 text-sm text-slate-400">
                     <li><a href="{% url 'home' %}" class="transition-colors hover:text-white">خرید و صفحه اصلی</a></li>
+                    <li><a href="{% url 'support' %}" class="transition-colors hover:text-white">پشتیبانی داخل سایت</a></li>
                     {% if current_customer_has_orders %}
                         <li><a href="{% url 'dashboard' %}" class="transition-colors hover:text-white">داشبورد</a></li>
-                    {% endif %}
-                    {% if store.telegram_channel %}
-                        <li><a href="{{ store.telegram_channel }}" target="_blank" rel="noopener" class="transition-colors hover:text-white">کانال تلگرام</a></li>
                     {% endif %}
                 </ul>
             </section>
@@ -35,6 +33,10 @@
             <section>
                 <h2 class="text-sm font-bold text-white">ارتباط با ما</h2>
                 <div class="mt-4 space-y-3 text-sm text-slate-400">
+                    <a href="{% url 'support' %}" class="flex items-center justify-between gap-3 rounded-xl border border-sky-400/20 bg-sky-500/10 px-4 py-3 text-sky-100 transition-colors hover:border-sky-400/40 hover:bg-sky-500/20">
+                        <span>چت پشتیبانی</span>
+                        <span dir="ltr">Online</span>
+                    </a>
                     {% if store.telegram_support %}
                         <a href="{{ store.telegram_support_url }}" target="_blank" rel="noopener" class="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3 transition-colors hover:border-indigo-500/40 hover:bg-white/10 hover:text-white">
                             <span>پشتیبانی تلگرام</span>
@@ -47,13 +49,7 @@
                             <span dir="ltr">@{{ store.bale_support_handle }}</span>
                         </a>
                     {% endif %}
-                    {% if store.telegram_channel %}
-                        <a href="{{ store.telegram_channel }}" target="_blank" rel="noopener" class="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3 transition-colors hover:border-cyan-400/40 hover:bg-white/10 hover:text-white">
-                            <span>کانال اطلاع‌رسانی</span>
-                            <span dir="ltr">Telegram</span>
-                        </a>
-                    {% endif %}
-                    {% if not store.telegram_support and not store.bale_support and not store.telegram_channel %}
+                    {% if not store.telegram_support and not store.bale_support %}
                         <p class="rounded-xl border border-white/10 bg-white/5 px-4 py-3">راه ارتباطی هنوز ثبت نشده است.</p>
                     {% endif %}
                 </div>

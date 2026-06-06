@@ -1,5 +1,5 @@
 {% extends 'base.html' %}
-{% load store_formatters %}
+{% load static store_formatters %}
 
 {% block title %}داشبورد{% endblock %}
 
@@ -161,7 +161,7 @@
 {% endif %}
 
 {% if order and config_cards %}
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script defer src="{% static 'vendor/chartjs/chart.umd.min.js' %}?v={{ static_version }}"></script>
     <script>
         document.addEventListener("DOMContentLoaded", function () {
             const chartDefaults = {
@@ -177,11 +177,27 @@
                 },
             };
 
+            function fetchUsage(url) {
+                const options = { headers: { "X-Requested-With": "XMLHttpRequest" } };
+                if (!window.AbortController) {
+                    return fetch(url, options);
+                }
+
+                const controller = new AbortController();
+                const timeout = window.setTimeout(() => controller.abort(), 8000);
+                return fetch(url, { ...options, signal: controller.signal }).then((response) => {
+                    window.clearTimeout(timeout);
+                    return response;
+                }).catch((error) => {
+                    window.clearTimeout(timeout);
+                    throw error;
+                });
+            }
+
             document.querySelectorAll("[data-usage-chart]").forEach(async function (canvas) {
                 try {
-                    const response = await fetch(canvas.dataset.usageUrl, {
-                        headers: { "X-Requested-With": "XMLHttpRequest" },
-                    });
+                    const response = await fetchUsage(canvas.dataset.usageUrl);
+                    if (!response.ok) return;
                     const payload = await response.json();
                     if (!payload.ok || !window.Chart) return;
 

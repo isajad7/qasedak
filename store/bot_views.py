@@ -4,7 +4,8 @@ import logging
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
-from .bots import handle_bot_update
+from .bots import handle_bot_update, sanitize_bot_event_log_value
+from .bot_proxy import telegram_webhook_response_context
 from .models import BotConfiguration, BotEventLog
 
 logger = logging.getLogger(__name__)
@@ -25,8 +26,8 @@ def log_webhook_error(provider, webhook_secret, *, message, raw_payload=None):
             bot_config=config,
             event_type=BotEventLog.EventType.ERROR,
             status=BotEventLog.Status.FAILED,
-            message=message,
-            raw_payload=raw_payload or {},
+            message=sanitize_bot_event_log_value(message),
+            raw_payload=sanitize_bot_event_log_value(raw_payload or {}),
         )
 
 
@@ -60,12 +61,18 @@ def bot_webhook(request, provider, webhook_secret):
                 event_type=BotEventLog.EventType.WEBHOOK,
                 status=BotEventLog.Status.FAILED,
                 message="Invalid JSON payload.",
-                raw_payload={"body": request.body.decode("utf-8", errors="replace")[:2000]},
+                raw_payload=sanitize_bot_event_log_value(
+                    {"body": request.body.decode("utf-8", errors="replace")[:2000]}
+                ),
             )
         return safe_webhook_response({"ok": True, "ignored": True, "error": "Invalid JSON."})
 
+    webhook_response = None
     try:
-        result = handle_bot_update(provider, webhook_secret, payload)
+        with telegram_webhook_response_context(provider) as response_context:
+            result = handle_bot_update(provider, webhook_secret, payload)
+            if response_context is not None:
+                webhook_response = response_context.payload
     except Exception as exc:
         log_webhook_error(
             provider,
@@ -75,4 +82,6 @@ def bot_webhook(request, provider, webhook_secret):
         )
         return safe_webhook_response({"ok": True, "handled": False, "error": "Webhook handler failed."})
 
+    if webhook_response:
+        return safe_webhook_response(webhook_response)
     return safe_webhook_response(result)

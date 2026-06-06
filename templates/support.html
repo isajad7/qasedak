@@ -1,0 +1,239 @@
+{% extends 'base.html' %}
+
+{% block title %}پشتیبانی {{ store.name|default:"آزادنت" }}{% endblock %}
+
+{% block content %}
+<div class="mx-auto max-w-4xl space-y-4">
+    <section class="rounded-3xl border border-white/10 bg-white/[0.05] p-4 sm:p-5">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+                <p class="text-xs font-black text-sky-300">پشتیبانی</p>
+                <h1 class="mt-1 text-xl font-black text-white sm:text-2xl">چت با پشتیبانی</h1>
+            </div>
+            {% if current_customer_has_orders %}
+                <a href="{% url 'dashboard' %}" class="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-xs font-black text-white transition-colors hover:bg-white/10">
+                    داشبورد
+                </a>
+            {% else %}
+                <a href="{% url 'home' %}#plans" class="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-xs font-black text-white transition-colors hover:bg-white/10">
+                    خرید
+                </a>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="grid min-h-[34rem] gap-4 lg:grid-cols-[1fr_21rem]">
+        <div class="flex min-h-[28rem] flex-col overflow-hidden rounded-3xl border border-white/10 bg-slate-950/35">
+            <div class="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+                <div>
+                    <p class="text-sm font-black text-white">گفتگو</p>
+                    <p class="mt-1 text-xs text-slate-500" data-support-status>در حال بارگذاری...</p>
+                </div>
+                <button type="button" data-support-refresh class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-black text-white transition-colors hover:bg-white/10">
+                    بروزرسانی
+                </button>
+            </div>
+
+            <div class="flex-1 overflow-y-auto px-4 py-4" data-support-scroll>
+                <div class="space-y-3" data-support-messages>
+                    <div class="rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-center text-sm text-slate-400">
+                        در حال دریافت پیام‌ها...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <form action="{% url 'support_send_message' %}" method="post" class="rounded-3xl border border-white/10 bg-white/[0.05] p-4" data-support-form>
+            {% csrf_token %}
+            <div class="space-y-4">
+                <div>
+                    <label class="mb-1.5 block text-xs font-bold text-slate-400">شماره موبایل یا آیدی تلگرام</label>
+                    <input
+                        type="text"
+                        name="contact_value"
+                        value="{{ support_contact_value }}"
+                        maxlength="120"
+                        class="w-full rounded-xl border border-white/10 bg-slate-950/45 px-3 py-3 text-sm text-white placeholder:text-slate-600 focus:border-sky-300 focus:outline-none focus:ring-1 focus:ring-sky-300"
+                        dir="ltr"
+                        placeholder="@username یا 09..."
+                        required
+                    >
+                </div>
+                <div>
+                    <label class="mb-1.5 block text-xs font-bold text-slate-400">پیام</label>
+                    <textarea
+                        name="body"
+                        rows="8"
+                        maxlength="2000"
+                        class="min-h-44 w-full resize-y rounded-xl border border-white/10 bg-slate-950/45 px-3 py-3 text-sm leading-7 text-white placeholder:text-slate-600 focus:border-sky-300 focus:outline-none focus:ring-1 focus:ring-sky-300"
+                        placeholder="پیامت را بنویس..."
+                        required
+                    ></textarea>
+                </div>
+                <p class="min-h-5 text-xs font-bold text-slate-500" data-support-form-status></p>
+                <button type="submit" class="w-full rounded-2xl bg-sky-500 px-5 py-3 text-sm font-black text-slate-950 transition-colors hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60">
+                    ارسال پیام
+                </button>
+            </div>
+        </form>
+    </section>
+</div>
+
+<script>
+    document.addEventListener("DOMContentLoaded", function () {
+        const messagesUrl = "{% url 'support_messages' %}";
+        const sendUrl = "{% url 'support_send_message' %}";
+        const form = document.querySelector("[data-support-form]");
+        const list = document.querySelector("[data-support-messages]");
+        const scrollBox = document.querySelector("[data-support-scroll]");
+        const statusNode = document.querySelector("[data-support-status]");
+        const formStatus = document.querySelector("[data-support-form-status]");
+        const refreshButton = document.querySelector("[data-support-refresh]");
+        const csrfToken = form ? form.querySelector("[name=csrfmiddlewaretoken]").value : "";
+        let lastSignature = "";
+        let pollingTimer = null;
+
+        function setFormStatus(message, className) {
+            if (!formStatus) return;
+            formStatus.textContent = message || "";
+            formStatus.className = className || "min-h-5 text-xs font-bold text-slate-500";
+        }
+
+        function requestJson(url, options) {
+            return fetch(url, {
+                headers: {
+                    "X-Requested-With": "XMLHttpRequest",
+                    ...(options && options.headers ? options.headers : {}),
+                },
+                ...(options || {}),
+            }).then(async function (response) {
+                const data = await response.json().catch(function () { return {}; });
+                if (!response.ok || data.ok === false) {
+                    throw new Error(data.message || "درخواست انجام نشد.");
+                }
+                return data;
+            });
+        }
+
+        function appendText(parent, tagName, className, text) {
+            const node = document.createElement(tagName);
+            node.className = className;
+            node.textContent = text || "";
+            parent.appendChild(node);
+            return node;
+        }
+
+        function renderMessages(payload) {
+            const messages = payload.messages || [];
+            const signature = JSON.stringify(messages.map(function (item) {
+                return [item.id, item.sender, item.body, item.created_at];
+            }));
+            if (signature === lastSignature) {
+                if (payload.conversation && statusNode) {
+                    statusNode.textContent = payload.conversation.status_label || "";
+                }
+                return;
+            }
+            lastSignature = signature;
+            list.innerHTML = "";
+
+            if (payload.conversation && statusNode) {
+                statusNode.textContent = payload.conversation.status_label || "";
+            } else if (statusNode) {
+                statusNode.textContent = "گفتگویی ثبت نشده است.";
+            }
+
+            if (!messages.length) {
+                const empty = document.createElement("div");
+                empty.className = "rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-center text-sm text-slate-400";
+                empty.textContent = "هنوز پیامی ثبت نشده است.";
+                list.appendChild(empty);
+                return;
+            }
+
+            messages.forEach(function (message) {
+                const isCustomer = message.sender === "customer";
+                const row = document.createElement("article");
+                row.className = isCustomer ? "flex justify-end" : "flex justify-start";
+
+                const bubble = document.createElement("div");
+                bubble.className = isCustomer
+                    ? "max-w-[82%] rounded-2xl bg-sky-500 px-4 py-3 text-slate-950 shadow-[0_12px_30px_rgba(14,165,233,0.22)]"
+                    : "max-w-[82%] rounded-2xl border border-white/10 bg-white/[0.07] px-4 py-3 text-slate-100";
+
+                appendText(bubble, "p", "whitespace-pre-wrap text-sm leading-7", message.body);
+                appendText(
+                    bubble,
+                    "p",
+                    isCustomer ? "mt-2 text-[11px] font-bold text-slate-800/75" : "mt-2 text-[11px] font-bold text-slate-500",
+                    `${message.sender_label || ""} · ${message.created_at || ""}`
+                );
+                row.appendChild(bubble);
+                list.appendChild(row);
+            });
+
+            window.setTimeout(function () {
+                if (scrollBox) {
+                    scrollBox.scrollTop = scrollBox.scrollHeight;
+                }
+            }, 0);
+        }
+
+        function refreshMessages() {
+            return requestJson(messagesUrl).then(renderMessages).catch(function (error) {
+                if (statusNode) {
+                    statusNode.textContent = error.message || "دریافت پیام‌ها انجام نشد.";
+                }
+            });
+        }
+
+        function schedulePolling() {
+            window.clearInterval(pollingTimer);
+            pollingTimer = window.setInterval(function () {
+                if (!document.hidden) {
+                    refreshMessages();
+                }
+            }, 5000);
+        }
+
+        if (refreshButton) {
+            refreshButton.addEventListener("click", function () {
+                refreshMessages();
+            });
+        }
+
+        if (form) {
+            form.addEventListener("submit", function (event) {
+                event.preventDefault();
+                const submitButton = form.querySelector("button[type=submit]");
+                const bodyField = form.querySelector("[name=body]");
+                const formData = new FormData(form);
+                if (submitButton) {
+                    submitButton.disabled = true;
+                }
+                setFormStatus("در حال ارسال...", "min-h-5 text-xs font-bold text-slate-400");
+                requestJson(sendUrl, {
+                    method: "POST",
+                    headers: { "X-CSRFToken": csrfToken },
+                    body: formData,
+                }).then(function (payload) {
+                    if (bodyField) {
+                        bodyField.value = "";
+                    }
+                    setFormStatus(payload.message || "پیام ارسال شد.", "min-h-5 text-xs font-bold text-emerald-300");
+                    renderMessages(payload);
+                }).catch(function (error) {
+                    setFormStatus(error.message || "ارسال پیام انجام نشد.", "min-h-5 text-xs font-bold text-red-300");
+                }).finally(function () {
+                    if (submitButton) {
+                        submitButton.disabled = false;
+                    }
+                });
+            });
+        }
+
+        refreshMessages();
+        schedulePolling();
+    });
+</script>
+{% endblock %}

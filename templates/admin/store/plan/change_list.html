@@ -1,0 +1,65 @@
+{% extends "admin/import_export/change_list_import_export.html" %}
+{% load i18n %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+    .plan-bulk-pricing {
+        margin: 0 0 1rem;
+        padding: 0.9rem 1rem;
+        border-radius: 0.45rem;
+    }
+    .plan-bulk-pricing form {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 0.75rem;
+        margin: 0;
+    }
+    .plan-bulk-pricing .field-box {
+        min-width: min(100%, 18rem);
+    }
+    .plan-bulk-pricing label {
+        display: block;
+        margin-bottom: 0.35rem;
+        font-weight: 700;
+    }
+    .plan-bulk-pricing input {
+        width: 100%;
+        max-width: 16rem;
+    }
+    .plan-bulk-pricing .help {
+        margin: 0.35rem 0 0;
+        color: var(--body-quiet-color);
+    }
+    .plan-bulk-pricing .errorlist {
+        margin: 0 0 0.4rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+{% if bulk_price_per_gb_form %}
+    <div class="module plan-bulk-pricing" dir="rtl">
+        <h2>اعمال قیمت هر گیگ روی همه پلن‌ها</h2>
+        <form method="post" onsubmit="return confirm('قیمت همه پلن‌ها بر اساس این عدد تغییر می‌کند. ادامه می‌دهی؟');">
+            {% csrf_token %}
+            {{ bulk_price_per_gb_form.non_field_errors }}
+            <div class="field-box">
+                {{ bulk_price_per_gb_form.price_per_gb.errors }}
+                <label for="{{ bulk_price_per_gb_form.price_per_gb.id_for_label }}">
+                    {{ bulk_price_per_gb_form.price_per_gb.label }}
+                </label>
+                {{ bulk_price_per_gb_form.price_per_gb }}
+                {% if bulk_price_per_gb_form.price_per_gb.help_text %}
+                    <p class="help">{{ bulk_price_per_gb_form.price_per_gb.help_text }}</p>
+                {% endif %}
+            </div>
+            <button type="submit" class="button default" name="_apply_price_per_gb" value="1">
+                اعمال روی همه پلن‌ها
+            </button>
+        </form>
+    </div>
+{% endif %}
+{{ block.super }}
+{% endblock %}

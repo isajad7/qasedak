@@ -52,10 +52,16 @@ class CustomerTrackingMiddleware:
 
         response = self.get_response(request)
 
-        if should_track and customer and (needs_cookie or clear_legacy_cookie):
+        response_customer = getattr(request, "customer", None) or customer
+        customer_changed = (
+            bool(response_customer and customer)
+            and response_customer.pk != customer.pk
+        )
+
+        if should_track and response_customer and (needs_cookie or clear_legacy_cookie or customer_changed):
             response.set_signed_cookie(
                 CUSTOMER_COOKIE_NAME,
-                str(customer.public_id),
+                str(response_customer.public_id),
                 salt=CUSTOMER_COOKIE_SALT,
                 max_age=CUSTOMER_COOKIE_MAX_AGE,
                 httponly=True,

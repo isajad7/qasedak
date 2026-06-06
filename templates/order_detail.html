@@ -1,76 +1,106 @@
 {% extends 'base.html' %}
 {% load store_formatters %}
 
-{% block title %}جزئیات سفارش{% endblock %}
+{% block title %}سفارش{% endblock %}
 
 {% block content %}
-<section class="mb-8 rounded-3xl border border-white/10 bg-white/5 p-6 sm:p-8">
-    <div class="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-            <a href="{% url 'dashboard' %}" class="mb-4 inline-flex rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-slate-300 transition-colors hover:bg-white/10 hover:text-white">
-                بازگشت به داشبورد
-            </a>
-            <h1 class="text-2xl sm:text-3xl font-black text-white">جزئیات سفارش</h1>
-            <p class="mt-3 break-all font-mono text-sm text-indigo-300" dir="ltr">{{ order.order_tracking_code }}</p>
-        </div>
-        {% if order.status == 'completed' %}
-            <span class="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm font-bold text-emerald-300">فعال شده</span>
-        {% else %}
-            <span class="rounded-full border border-yellow-400/20 bg-yellow-400/10 px-4 py-2 text-sm font-bold text-yellow-300">در انتظار فعال‌سازی</span>
-        {% endif %}
-    </div>
-</section>
-
-<section class="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-    <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-5">
-        <p class="text-xs text-slate-500">پلن</p>
-        <p class="mt-2 font-black text-white">{{ order.plan.name }}</p>
-    </div>
-    <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-5">
-        <p class="text-xs text-slate-500">وضعیت سفارش</p>
-        <p class="mt-2 font-black text-white">{{ order.get_status_display }}</p>
-    </div>
-    <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-5">
-        <p class="text-xs text-slate-500">وضعیت تایید</p>
-        <p class="mt-2 font-black text-white">{{ order.get_verification_status_display }}</p>
-    </div>
-    <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-5">
-        <p class="text-xs text-slate-500">مبلغ نهایی</p>
-        <p class="mt-2 font-black text-white" dir="ltr">{{ order.amount|commafy }} {{ order.currency|currency_label }}</p>
-    </div>
-</section>
-
-<section class="mb-8 rounded-3xl border border-yellow-400/20 bg-yellow-400/10 p-6">
-    <h2 class="text-lg font-black text-white">وضعیت فعال‌سازی</h2>
-    {% if order.status == 'completed' %}
-        <p class="mt-2 text-sm leading-7 text-slate-300">سفارش شما تایید شده و لینک‌ها فعال هستند.</p>
-    {% else %}
-        <p class="mt-2 text-sm leading-7 text-slate-300">لینک‌ها ساخته شده‌اند، اما تا زمان تایید پشتیبانی قابل استفاده نیستند.</p>
-    {% endif %}
-</section>
-
-<section class="space-y-5">
-    <h2 class="text-xl font-black text-white">دسترسی‌ها</h2>
-    {% for client in access_clients %}
-        <article class="rounded-3xl border border-white/10 bg-white/5 p-6">
-            <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                    <h3 class="break-all font-mono text-lg font-black text-white" dir="ltr">{{ client.xui_email|default:client.username }}</h3>
-                    <p class="mt-1 text-sm text-slate-400">{{ client.get_status_display }}</p>
-                </div>
-                {% if client.status == 'active' %}
-                    <span class="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-bold text-emerald-300">فعال</span>
-                {% else %}
-                    <span class="rounded-full border border-yellow-400/20 bg-yellow-400/10 px-3 py-1 text-xs font-bold text-yellow-300">در انتظار تایید</span>
-                {% endif %}
+{% if show_checkout_notice %}
+    <div class="sweet-notify-backdrop" role="dialog" aria-modal="true" aria-labelledby="checkout-notice-title">
+        <div class="sweet-notify" dir="rtl">
+            <div class="sweet-notify-icon" aria-hidden="true">
+                <svg class="h-7 w-7" viewBox="0 0 24 24" fill="none">
+                    <path d="M6 12.5 10 16.5 18 7.5" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
             </div>
-
-            {% include 'includes/config_links.html' with sub_link=client.sub_link direct_link=client.direct_link %}
-        </article>
-    {% empty %}
-        <div class="rounded-3xl border border-white/10 bg-white/5 p-8 text-center text-sm text-slate-400">
-            هنوز موردی برای این سفارش ثبت نشده است.
+            <h2 id="checkout-notice-title" class="sweet-notify-title">رسید ثبت شد</h2>
+            <p class="sweet-notify-text">
+                بعد از تایید رسیدت توسط ادمین، کانفیگت فعال میشه. اگر لینک آماده است، الان می‌تونی کپی‌اش کنی و وارد برنامه‌ات کنی و منتظر بمونی فعال شه.
+            </p>
+            <a href="{% url 'order_detail' order_id=order.public_id %}" class="sweet-notify-action">باشه</a>
         </div>
-    {% endfor %}
-</section>
+    </div>
+{% endif %}
+
+<div class="mx-auto max-w-4xl space-y-4">
+    <a href="{% url 'home' %}" class="inline-flex rounded-full border border-white/10 bg-white/80 px-3 py-1.5 text-xs font-bold text-slate-500 transition-colors hover:bg-sky-50 hover:text-sky-700">
+        بک
+    </a>
+
+    <section class="rounded-[1.25rem] border border-white/10 bg-white/85 p-4 shadow-[0_14px_34px_rgba(15,23,42,0.06)] sm:p-5">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div class="min-w-0">
+                <p class="text-xs font-black text-sky-300">سفارش</p>
+                <h1 class="mt-1 text-xl font-black text-white">{{ order.plan.name }}</h1>
+                <p class="mt-2 break-all font-mono text-[11px] font-bold text-slate-500" dir="ltr">{{ order.order_tracking_code }}</p>
+            </div>
+            <span class="w-fit rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-black text-emerald-200">
+                {{ order.get_status_display }}
+            </span>
+        </div>
+
+        <div class="mt-4 grid gap-2 sm:grid-cols-3">
+            {% if order.operator %}
+                <div class="rounded-2xl border border-white/10 bg-white/70 p-3">
+                    <p class="text-xs text-slate-500">اپراتور</p>
+                    <p class="mt-1 font-black text-white">{{ order.operator.name }}</p>
+                </div>
+            {% endif %}
+            <div class="rounded-2xl border border-white/10 bg-white/70 p-3">
+                <p class="text-xs text-slate-500">حجم</p>
+                <p class="mt-1 font-black text-white">{{ order.plan.volume_gb|volume_label }}</p>
+            </div>
+            <div class="rounded-2xl border border-white/10 bg-white/70 p-3">
+                <p class="text-xs text-slate-500">مدت</p>
+                <p class="mt-1 font-black text-white">{{ order.plan.duration_days }} روز</p>
+            </div>
+            <div class="rounded-2xl border border-white/10 bg-white/70 p-3">
+                <p class="text-xs text-slate-500">مبلغ</p>
+                <p class="mt-1 font-black text-white" dir="ltr">{{ order.amount|commafy }} {{ order.currency|currency_label }}</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="rounded-[1.25rem] border border-white/10 bg-white/85 p-4 shadow-[0_14px_34px_rgba(15,23,42,0.06)] sm:p-5">
+        <div class="mb-4 flex items-center justify-between gap-3">
+            <h2 class="text-base font-black text-white">لینک‌ها</h2>
+            {% if order.status == 'completed' %}
+                <span class="text-xs font-bold text-emerald-200">فعال</span>
+            {% else %}
+                <span class="text-xs font-bold text-slate-500">بعد از چک رسید فعال می‌شود</span>
+            {% endif %}
+        </div>
+
+        <div class="space-y-3">
+            {% for client in access_clients %}
+                <article class="rounded-2xl border border-white/10 bg-white/70 p-3">
+                    {% if access_clients|length > 1 %}
+                        <p class="mb-3 text-xs font-black text-slate-500">کانفیگ {{ forloop.counter }}</p>
+                    {% endif %}
+
+                    <div class="grid gap-2 sm:grid-cols-2">
+                        {% if client.direct_link %}
+                            <button type="button" data-copy-access-link data-copy-value="{{ client.direct_link }}" data-copy-success="کانفیگ کپی شد" class="inline-flex items-center justify-center rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-black text-slate-950 transition-colors hover:bg-emerald-300">
+                                <span data-copy-button-text>کپی کانفیگ</span>
+                            </button>
+                        {% else %}
+                            <div class="rounded-2xl border border-white/10 bg-white px-4 py-3 text-center text-sm font-bold text-slate-500">کانفیگ آماده نیست</div>
+                        {% endif %}
+
+                        {% if client.sub_link %}
+                            <button type="button" data-copy-access-link data-copy-value="{{ client.sub_link }}" data-copy-success="لینک کپی شد" class="inline-flex items-center justify-center rounded-2xl border border-sky-300/30 bg-sky-50 px-4 py-3 text-sm font-black text-sky-700 transition-colors hover:bg-sky-100">
+                                <span data-copy-button-text>کپی لینک</span>
+                            </button>
+                        {% else %}
+                            <div class="rounded-2xl border border-white/10 bg-white px-4 py-3 text-center text-sm font-bold text-slate-500">لینک آماده نیست</div>
+                        {% endif %}
+                    </div>
+                </article>
+            {% empty %}
+                <div class="rounded-2xl border border-white/10 bg-white/70 p-4 text-center text-sm text-slate-500">
+                    هنوز لینکی برای این سفارش ثبت نشده.
+                </div>
+            {% endfor %}
+        </div>
+    </section>
+</div>
 {% endblock %}

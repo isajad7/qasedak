@@ -7,7 +7,7 @@ from pathlib import PurePath
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
+from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator, URLValidator
 from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -31,6 +31,14 @@ def generate_short_code(prefix="", length=8):
     alphabet = string.ascii_uppercase + string.digits
     suffix = "".join(random.choices(alphabet, k=length))
     return f"{prefix}{suffix}"
+
+
+def default_reminder_days_before_expiry():
+    return [3, 1, 0]
+
+
+def default_reminder_days_after_expiry():
+    return [1, 3]
 
 
 card_last4_validator = RegexValidator(
@@ -151,11 +159,14 @@ def clean_manual_payment_submission(
     receipt_image=None,
     receipt_text="",
     require_receipt=False,
+    require_receipt_image=False,
     existing_sender_card_name="",
     existing_sender_card_last4="",
 ):
     cleaned_receipt_text = clean_payment_receipt_text(receipt_text)
     cleaned_receipt_image = validate_payment_receipt_image(receipt_image)
+    if require_receipt_image and not cleaned_receipt_image:
+        raise ValidationError(_("عکس رسید را بارگذاری کن."))
     if require_receipt and not cleaned_receipt_image and not cleaned_receipt_text:
         raise ValidationError(_("رسید را به صورت متن وارد کن یا عکس رسید را بفرست."))
     return {
@@ -183,11 +194,23 @@ class TimeStampedModel(models.Model):
 
 
 class Store(TimeStampedModel):
+    class SalesMode(models.TextChoices):
+        TUNNEL = "tunnel", _("Tunnel")
+        OPERATOR_BASED = "operator_based", _("Operator based")
+
     name = models.CharField(_("name"), max_length=100, default="AzadNet")
     english_name = models.CharField(_("English name"), max_length=100, default="AzadNet")
     slug = models.SlugField(_("slug"), max_length=80, unique=True, null=True, blank=True)
     domain = models.CharField(_("domain"), max_length=255, blank=True, null=True)
     is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    sales_mode = models.CharField(
+        _("sales mode"),
+        max_length=30,
+        choices=SalesMode.choices,
+        default=SalesMode.TUNNEL,
+        db_index=True,
+        help_text=_("Tunnel shows plans directly; operator based asks customers to choose an operator first."),
+    )
 
     hero_title = models.CharField(_("hero title"), max_length=200, default="Fast and secure VPN access")
     hero_text = models.TextField(
@@ -212,6 +235,180 @@ class Store(TimeStampedModel):
         help_text=_("Manual card-to-card destination card number, without spaces."),
     )
     card_owner = models.CharField(_("card owner"), max_length=100)
+    receipt_image_only_payment = models.BooleanField(
+        _("receipt image only payment"),
+        default=False,
+        help_text=_("When enabled, checkout only asks for a receipt image for this card."),
+    )
+    custom_volume_price_per_gb = models.DecimalField(
+        _("custom volume price per GB"),
+        max_digits=14,
+        decimal_places=3,
+        default=Decimal("0"),
+        validators=[MinValueValidator(Decimal("0"))],
+        help_text=_("When greater than zero, customers can buy custom GB volume for 30 days at this unit price."),
+    )
+    referral_system_enabled = models.BooleanField(
+        _("referral system enabled"),
+        default=True,
+        help_text=_("When disabled, referral codes remain visible but new GB rewards are not created."),
+    )
+    referral_reward_gb = models.DecimalField(
+        _("referral reward traffic GB"),
+        max_digits=8,
+        decimal_places=3,
+        default=Decimal("2.000"),
+        validators=[MinValueValidator(Decimal("0"))],
+        help_text=_("Gift-package traffic awarded to the inviter after an eligible invited purchase."),
+    )
+    referral_reward_duration_days = models.PositiveIntegerField(
+        _("referral reward duration days"),
+        default=30,
+        validators=[MinValueValidator(1)],
+        help_text=_("Gift-package duration awarded to the inviter after an eligible invited purchase."),
+    )
+    referral_min_order_required = models.BooleanField(
+        _("referral minimum order required"),
+        default=True,
+        help_text=_("Only the invited customer's first successful order can create the referral reward."),
+    )
+    free_trial_enabled = models.BooleanField(
+        _("free trial enabled"),
+        default=False,
+        help_text=_("Allow bot users to receive one free test configuration per cooldown window."),
+    )
+    free_trial_panel = models.ForeignKey(
+        "Panel",
+        verbose_name=_("free trial panel"),
+        on_delete=models.SET_NULL,
+        related_name="free_trial_stores",
+        null=True,
+        blank=True,
+    )
+    free_trial_inbound = models.ForeignKey(
+        "Inbound",
+        verbose_name=_("free trial inbound"),
+        on_delete=models.SET_NULL,
+        related_name="free_trial_stores",
+        null=True,
+        blank=True,
+    )
+    free_trial_traffic_gb = models.DecimalField(
+        _("free trial traffic GB"),
+        max_digits=8,
+        decimal_places=3,
+        default=Decimal("1.000"),
+        validators=[MinValueValidator(Decimal("0.001"))],
+    )
+    free_trial_duration_hours = models.PositiveIntegerField(
+        _("free trial duration hours"),
+        default=24,
+        validators=[MinValueValidator(1)],
+    )
+    free_trial_cooldown_days = models.PositiveIntegerField(
+        _("free trial cooldown days"),
+        default=30,
+        validators=[MinValueValidator(1)],
+    )
+    analytics_enabled = models.BooleanField(
+        _("analytics enabled"),
+        default=True,
+        help_text=_("Enable customer analytics reports in admin and admin bots."),
+    )
+    broadcast_enabled = models.BooleanField(
+        _("broadcast enabled"),
+        default=True,
+        help_text=_("Allow admins to send targeted broadcast campaigns."),
+    )
+    broadcast_rate_limit_per_second = models.PositiveIntegerField(
+        _("broadcast rate limit per second"),
+        default=5,
+        validators=[MinValueValidator(1)],
+        help_text=_("Maximum customer broadcast messages sent per second."),
+    )
+    broadcast_max_recipients_per_campaign = models.PositiveIntegerField(
+        _("broadcast max recipients per campaign"),
+        default=1000,
+        validators=[MinValueValidator(1)],
+        help_text=_("Maximum customers resolved for a single broadcast campaign."),
+    )
+    renewal_reminders_enabled = models.BooleanField(
+        _("renewal reminders enabled"),
+        default=True,
+        help_text=_("Send Telegram reminders before and after VPN client expiry."),
+    )
+    renewal_reminders_start_at = models.DateTimeField(
+        _("renewal reminders start at"),
+        null=True,
+        blank=True,
+        help_text=_(
+            "اگر تنظیم شود، یادآوری فقط برای سرویس‌هایی ارسال می‌شود که بعد از این زمان ساخته شده‌اند. "
+            "برای نادیده گرفتن دیتای قدیمی استفاده می‌شود."
+        ),
+    )
+    reminder_days_before_expiry = models.JSONField(
+        _("reminder days before expiry"),
+        default=default_reminder_days_before_expiry,
+        blank=True,
+        help_text=_("Integer day offsets before expiry, for example [3, 1, 0]."),
+    )
+    reminder_days_after_expiry = models.JSONField(
+        _("reminder days after expiry"),
+        default=default_reminder_days_after_expiry,
+        blank=True,
+        help_text=_("Integer day offsets after expiry, for example [1, 3]."),
+    )
+    low_traffic_reminders_enabled = models.BooleanField(
+        _("low traffic reminders enabled"),
+        default=True,
+        help_text=_("Send Telegram reminders when remaining traffic is below the configured thresholds."),
+    )
+    low_traffic_percent_threshold = models.PositiveIntegerField(
+        _("low traffic percent threshold"),
+        default=20,
+        validators=[MinValueValidator(1), MaxValueValidator(100)],
+        help_text=_("Send a reminder when remaining traffic percent is at or below this value."),
+    )
+    low_traffic_gb_threshold = models.DecimalField(
+        _("low traffic GB threshold"),
+        max_digits=8,
+        decimal_places=3,
+        default=Decimal("2.000"),
+        validators=[MinValueValidator(Decimal("0.001"))],
+        help_text=_("Send a reminder when remaining traffic GB is at or below this value."),
+    )
+    reminder_cooldown_hours = models.PositiveIntegerField(
+        _("reminder cooldown hours"),
+        default=24,
+        validators=[MinValueValidator(1)],
+        help_text=_("Minimum hours between retryable reminders for the same VPN client."),
+    )
+    reminder_max_per_client_per_day = models.PositiveIntegerField(
+        _("reminder max per client per day"),
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text=_("Maximum sent reminder messages per VPN client per calendar day."),
+    )
+    good_customer_min_total_amount = models.PositiveIntegerField(
+        _("good customer minimum total amount"),
+        default=500000,
+        help_text=_("Minimum successful purchase amount used to tag good customers."),
+    )
+    loyal_customer_min_orders_30d = models.PositiveIntegerField(
+        _("loyal customer minimum orders in 30 days"),
+        default=2,
+        help_text=_("Minimum successful orders in the last 30 days used to tag loyal customers."),
+    )
+    top_customers_limit = models.PositiveIntegerField(
+        _("top customers limit"),
+        default=10,
+        help_text=_("Number of customers included in top buyer and top referrer segments."),
+    )
+    inactive_customer_days = models.PositiveIntegerField(
+        _("inactive customer days"),
+        default=30,
+        help_text=_("Customers with older successful purchases and no recent purchase are tagged inactive."),
+    )
     bank_name = models.CharField(_("bank name"), max_length=100, blank=True, null=True)
     sheba_number = models.CharField(_("Sheba number"), max_length=34, blank=True, null=True)
 
@@ -225,6 +422,69 @@ class Store(TimeStampedModel):
 
     def __str__(self):
         return self.name
+
+    @property
+    def referral_reward_traffic_gb(self):
+        return self.referral_reward_gb
+
+    def clean(self):
+        super().clean()
+        errors = {}
+
+        for field_name in ("reminder_days_before_expiry", "reminder_days_after_expiry"):
+            value = getattr(self, field_name)
+            if not isinstance(value, (list, tuple)):
+                errors[field_name] = _("Reminder days must be a list of integers.")
+                continue
+            invalid_items = [
+                item
+                for item in value
+                if isinstance(item, bool) or not isinstance(item, int)
+            ]
+            if invalid_items:
+                errors[field_name] = _("Reminder days must contain integers only.")
+
+        if self.low_traffic_percent_threshold is not None and not (
+            1 <= int(self.low_traffic_percent_threshold) <= 100
+        ):
+            errors["low_traffic_percent_threshold"] = _("Low traffic percent threshold must be between 1 and 100.")
+        if self.low_traffic_gb_threshold is not None and self.low_traffic_gb_threshold <= 0:
+            errors["low_traffic_gb_threshold"] = _("Low traffic GB threshold must be positive.")
+        if self.reminder_cooldown_hours is not None and self.reminder_cooldown_hours <= 0:
+            errors["reminder_cooldown_hours"] = _("Reminder cooldown must be positive.")
+        if self.reminder_max_per_client_per_day is not None and self.reminder_max_per_client_per_day <= 0:
+            errors["reminder_max_per_client_per_day"] = _("Daily reminder limit must be positive.")
+
+        if self.free_trial_traffic_gb is not None and self.free_trial_traffic_gb <= 0:
+            errors["free_trial_traffic_gb"] = _("Free trial traffic must be positive.")
+        if self.free_trial_duration_hours is not None and self.free_trial_duration_hours <= 0:
+            errors["free_trial_duration_hours"] = _("Free trial duration must be positive.")
+        if self.free_trial_cooldown_days is not None and self.free_trial_cooldown_days <= 0:
+            errors["free_trial_cooldown_days"] = _("Free trial cooldown must be positive.")
+
+        if not self.free_trial_enabled:
+            if errors:
+                raise ValidationError(errors)
+            return
+
+        panel = self.free_trial_panel
+        inbound = self.free_trial_inbound
+        if not panel:
+            errors["free_trial_panel"] = _("Free trial panel is required when free trial is enabled.")
+        elif not panel.is_active:
+            errors["free_trial_panel"] = _("Free trial panel must be active.")
+        elif self.pk and panel.store_id not in (None, self.pk):
+            errors["free_trial_panel"] = _("Free trial panel must belong to this store.")
+
+        if not inbound:
+            errors["free_trial_inbound"] = _("Free trial inbound is required when free trial is enabled.")
+        elif not inbound.is_active:
+            errors["free_trial_inbound"] = _("Free trial inbound must be active.")
+        elif panel and inbound.panel_id != panel.pk:
+            errors["free_trial_inbound"] = _("Free trial inbound must belong to the selected panel.")
+
+        if errors:
+            raise ValidationError(errors)
 
     @property
     def telegram_support_url(self):
@@ -249,6 +509,41 @@ class Store(TimeStampedModel):
         if value.startswith(("http://", "https://")):
             return value
         return f"https://ble.ir/{value.lstrip('@')}"
+
+
+class Operator(TimeStampedModel):
+    store = models.ForeignKey(
+        Store,
+        verbose_name=_("store"),
+        on_delete=models.CASCADE,
+        related_name="operators",
+        null=True,
+        blank=True,
+    )
+    name = models.CharField(_("name"), max_length=100)
+    slug = models.SlugField(_("slug"), max_length=100, blank=True)
+    is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    description = models.TextField(_("description"), blank=True)
+    sort_order = models.PositiveIntegerField(_("sort order"), default=0, db_index=True)
+
+    class Meta:
+        verbose_name = _("operator")
+        verbose_name_plural = _("operators")
+        ordering = ["sort_order", "name", "id"]
+        indexes = [
+            models.Index(fields=["store", "is_active", "sort_order"]),
+            models.Index(fields=["is_active", "sort_order"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["store", "slug"],
+                name="unique_operator_slug_per_store",
+                condition=~models.Q(slug=""),
+            ),
+        ]
+
+    def __str__(self):
+        return self.name
 
 
 class BotConfiguration(TimeStampedModel):
@@ -278,6 +573,11 @@ class BotConfiguration(TimeStampedModel):
         max_length=80,
         help_text=_("Admin chat/user ID that receives notifications."),
     )
+    additional_admin_user_ids = models.TextField(
+        _("additional admin user IDs"),
+        blank=True,
+        help_text=_("Optional extra admin chat/user IDs, separated by comma, space, or new line."),
+    )
     webhook_secret = models.CharField(
         _("webhook secret"),
         max_length=32,
@@ -286,6 +586,34 @@ class BotConfiguration(TimeStampedModel):
         editable=False,
     )
     is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    force_telegram_channel_join = models.BooleanField(
+        _("force Telegram channel join"),
+        default=False,
+        help_text=_("Require Telegram users to join the configured channel before using customer bot actions."),
+    )
+    telegram_required_channel_id = models.CharField(
+        _("Telegram required channel ID"),
+        max_length=120,
+        blank=True,
+        help_text=_("Numeric channel ID, for example -1001234567890."),
+    )
+    telegram_required_channel_username = models.CharField(
+        _("Telegram required channel username"),
+        max_length=100,
+        blank=True,
+        help_text=_("Channel username with or without @."),
+    )
+    telegram_required_channel_invite_link = models.URLField(
+        _("Telegram required channel invite link"),
+        max_length=255,
+        blank=True,
+        help_text=_("Public or private invite link shown to users."),
+    )
+    telegram_join_check_message = models.TextField(
+        _("Telegram join check message"),
+        default="برای استفاده از ربات ابتدا عضو کانال شوید.",
+        blank=True,
+    )
     notify_new_orders = models.BooleanField(_("notify new orders"), default=True)
     notify_order_updates = models.BooleanField(_("notify order updates"), default=True)
     send_sales_reports = models.BooleanField(_("send sales reports"), default=True)
@@ -309,10 +637,34 @@ class BotConfiguration(TimeStampedModel):
     def __str__(self):
         return f"{self.get_provider_display()} - {self.name}"
 
+    def get_admin_user_ids(self):
+        raw_ids = [self.admin_user_id or ""]
+        raw_ids.extend(
+            (self.additional_admin_user_ids or "")
+            .replace("،", ",")
+            .replace(";", ",")
+            .replace("\n", ",")
+            .replace("\r", ",")
+            .split(",")
+        )
+        admin_ids = []
+        for raw_id in raw_ids:
+            for value in str(raw_id or "").split():
+                value = value.strip()
+                if value and value not in admin_ids:
+                    admin_ids.append(value)
+        return admin_ids
+
+    def is_admin_user(self, user_id):
+        return str(user_id or "") in self.get_admin_user_ids()
+
 
 class BotUser(TimeStampedModel):
     class State(models.TextChoices):
         IDLE = "idle", _("Idle")
+        PROFILE_WAIT_PHONE = "profile_wait_phone", _("Profile: waiting for phone")
+        BUY_WAIT_CUSTOM_VOLUME = "buy_wait_custom_volume", _("Buy: waiting for custom volume")
+        BUY_WAIT_QUANTITY = "buy_wait_quantity", _("Buy: waiting for quantity")
         BUY_WAIT_NAME = "buy_wait_name", _("Buy: waiting for payer name")
         BUY_WAIT_LAST4 = "buy_wait_last4", _("Buy: waiting for card last4")
         BUY_WAIT_TIME = "buy_wait_time", _("Buy: waiting for payment time")
@@ -321,6 +673,8 @@ class BotUser(TimeStampedModel):
         GRANT_WAIT_USER = "grant_wait_user", _("Grant: waiting for user")
         GRANT_WAIT_REASON = "grant_wait_reason", _("Grant: waiting for reason")
         GRANT_CONFIRM = "grant_confirm", _("Grant: confirm")
+        BROADCAST_WAIT_TEXT = "broadcast_wait_text", _("Broadcast: waiting for text")
+        BROADCAST_CONFIRM = "broadcast_confirm", _("Broadcast: confirm")
 
     bot_config = models.ForeignKey(
         BotConfiguration,
@@ -379,9 +733,136 @@ class BotUser(TimeStampedModel):
             self.save(update_fields=["state", "state_data", "updated_at"])
 
 
+class SupportConversation(TimeStampedModel):
+    class Status(models.TextChoices):
+        OPEN = "open", _("Open")
+        WAITING_ADMIN = "waiting_admin", _("Waiting for admin")
+        ANSWERED = "answered", _("Answered")
+        CLOSED = "closed", _("Closed")
+
+    store = models.ForeignKey(
+        Store,
+        verbose_name=_("store"),
+        on_delete=models.SET_NULL,
+        related_name="support_conversations",
+        null=True,
+        blank=True,
+    )
+    customer = models.ForeignKey(
+        "Customer",
+        verbose_name=_("customer"),
+        on_delete=models.SET_NULL,
+        related_name="support_conversations",
+        null=True,
+        blank=True,
+    )
+    subject = models.CharField(_("subject"), max_length=150, default=_("Support chat"))
+    contact_value = models.CharField(
+        _("phone number or Telegram ID"),
+        max_length=120,
+        blank=True,
+        help_text=_("Customer phone number, Telegram username, or Telegram ID for follow-up."),
+    )
+    status = models.CharField(
+        _("status"),
+        max_length=30,
+        choices=Status.choices,
+        default=Status.OPEN,
+        db_index=True,
+    )
+    last_customer_message_at = models.DateTimeField(_("last customer message at"), blank=True, null=True)
+    last_admin_message_at = models.DateTimeField(_("last admin message at"), blank=True, null=True)
+    closed_at = models.DateTimeField(_("closed at"), blank=True, null=True)
+
+    class Meta:
+        verbose_name = _("support conversation")
+        verbose_name_plural = _("support conversations")
+        ordering = ["-updated_at"]
+        indexes = [
+            models.Index(fields=["customer", "status", "updated_at"]),
+            models.Index(fields=["store", "status", "updated_at"]),
+        ]
+
+    def __str__(self):
+        label = self.contact_value or self.customer or _("Guest")
+        return f"{self.pk or '-'} - {label}"
+
+    def mark_waiting_admin(self, *, save=True):
+        now = timezone.now()
+        self.status = self.Status.WAITING_ADMIN
+        self.last_customer_message_at = now
+        self.closed_at = None
+        if save:
+            self.save(update_fields=["status", "last_customer_message_at", "closed_at", "updated_at"])
+
+    def mark_answered(self, *, save=True):
+        now = timezone.now()
+        self.status = self.Status.ANSWERED
+        self.last_admin_message_at = now
+        if save:
+            self.save(update_fields=["status", "last_admin_message_at", "updated_at"])
+
+    def close(self, *, save=True):
+        self.status = self.Status.CLOSED
+        self.closed_at = timezone.now()
+        if save:
+            self.save(update_fields=["status", "closed_at", "updated_at"])
+
+
+class SupportMessage(TimeStampedModel):
+    class SenderType(models.TextChoices):
+        CUSTOMER = "customer", _("Customer")
+        ADMIN = "admin", _("Admin")
+        SYSTEM = "system", _("System")
+
+    conversation = models.ForeignKey(
+        SupportConversation,
+        verbose_name=_("support conversation"),
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    sender_type = models.CharField(
+        _("sender type"),
+        max_length=20,
+        choices=SenderType.choices,
+        db_index=True,
+    )
+    customer = models.ForeignKey(
+        "Customer",
+        verbose_name=_("customer"),
+        on_delete=models.SET_NULL,
+        related_name="support_messages",
+        null=True,
+        blank=True,
+    )
+    bot_config = models.ForeignKey(
+        BotConfiguration,
+        verbose_name=_("bot configuration"),
+        on_delete=models.SET_NULL,
+        related_name="support_messages",
+        null=True,
+        blank=True,
+    )
+    body = models.TextField(_("body"))
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("support message")
+        verbose_name_plural = _("support messages")
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["conversation", "created_at"]),
+            models.Index(fields=["sender_type", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.get_sender_type_display()} #{self.pk or '-'}"
+
+
 class BotPendingAction(TimeStampedModel):
     class Action(models.TextChoices):
         REJECT_ORDER = "reject_order", _("Reject order")
+        SUPPORT_REPLY = "support_reply", _("Support reply")
 
     class Status(models.TextChoices):
         PENDING = "pending", _("Pending")
@@ -399,6 +880,16 @@ class BotPendingAction(TimeStampedModel):
         verbose_name=_("order"),
         on_delete=models.CASCADE,
         related_name="bot_pending_actions",
+        null=True,
+        blank=True,
+    )
+    support_conversation = models.ForeignKey(
+        SupportConversation,
+        verbose_name=_("support conversation"),
+        on_delete=models.CASCADE,
+        related_name="bot_pending_actions",
+        null=True,
+        blank=True,
     )
     admin_user_id = models.CharField(_("admin user ID"), max_length=80, db_index=True)
     action = models.CharField(_("action"), max_length=30, choices=Action.choices)
@@ -418,10 +909,12 @@ class BotPendingAction(TimeStampedModel):
         indexes = [
             models.Index(fields=["bot_config", "admin_user_id", "status", "created_at"]),
             models.Index(fields=["order", "status"]),
+            models.Index(fields=["support_conversation", "status"]),
         ]
 
     def __str__(self):
-        return f"{self.get_action_display()} for {self.order_id}"
+        target = self.order_id or self.support_conversation_id or "-"
+        return f"{self.get_action_display()} for {target}"
 
     def mark_completed(self):
         self.status = self.Status.COMPLETED
@@ -429,11 +922,54 @@ class BotPendingAction(TimeStampedModel):
         self.save(update_fields=["status", "resolved_at", "updated_at"])
 
 
+class BotAdminOrderMessage(TimeStampedModel):
+    class MessageKind(models.TextChoices):
+        TEXT = "text", _("Text")
+        PHOTO = "photo", _("Photo")
+
+    bot_config = models.ForeignKey(
+        BotConfiguration,
+        verbose_name=_("bot configuration"),
+        on_delete=models.CASCADE,
+        related_name="admin_order_messages",
+    )
+    order = models.ForeignKey(
+        "Order",
+        verbose_name=_("order"),
+        on_delete=models.CASCADE,
+        related_name="bot_admin_messages",
+    )
+    admin_user_id = models.CharField(_("admin user ID"), max_length=80, db_index=True)
+    chat_id = models.CharField(_("chat ID"), max_length=80, db_index=True)
+    message_id = models.CharField(_("message ID"), max_length=80, db_index=True)
+    message_kind = models.CharField(
+        _("message kind"),
+        max_length=20,
+        choices=MessageKind.choices,
+        default=MessageKind.TEXT,
+    )
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("bot admin order message")
+        verbose_name_plural = _("bot admin order messages")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["bot_config", "order", "admin_user_id"]),
+            models.Index(fields=["order", "message_kind"]),
+        ]
+
+    def __str__(self):
+        return f"{self.bot_config} order={self.order_id} admin={self.admin_user_id} message={self.message_id}"
+
+
 class BotEventLog(TimeStampedModel):
     class EventType(models.TextChoices):
         NEW_ORDER = "new_order", _("New order")
         ORDER_APPROVED = "order_approved", _("Order approved")
         ORDER_REJECTED = "order_rejected", _("Order rejected")
+        SUPPORT_MESSAGE = "support_message", _("Support message")
+        SUPPORT_REPLY = "support_reply", _("Support reply")
         SALES_REPORT = "sales_report", _("Sales report")
         WEBHOOK = "webhook", _("Webhook")
         CALLBACK = "callback", _("Callback")
@@ -495,6 +1031,13 @@ class Plan(TimeStampedModel):
         null=True,
         blank=True,
     )
+    operators = models.ManyToManyField(
+        Operator,
+        verbose_name=_("operators"),
+        related_name="plans",
+        blank=True,
+        help_text=_("Operators that can buy this plan when operator-based sales mode is enabled."),
+    )
     name = models.CharField(_("name"), max_length=100)
     slug = models.SlugField(_("slug"), max_length=100, blank=True)
     description = models.TextField(_("description"), blank=True)
@@ -522,6 +1065,12 @@ class Plan(TimeStampedModel):
         db_index=True,
         help_text=_("Hide internal reward plans from the public plan selector when disabled."),
     )
+    is_custom_volume = models.BooleanField(
+        _("is custom volume"),
+        default=False,
+        db_index=True,
+        help_text=_("Generated internal plan for custom-volume purchases."),
+    )
 
     class Meta:
         verbose_name = _("plan")
@@ -544,6 +1093,11 @@ class Plan(TimeStampedModel):
     @property
     def traffic_limit_bytes(self):
         return int((self.volume_gb or Decimal("0")) * Decimal(1024 ** 3))
+
+    def is_available_for_operator(self, operator):
+        if not operator:
+            return False
+        return self.operators.filter(pk=operator.pk, is_active=True).exists()
 
 
 class DiscountCode(TimeStampedModel):
@@ -619,7 +1173,7 @@ class DiscountCode(TimeStampedModel):
             return True
         return self.applicable_plans.filter(pk=plan.pk).exists()
 
-    def validate_for_plan(self, plan, now=None):
+    def validate_basic(self, now=None):
         if self.discount_type == self.DiscountType.PERCENTAGE and self.value > 100:
             raise ValidationError(_("Percentage discounts cannot exceed 100."))
         if not self.is_active:
@@ -628,6 +1182,9 @@ class DiscountCode(TimeStampedModel):
             raise ValidationError(_("Discount code is not valid right now."))
         if not self.has_usage_available():
             raise ValidationError(_("Discount code usage limit has been reached."))
+
+    def validate_for_plan(self, plan, now=None):
+        self.validate_basic(now=now)
         if not self.is_applicable_to_plan(plan):
             raise ValidationError(_("Discount code is not available for this plan."))
 
@@ -695,11 +1252,26 @@ class Customer(TimeStampedModel):
     def __str__(self):
         return self.display_name or f"Customer {str(self.public_id)[:8]}"
 
+    def clean(self):
+        super().clean()
+        if self.pk and self.referred_by_id == self.pk:
+            raise ValidationError({"referred_by": _("A customer cannot refer themselves.")})
+
     def save(self, *args, **kwargs):
         if self.username:
             self.username = self.username.strip()
         if self.phone_number:
             self.phone_number = self.phone_number.strip()
+        if self.pk:
+            if self.referred_by_id == self.pk:
+                raise ValidationError({"referred_by": _("A customer cannot refer themselves.")})
+            old_referred_by_id = (
+                Customer.objects.filter(pk=self.pk)
+                .values_list("referred_by_id", flat=True)
+                .first()
+            )
+            if old_referred_by_id and old_referred_by_id != self.referred_by_id:
+                raise ValidationError({"referred_by": _("Referrer cannot be changed once set.")})
         if not self.referral_code:
             self.referral_code = self.generate_unique_referral_code()
         if not self.display_name and self.public_id:
@@ -731,6 +1303,155 @@ class Customer(TimeStampedModel):
     @property
     def successful_referrals_count(self):
         return self.referrals_made.filter(status=Referral.Status.PURCHASED).count()
+
+
+class CustomerAnalyticsReport(Customer):
+    class Meta:
+        proxy = True
+        verbose_name = _("customer analytics report")
+        verbose_name_plural = _("customer analytics reports")
+        ordering = ["-created_at"]
+
+
+class BroadcastMessage(TimeStampedModel):
+    class AudienceType(models.TextChoices):
+        ALL = "all", _("All")
+        ACTIVE_CUSTOMERS = "active_customers", _("Active customers")
+        CUSTOMERS_WITH_ACTIVE_CONFIG = "customers_with_active_config", _("Customers with active config")
+        CUSTOMERS_WITHOUT_ORDER = "customers_without_order", _("Customers without order")
+        LOYAL = "loyal", _("Loyal")
+        GOOD = "good", _("Good")
+        TOP_BUYER = "top_buyer", _("Top buyer")
+        TOP_REFERRER = "top_referrer", _("Top referrer")
+        INACTIVE = "inactive", _("Inactive")
+        NO_ORDER = "no_order", _("No order")
+
+    class Channel(models.TextChoices):
+        TELEGRAM = "telegram", _("Telegram")
+        BALE = "bale", _("Bale")
+        ALL_AVAILABLE = "all_available", _("All available")
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", _("Draft")
+        QUEUED = "queued", _("Queued")
+        SENDING = "sending", _("Sending")
+        SENT = "sent", _("Sent")
+        FAILED = "failed", _("Failed")
+        CANCELLED = "cancelled", _("Cancelled")
+
+    store = models.ForeignKey(
+        Store,
+        verbose_name=_("store"),
+        on_delete=models.SET_NULL,
+        related_name="broadcast_messages",
+        null=True,
+        blank=True,
+    )
+    title = models.CharField(_("title"), max_length=180)
+    message_text = models.TextField(_("message text"))
+    audience_type = models.CharField(
+        _("audience type"),
+        max_length=40,
+        choices=AudienceType.choices,
+        default=AudienceType.ALL,
+        db_index=True,
+    )
+    channel = models.CharField(
+        _("channel"),
+        max_length=30,
+        choices=Channel.choices,
+        default=Channel.TELEGRAM,
+        db_index=True,
+    )
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.DRAFT,
+        db_index=True,
+    )
+    scheduled_at = models.DateTimeField(_("scheduled at"), blank=True, null=True)
+    sent_at = models.DateTimeField(_("sent at"), blank=True, null=True)
+    total_recipients = models.PositiveIntegerField(_("total recipients"), default=0)
+    success_count = models.PositiveIntegerField(_("success count"), default=0)
+    failed_count = models.PositiveIntegerField(_("failed count"), default=0)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("broadcast message")
+        verbose_name_plural = _("broadcast messages")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["audience_type", "status"]),
+            models.Index(fields=["channel", "status"]),
+            models.Index(fields=["scheduled_at", "status"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+    def clean(self):
+        super().clean()
+        if not (self.title or "").strip():
+            raise ValidationError({"title": _("Title is required.")})
+        if not (self.message_text or "").strip():
+            raise ValidationError({"message_text": _("Message text is required.")})
+
+    def save(self, *args, **kwargs):
+        self.title = (self.title or "").strip()
+        self.message_text = (self.message_text or "").strip()
+        super().save(*args, **kwargs)
+
+
+class BroadcastRecipient(TimeStampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", _("Pending")
+        SENT = "sent", _("Sent")
+        FAILED = "failed", _("Failed")
+        SKIPPED = "skipped", _("Skipped")
+
+    campaign = models.ForeignKey(
+        BroadcastMessage,
+        verbose_name=_("campaign"),
+        on_delete=models.CASCADE,
+        related_name="recipients",
+    )
+    customer = models.ForeignKey(
+        Customer,
+        verbose_name=_("customer"),
+        on_delete=models.CASCADE,
+        related_name="broadcast_recipients",
+    )
+    channel = models.CharField(_("channel"), max_length=30, choices=BroadcastMessage.Channel.choices, db_index=True)
+    target_identifier = models.CharField(_("target identifier"), max_length=120, blank=True)
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    error_message = models.TextField(_("error message"), blank=True)
+    sent_at = models.DateTimeField(_("sent at"), blank=True, null=True)
+
+    class Meta:
+        verbose_name = _("broadcast recipient")
+        verbose_name_plural = _("broadcast recipients")
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["campaign", "status"]),
+            models.Index(fields=["customer", "channel"]),
+            models.Index(fields=["channel", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["campaign", "customer", "channel"],
+                name="unique_broadcast_recipient_per_channel",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.campaign_id}:{self.customer_id}:{self.channel}"
 
 
 class Referral(TimeStampedModel):
@@ -868,6 +1589,107 @@ class CustomerReward(TimeStampedModel):
         return f"{self.customer} - {self.title}"
 
 
+class ReferralRewardLedger(TimeStampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", _("Pending")
+        AVAILABLE = "available", _("Available")
+        REDEEMED = "redeemed", _("Redeemed")
+        CANCELLED = "cancelled", _("Cancelled")
+
+    inviter = models.ForeignKey(
+        Customer,
+        verbose_name=_("inviter"),
+        on_delete=models.CASCADE,
+        related_name="referral_gb_rewards",
+    )
+    invited = models.ForeignKey(
+        Customer,
+        verbose_name=_("invited customer"),
+        on_delete=models.CASCADE,
+        related_name="invited_gb_rewards",
+    )
+    order = models.ForeignKey(
+        "Order",
+        verbose_name=_("order"),
+        on_delete=models.CASCADE,
+        related_name="referral_reward_ledgers",
+    )
+    reward_gb = models.DecimalField(
+        _("reward traffic GB"),
+        max_digits=8,
+        decimal_places=3,
+        help_text=_("Traffic amount for this gift package. Kept as reward_gb for legacy compatibility."),
+    )
+    reward_duration_days = models.PositiveIntegerField(
+        _("reward duration days"),
+        default=30,
+        validators=[MinValueValidator(1)],
+        help_text=_("Duration amount for this gift package."),
+    )
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    redeemed_config = models.ForeignKey(
+        "VPNClient",
+        verbose_name=_("redeemed VPN config"),
+        on_delete=models.SET_NULL,
+        related_name="redeemed_referral_rewards",
+        null=True,
+        blank=True,
+    )
+    available_at = models.DateTimeField(_("available at"), blank=True, null=True)
+    redeemed_at = models.DateTimeField(_("redeemed at"), blank=True, null=True)
+    applied_traffic_gb = models.DecimalField(
+        _("applied traffic GB"),
+        max_digits=8,
+        decimal_places=3,
+        default=Decimal("0"),
+        validators=[MinValueValidator(Decimal("0"))],
+        help_text=_("Traffic actually applied when this package was redeemed."),
+    )
+    applied_duration_days = models.PositiveIntegerField(
+        _("applied duration days"),
+        default=0,
+        help_text=_("Duration actually applied when this package was redeemed."),
+    )
+    notes = models.TextField(_("notes"), blank=True)
+
+    class Meta:
+        verbose_name = _("referral reward ledger")
+        verbose_name_plural = _("referral reward ledger")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["inviter", "status", "created_at"]),
+            models.Index(fields=["invited", "status"]),
+            models.Index(fields=["order", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["invited"],
+                name="unique_referral_gb_reward_per_invited_customer",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(inviter=models.F("invited")),
+                name="referral_gb_reward_no_self_invite",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.inviter} <- {self.reward_gb}GB/{self.reward_duration_days}d from {self.invited}"
+
+    @property
+    def reward_traffic_gb(self):
+        return self.reward_gb
+
+    @reward_traffic_gb.setter
+    def reward_traffic_gb(self, value):
+        self.reward_gb = value
+
+
 class Panel(TimeStampedModel):
     store = models.ForeignKey(
         Store,
@@ -881,6 +1703,14 @@ class Panel(TimeStampedModel):
     url = models.URLField(_("URL"), help_text=_("Full panel URL without trailing slash."))
     username = models.CharField(_("username"), max_length=100)
     password = models.CharField(_("password"), max_length=100)
+    proxy_url = models.URLField(
+        _("HTTP proxy URL"),
+        max_length=500,
+        blank=True,
+        null=True,
+        validators=[URLValidator(schemes=["http", "https"])],
+        help_text=_("Optional HTTP proxy URL for this panel, e.g. http://user:pass@proxy-host:port."),
+    )
     is_active = models.BooleanField(_("is active"), default=True, db_index=True)
     last_sync_at = models.DateTimeField(_("last sync at"), blank=True, null=True)
 
@@ -968,7 +1798,25 @@ class Inbound(TimeStampedModel):
 
     def __str__(self):
         label = self.remark or f"Inbound {self.inbound_id}"
-        return f"{self.panel.name} - {label}"
+        panel_name = getattr(getattr(self, "panel", None), "name", None) or _("بدون پنل")
+        return f"{panel_name} - {label}"
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        panel = None
+        try:
+            panel = self.panel
+        except (Panel.DoesNotExist, AttributeError):
+            panel = None
+
+        if not panel:
+            errors["panel"] = _("هر inbound باید به یک پنل مشخص وصل باشد.")
+        elif self.is_active and not panel.is_active:
+            errors["is_active"] = _("اینباند فعال نمی‌تواند به پنل غیرفعال وصل باشد.")
+
+        if errors:
+            raise ValidationError(errors)
 
     @property
     def available_capacity(self):
@@ -1023,6 +1871,15 @@ class Order(TimeStampedModel):
         blank=True,
     )
     plan = models.ForeignKey(Plan, verbose_name=_("plan"), on_delete=models.PROTECT, related_name="orders")
+    operator = models.ForeignKey(
+        Operator,
+        verbose_name=_("operator"),
+        on_delete=models.SET_NULL,
+        related_name="orders",
+        null=True,
+        blank=True,
+        help_text=_("Selected internet operator for operator-based sales mode."),
+    )
     quantity = models.PositiveIntegerField(
         _("quantity"),
         default=1,
@@ -1104,6 +1961,8 @@ class Order(TimeStampedModel):
         blank=True,
         null=True,
     )
+    admin_notified_at = models.DateTimeField(_("admin notified at"), blank=True, null=True)
+    admin_receipt_notified_at = models.DateTimeField(_("admin receipt notified at"), blank=True, null=True)
 
     verification_status = models.CharField(
         _("verification status"),
@@ -1149,6 +2008,7 @@ class Order(TimeStampedModel):
         indexes = [
             models.Index(fields=["customer", "status", "created_at"]),
             models.Index(fields=["store", "status", "created_at"]),
+            models.Index(fields=["operator", "status", "created_at"]),
             models.Index(fields=["verification_status", "created_at"]),
             models.Index(fields=["payment_method", "payment_gateway"]),
             models.Index(fields=["discount_code", "created_at"]),
@@ -1160,6 +2020,16 @@ class Order(TimeStampedModel):
             "tracking_code": self.order_tracking_code,
             "status": self.get_status_display(),
         }
+
+    def clean(self):
+        super().clean()
+        sales_mode = self.store.sales_mode if self.store_id else Store.SalesMode.TUNNEL
+        if sales_mode != Store.SalesMode.OPERATOR_BASED:
+            return
+        if not self.operator_id:
+            raise ValidationError({"operator": _("Operator is required for operator-based sales mode.")})
+        if self.plan_id and not self.plan.is_available_for_operator(self.operator):
+            raise ValidationError({"plan": _("Selected plan is not available for the selected operator.")})
 
     @property
     def subtotal_amount(self):
@@ -1253,6 +2123,7 @@ class Order(TimeStampedModel):
         receipt_image=None,
         receipt_text="",
         require_receipt=False,
+        require_receipt_image=False,
     ):
         cleaned = clean_manual_payment_submission(
             sender_card_name=sender_card_name,
@@ -1261,6 +2132,7 @@ class Order(TimeStampedModel):
             receipt_image=receipt_image,
             receipt_text=receipt_text,
             require_receipt=require_receipt,
+            require_receipt_image=require_receipt_image,
             existing_sender_card_name=self.sender_card_name,
             existing_sender_card_last4=self.sender_card_last4,
         )
@@ -1425,6 +2297,154 @@ class VPNClient(TimeStampedModel):
             self.last_online_at = stats["last_online_at"]
         self.last_synced_at = timezone.now()
         self.xui_raw = stats.get("raw", {})
+
+
+class VPNClientReminderLog(TimeStampedModel):
+    class ReminderType(models.TextChoices):
+        EXPIRY_BEFORE = "expiry_before", _("Expiry before")
+        EXPIRY_TODAY = "expiry_today", _("Expiry today")
+        EXPIRY_AFTER = "expiry_after", _("Expiry after")
+        LOW_TRAFFIC = "low_traffic", _("Low traffic")
+
+    class Status(models.TextChoices):
+        SENT = "sent", _("Sent")
+        SKIPPED = "skipped", _("Skipped")
+        FAILED = "failed", _("Failed")
+
+    customer = models.ForeignKey(
+        Customer,
+        verbose_name=_("customer"),
+        on_delete=models.SET_NULL,
+        related_name="vpn_reminder_logs",
+        null=True,
+        blank=True,
+    )
+    vpn_client = models.ForeignKey(
+        VPNClient,
+        verbose_name=_("VPN client"),
+        on_delete=models.CASCADE,
+        related_name="reminder_logs",
+    )
+    reminder_type = models.CharField(
+        _("reminder type"),
+        max_length=30,
+        choices=ReminderType.choices,
+        db_index=True,
+    )
+    trigger_key = models.CharField(_("trigger key"), max_length=80, db_index=True)
+    trigger_date = models.DateField(_("trigger date"), default=timezone.localdate, db_index=True)
+    sent_to_telegram_id = models.CharField(_("sent to Telegram ID"), max_length=80, blank=True, db_index=True)
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.SKIPPED,
+        db_index=True,
+    )
+    message_text = models.TextField(_("message text"), blank=True)
+    error_message = models.TextField(_("error message"), blank=True)
+    sent_at = models.DateTimeField(_("sent at"), blank=True, null=True)
+
+    class Meta:
+        verbose_name = _("VPN client reminder log")
+        verbose_name_plural = _("VPN client reminder logs")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["customer", "created_at"]),
+            models.Index(fields=["vpn_client", "reminder_type", "trigger_key"]),
+            models.Index(fields=["status", "trigger_date"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["vpn_client", "reminder_type", "trigger_key", "trigger_date"],
+                name="unique_vpn_client_reminder_per_trigger_date",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.vpn_client} {self.reminder_type}:{self.trigger_key} - {self.status}"
+
+
+class FreeTrialRequest(TimeStampedModel):
+    class Status(models.TextChoices):
+        CREATED = "created", _("Created")
+        DELIVERED = "delivered", _("Delivered")
+        FAILED = "failed", _("Failed")
+        CANCELLED = "cancelled", _("Cancelled")
+
+    customer = models.ForeignKey(
+        Customer,
+        verbose_name=_("customer"),
+        on_delete=models.SET_NULL,
+        related_name="free_trial_requests",
+        null=True,
+        blank=True,
+    )
+    panel = models.ForeignKey(
+        Panel,
+        verbose_name=_("panel"),
+        on_delete=models.PROTECT,
+        related_name="free_trial_requests",
+    )
+    inbound = models.ForeignKey(
+        Inbound,
+        verbose_name=_("inbound"),
+        on_delete=models.PROTECT,
+        related_name="free_trial_requests",
+    )
+    vpn_client = models.ForeignKey(
+        VPNClient,
+        verbose_name=_("VPN client"),
+        on_delete=models.SET_NULL,
+        related_name="free_trial_requests",
+        null=True,
+        blank=True,
+    )
+    telegram_user_id = models.CharField(_("Telegram user ID"), max_length=80, blank=True, db_index=True)
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.CREATED,
+        db_index=True,
+    )
+    traffic_gb = models.DecimalField(
+        _("traffic GB"),
+        max_digits=8,
+        decimal_places=3,
+        validators=[MinValueValidator(Decimal("0.001"))],
+    )
+    duration_hours = models.PositiveIntegerField(_("duration hours"), validators=[MinValueValidator(1)])
+    config_link = models.TextField(_("config link"), blank=True)
+    error_message = models.TextField(_("error message"), blank=True)
+    delivered_at = models.DateTimeField(_("delivered at"), blank=True, null=True)
+    expires_at = models.DateTimeField(_("expires at"), blank=True, null=True)
+
+    class Meta:
+        verbose_name = _("free trial request")
+        verbose_name_plural = _("free trial requests")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["customer", "created_at"]),
+            models.Index(fields=["telegram_user_id", "created_at"]),
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self):
+        target = self.customer_id or self.telegram_user_id or "-"
+        return f"Free trial {target} - {self.get_status_display()}"
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        if self.inbound_id and self.panel_id and self.inbound.panel_id != self.panel_id:
+            errors["inbound"] = _("Inbound must belong to the selected panel.")
+        if self.traffic_gb is not None and self.traffic_gb <= 0:
+            errors["traffic_gb"] = _("Traffic must be positive.")
+        if self.duration_hours is not None and self.duration_hours <= 0:
+            errors["duration_hours"] = _("Duration must be positive.")
+        if errors:
+            raise ValidationError(errors)
 
 
 class VPNClientUsageSnapshot(models.Model):

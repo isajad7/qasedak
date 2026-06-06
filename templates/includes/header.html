@@ -15,20 +15,18 @@
 
             <nav class="hidden items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] p-1 text-sm text-slate-300 md:flex" aria-label="ناوبری اصلی">
                 <a href="{% url 'home' %}" class="rounded-full px-4 py-2 transition-colors hover:bg-white/10 hover:text-white">خرید</a>
+                <a href="{% url 'support' %}" class="rounded-full px-4 py-2 transition-colors hover:bg-white/10 hover:text-white">پشتیبانی</a>
                 {% if current_customer_has_orders %}
                     <a href="{% url 'dashboard' %}" class="rounded-full px-4 py-2 transition-colors hover:bg-white/10 hover:text-white">داشبورد</a>
-                {% endif %}
-                {% if store.telegram_channel %}
-                    <a href="{{ store.telegram_channel }}" target="_blank" rel="noopener" class="rounded-full px-4 py-2 transition-colors hover:bg-white/10 hover:text-white">کانال</a>
                 {% endif %}
             </nav>
 
             <div class="flex shrink-0 items-center gap-2">
                 {% if store.telegram_support %}
-                    <a href="{{ store.telegram_support_url }}" target="_blank" rel="noopener" class="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-sky-500 px-3 text-sm font-bold text-slate-950 transition-colors hover:bg-sky-400" aria-label="پشتیبانی تلگرام">
+                    <a href="{% url 'support' %}" class="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-sky-500 px-3 text-sm font-bold text-slate-950 transition-colors hover:bg-sky-400" aria-label="پشتیبانی">
                         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                            <path d="M21 5 3.9 11.7c-.9.4-.9 1.7.1 2l4.2 1.2 1.6 4.9c.3.9 1.5 1.1 2 .3l2.2-2.8 4.4 3.2c.8.6 1.9.1 2-1l2.3-12.9c.2-1.1-.8-1.9-1.7-1.6Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-                            <path d="m8.4 14.9 5.2-4.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+                            <path d="M5 7.5A3.5 3.5 0 0 1 8.5 4h7A3.5 3.5 0 0 1 19 7.5v4A3.5 3.5 0 0 1 15.5 15H12l-4.2 3.4V15A3.5 3.5 0 0 1 5 11.5v-4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                            <path d="M9 9.5h6M9 12h3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
                         </svg>
                         <span class="hidden sm:inline">پشتیبانی</span>
                     </a>
@@ -40,7 +38,7 @@
                     </a>
                 {% endif %}
                 {% if not store.telegram_support and not store.bale_support %}
-                    <a href="{% url 'home' %}#plans" class="inline-flex h-10 items-center rounded-2xl bg-sky-500 px-4 text-sm font-bold text-slate-950 transition-colors hover:bg-sky-400">خرید</a>
+                    <a href="{% url 'support' %}" class="inline-flex h-10 items-center rounded-2xl bg-sky-500 px-4 text-sm font-bold text-slate-950 transition-colors hover:bg-sky-400">پشتیبانی</a>
                 {% endif %}
             </div>
         </div>
@@ -48,10 +46,14 @@
 </header>
 
 <nav class="fixed inset-x-0 bottom-0 z-50 border-t border-white/10 bg-[#08101f]/95 px-3 pb-[calc(env(safe-area-inset-bottom)+0.55rem)] pt-2 shadow-[0_-16px_40px_rgba(0,0,0,0.35)] backdrop-blur-xl md:hidden" aria-label="ناوبری پایین موبایل">
-    <div class="mx-auto grid max-w-md {% if current_customer_has_orders %}grid-cols-2{% else %}grid-cols-1{% endif %} gap-2">
+    <div class="mx-auto grid max-w-md {% if current_customer_has_orders %}grid-cols-3{% else %}grid-cols-2{% endif %} gap-2">
         <a href="{% url 'home' %}" class="flex min-h-14 flex-col items-center justify-center gap-1 rounded-2xl bg-sky-500 text-[11px] font-black text-slate-950 shadow-[0_12px_28px_rgba(14,165,233,0.22)]">
             <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             <span>خرید</span>
+        </a>
+        <a href="{% url 'support' %}" class="flex min-h-14 flex-col items-center justify-center gap-1 rounded-2xl text-[11px] font-bold text-slate-400 transition-colors hover:bg-white/10 hover:text-white">
+            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7.5A3.5 3.5 0 0 1 8.5 4h7A3.5 3.5 0 0 1 19 7.5v4A3.5 3.5 0 0 1 15.5 15H12l-4.2 3.4V15A3.5 3.5 0 0 1 5 11.5v-4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+            <span>پشتیبانی</span>
         </a>
         {% if current_customer_has_orders %}
             <a href="{% url 'dashboard' %}" class="flex min-h-14 flex-col items-center justify-center gap-1 rounded-2xl text-[11px] font-bold text-slate-400 transition-colors hover:bg-white/10 hover:text-white">

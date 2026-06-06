@@ -40,14 +40,53 @@ def _order_total_field():
     return "total_price" if "total_price" in order_field_names else "amount"
 
 
-def process_incoming_payment_sms(payment_sms, *, notify=True):
-    orders = list(find_matching_orders(payment_sms.amount, payment_sms.sms_datetime))
-    payment_sms.matched_orders.set(orders)
-    payment_sms.status = IncomingPaymentSMS.Status.MATCHED if orders else IncomingPaymentSMS.Status.NO_MATCH
-    payment_sms.save(update_fields=["status"])
+def _matched_order_ids(payment_sms):
+    if not payment_sms.pk:
+        return set()
+    return set(payment_sms.matched_orders.values_list("pk", flat=True))
 
-    if orders and notify:
-        notify_admins_about_payment_match(payment_sms, orders)
+
+def process_incoming_payment_sms(payment_sms, *, notify=True):
+    if payment_sms.status == IncomingPaymentSMS.Status.CONFIRMED:
+        return list(
+            payment_sms.matched_orders
+            .select_related("customer", "plan", "store")
+            .order_by("created_at", "pk")
+        )
+
+    previous_status = payment_sms.status
+    previous_order_ids = _matched_order_ids(payment_sms)
+    orders = list(find_matching_orders(payment_sms.amount, payment_sms.sms_datetime))
+    order_ids = [order.pk for order in orders]
+    order_ids_set = set(order_ids)
+    matches_are_unchanged = (
+        previous_status == IncomingPaymentSMS.Status.MATCHED
+        and previous_order_ids == order_ids_set
+    )
+
+    if previous_order_ids != order_ids_set:
+        payment_sms.matched_orders.set(orders)
+
+    new_status = IncomingPaymentSMS.Status.MATCHED if orders else IncomingPaymentSMS.Status.NO_MATCH
+    if payment_sms.status != new_status:
+        payment_sms.status = new_status
+        payment_sms.save(update_fields=["status"])
+
+    if orders and notify and not matches_are_unchanged:
+        payment_sms_id = payment_sms.pk
+
+        def notify_after_commit():
+            sms = IncomingPaymentSMS.objects.get(pk=payment_sms_id)
+            matched_orders = list(
+                Order.objects.select_related("customer", "plan", "store", "operator").filter(pk__in=order_ids)
+            )
+            notify_admins_about_payment_match(sms, matched_orders)
+            from store.admin_notifications import notify_admins_order_needs_review
+
+            for matched_order in matched_orders:
+                notify_admins_order_needs_review(matched_order.pk)
+
+        transaction.on_commit(notify_after_commit)
 
     return orders
 
@@ -67,22 +106,31 @@ def confirm_incoming_payment_sms(payment_sms, *, order=None, user=None):
             if not payment_sms.matched_orders.filter(pk=order.pk).exists():
                 raise ValueError("The selected order is not linked to this SMS.")
 
+        if payment_sms.status == IncomingPaymentSMS.Status.CONFIRMED:
+            return order
+        if order.status in {Order.Status.REJECTED, Order.Status.CANCELLED}:
+            raise ValueError("Rejected or cancelled orders cannot be confirmed by SMS.")
+
         now = timezone.now()
-        order.is_paid = True
-        order.status = Order.Status.CONFIRMED
-        order.verification_status = Order.VerificationStatus.VERIFIED
-        order.verified_by = user
-        order.verified_at = now
-        order.save(
-            update_fields=[
-                "is_paid",
-                "status",
-                "verification_status",
-                "verified_by",
-                "verified_at",
-                "updated_at",
-            ]
-        )
+        order_update_fields = []
+        if not order.is_paid:
+            order.is_paid = True
+            order_update_fields.append("is_paid")
+        if order.status != Order.Status.COMPLETED:
+            order.status = Order.Status.CONFIRMED
+            order_update_fields.append("status")
+        if order.verification_status != Order.VerificationStatus.VERIFIED:
+            order.verification_status = Order.VerificationStatus.VERIFIED
+            order_update_fields.append("verification_status")
+        user_pk = getattr(user, "pk", None)
+        if user_pk and order.verified_by_id != user_pk:
+            order.verified_by = user
+            order_update_fields.append("verified_by")
+        if not order.verified_at:
+            order.verified_at = now
+            order_update_fields.append("verified_at")
+        if order_update_fields:
+            order.save(update_fields=[*order_update_fields, "updated_at"])
 
         payment_sms.status = IncomingPaymentSMS.Status.CONFIRMED
         payment_sms.save(update_fields=["status"])
