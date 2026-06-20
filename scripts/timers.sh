@@ -5,7 +5,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-INSTALL_DIR="/opt/vpn-store"
+INSTALL_DIR="/opt/qasedak"
 ACTION=""
 DRY_RUN=0
 YES=0

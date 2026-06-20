@@ -13,26 +13,26 @@ scripts/release_check.sh --full
 ```
 
 - Confirm CI is green on the release branch.
-- Confirm public docs use placeholders such as `example.com`, `203.0.113.10`, `/opt/vpn-store`, `vpn-store-web.service`, and `vpn-store-telegram.service`.
+- Confirm public docs use placeholders such as `example.com`, `203.0.113.10`, `/opt/qasedak`, `vpn-store-web.service`, and `vpn-store-telegram.service`.
 - Confirm no production domain, IP, path, personal deploy name, proxy credential, bot token, or card number appears in public source or docs.
 - Choose a license before public release. See `docs/productization/06-license-decision.md`.
 - Keep any private audit notes, real environment files, install configs, databases, media, logs, and backups out of the public repository.
 
 ## Install Command Placeholder
 
-Use this only after the repository exists and `OWNER/REPO` is replaced intentionally:
+Use this only after the repository exists and `isajad7/qasedak` is replaced intentionally:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/scripts/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/install.sh)
 ```
 
 The supported install path today is still a local repository checkout:
 
 ```bash
-git clone https://github.com/OWNER/REPO.git
+git clone https://github.com/isajad7/qasedak.git
 cd REPO
 cp .env.example .env
-scripts/install.sh --dry-run --yes --install-dir /opt/vpn-store
+scripts/install.sh --dry-run --yes --install-dir /opt/qasedak
 ```
 
 ## Release Package
@@ -59,15 +59,15 @@ Exclude `.git`, `.env`, databases, `data/`, `media/`, `venv/`, `node_modules/`,
 On a clean test host or disposable VM:
 
 ```bash
-git clone https://github.com/OWNER/REPO.git
+git clone https://github.com/isajad7/qasedak.git
 cd REPO
-scripts/install.sh --dry-run --yes --install-dir /opt/vpn-store
+scripts/install.sh --dry-run --yes --install-dir /opt/qasedak
 ```
 
 For a real private smoke test, run the installer with a private config, then run:
 
 ```bash
-/opt/vpn-store/scripts/doctor.sh --install-dir /opt/vpn-store --no-fail
+/opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --no-fail
 ```
 
 Live Telegram and X-UI checks stay opt-in.

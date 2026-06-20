@@ -3,13 +3,13 @@
 Start with the non-live doctor:
 
 ```bash
-/opt/vpn-store/scripts/doctor.sh --install-dir /opt/vpn-store --no-fail
+/opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --no-fail
 ```
 
 Use live checks only when network calls are intended:
 
 ```bash
-/opt/vpn-store/scripts/doctor.sh --install-dir /opt/vpn-store --live-bot --live-xui --no-fail
+/opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --live-bot --live-xui --no-fail
 ```
 
 ## Telegram Bot and Proxy
@@ -33,7 +33,7 @@ journalctl -u vpn-store-telegram.service -n 100 --no-pager
 
 ```bash
 sudo nginx -t
-/opt/vpn-store/scripts/doctor.sh --install-dir /opt/vpn-store --nginx --no-fail
+/opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --nginx --no-fail
 ```
 
 Check:
@@ -46,7 +46,7 @@ Check:
 ## Systemd Services
 
 ```bash
-/opt/vpn-store/scripts/doctor.sh --install-dir /opt/vpn-store --systemd --no-fail
+/opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --systemd --no-fail
 systemctl status vpn-store-web.service vpn-store-telegram.service
 journalctl -u vpn-store-web.service -n 100 --no-pager
 ```
@@ -64,8 +64,8 @@ Restart only after reviewing the reason for failure.
 Timers are optional:
 
 ```bash
-/opt/vpn-store/scripts/timers.sh --dry-run --install-dir /opt/vpn-store --status --all
-/opt/vpn-store/scripts/doctor.sh --install-dir /opt/vpn-store --timers --no-fail
+/opt/qasedak/scripts/timers.sh --dry-run --install-dir /opt/qasedak --status --all
+/opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --timers --no-fail
 ```
 
 Revenue Engine timer support is dry-run only through `vpn-store-revenue-scan-dry-run.timer`.
@@ -75,13 +75,13 @@ Revenue Engine timer support is dry-run only through `vpn-store-revenue-scan-dry
 Rebuild static files:
 
 ```bash
-/opt/vpn-store/venv/bin/python /opt/vpn-store/manage.py collectstatic --noinput
+/opt/qasedak/venv/bin/python /opt/qasedak/manage.py collectstatic --noinput
 ```
 
 Check nginx aliases for:
 
-- `/opt/vpn-store/static_root/`
-- `/opt/vpn-store/media/`
+- `/opt/qasedak/static_root/`
+- `/opt/qasedak/media/`
 
 Media is runtime data; include it explicitly in backups with `--include-media`.
 
@@ -96,7 +96,7 @@ Media is runtime data; include it explicitly in backups with `--include-media`.
 New productized installs keep Revenue Engine dry-run focused. For manual checks:
 
 ```bash
-/opt/vpn-store/venv/bin/python /opt/vpn-store/manage.py run_revenue_scan --dry-run
+/opt/qasedak/venv/bin/python /opt/qasedak/manage.py run_revenue_scan --dry-run
 ```
 
 Do not create a real-send timer as part of P5.

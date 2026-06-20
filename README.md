@@ -1,68 +1,63 @@
-# VPN Store
+# Qasedak
 
-VPN Store is a Django application for selling and operating VPN plans with manual payment review, Telegram bot workflows, X-UI/Sanaei panel integration, renewal reminders, usage/health checks, and a dry-run-first Revenue Engine.
+Qasedak is a Django VPN store with admin panel, Telegram bot, manual payment review, X-UI/Sanaei integration, backups, updates, and dry-run Revenue Engine.
 
-## Features
+## Install
 
-- Django admin and storefront for stores, plans, orders, customers, panels, inbounds, and routing.
-- Telegram bot flows for buying, renewals, support, referrals, payment guidance, and admin operations.
-- Manual card-to-card payment matching through receipt uploads and SMS parsing.
-- X-UI/Sanaei client provisioning with panel health and usage snapshot tooling.
-- Minimal local installer plus doctor, backup, update, and timer scripts.
-- Revenue Engine defaults to dry-run for fresh installs.
-
-## Requirements
-
-- Python 3.12+
-- Django dependencies from `requirements.txt`
-- Ubuntu/Debian for the bare-metal installer path
-- SQLite by default
-- Optional nginx, systemd, certbot/TLS, Telegram, and X-UI access
-
-## Quick Start
-
-Local repository install is the supported path today. The default installer only brings up infrastructure; Store identity, payment, Telegram, X-UI/Sanaei, plans, and routes are completed afterward in Django Admin.
+Run this on a fresh Ubuntu/Debian server:
 
 ```bash
-git clone https://github.com/OWNER/REPO.git
-cd REPO
-cp .env.example .env
-scripts/install.sh --dry-run --yes --install-dir /opt/qasedak
+sudo bash -c 'set -e; apt-get update; apt-get install -y git; tmp=$(mktemp -d); git clone https://github.com/isajad7/qasedak.git "$tmp/qasedak"; bash "$tmp/qasedak/scripts/install.sh"'
 ```
 
-For a real local-repo install, review `docs/INSTALL.md` and run:
+The installer asks what it needs: install path, domain/TLS, admin user, database path, systemd/nginx, and doctor check.
+
+Default install path is:
+
+```text
+/opt/qasedak
+```
+
+## Update
+
+For the default install path:
 
 ```bash
-sudo bash scripts/install.sh
+sudo bash -c 'set -e; apt-get update; apt-get install -y git; tmp=$(mktemp -d); git clone https://github.com/isajad7/qasedak.git "$tmp/qasedak"; bash "$tmp/qasedak/scripts/update.sh" --install-dir /opt/qasedak --source-dir "$tmp/qasedak" --yes --restart'
 ```
 
-Then complete [Post-Install Setup](docs/POST_INSTALL_SETUP.md) from Django Admin. Revenue Engine is enabled but dry-run by default for fresh installs.
+If you installed somewhere else, change `/opt/qasedak` in the update command.
 
-Future public install placeholder:
+## After Install
+
+Open Django Admin and finish store setup:
+
+- Store name/support/payment card
+- Telegram bot settings
+- X-UI/Sanaei panel
+- Inbounds
+- Plans
+- Plan routes
+- Test purchase
+
+Guide: [Post-Install Setup](docs/POST_INSTALL_SETUP.md)
+
+## Useful Commands
+
+Doctor:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/scripts/install.sh)
+sudo /opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --no-fail
 ```
 
-Replace `OWNER/REPO` only after the GitHub repository is created.
+Backup:
 
-## Security Notes
+```bash
+sudo /opt/qasedak/scripts/backup.sh --install-dir /opt/qasedak --output-dir /opt/qasedak/backups --yes
+```
 
-- Never commit `.env`, `install.config.json`, databases, media uploads, backups, logs, virtualenvs, or `node_modules`.
-- Keep Telegram/X-UI live checks disabled unless you intentionally request them.
-- Revenue Engine is installed as enabled but dry-run by default.
-- Do not paste bot tokens, proxy credentials, card numbers, panel passwords, or backup archives into public issues, docs, logs, or release assets.
+## Notes
 
-## Documentation
-
-- [Install](docs/INSTALL.md)
-- [Post-Install Setup](docs/POST_INSTALL_SETUP.md)
-- [Configuration](docs/CONFIGURATION.md)
-- [Backup](docs/BACKUP.md)
-- [Upgrade](docs/UPGRADE.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [Release](docs/RELEASE.md)
-
-## License
-
-TODO - choose before public release. See [license decision notes](docs/productization/06-license-decision.md).
+- Do not commit `.env`, `install.config.json`, database, media, backups, logs, or virtualenv files.
+- Telegram and X-UI live checks are opt-in.
+- Revenue Engine starts enabled but dry-run by default.

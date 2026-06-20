@@ -99,7 +99,7 @@ Installer and doctor summaries should show only whether a secret is configured, 
 | `DJANGO_ALLOWED_HOSTS` | yes | `example.com,127.0.0.1,localhost` | Comma-separated public host allow-list. | no | yes |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | conditional | `https://example.com` | Required for public HTTPS forms/admin. | no | yes |
 | `DJANGO_USE_X_FORWARDED_HOST` | no | `True` | Trust reverse proxy host header. | no | advanced |
-| `SQLITE_DATABASE_PATH` | sqlite only | `/opt/vpn-store/data/db.sqlite3` | SQLite database path. | no | yes |
+| `SQLITE_DATABASE_PATH` | sqlite only | `/opt/qasedak/data/db.sqlite3` | SQLite database path. | no | yes |
 | `DJANGO_LANGUAGE_CODE` | no | `fa` | UI language. | no | yes |
 | `DJANGO_TIME_ZONE` | no | `Asia/Tehran` | Django timezone. | no | yes |
 | `TELEGRAM_BOT_USERNAME` | no, legacy | empty | Legacy fallback; prefer `BotConfiguration.telegram_bot_username`. | no | no |
