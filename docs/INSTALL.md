@@ -17,6 +17,8 @@ The installer asks for the needed basics:
 - nginx
 - non-live doctor check
 
+It also installs Python 3.12/venv if the server Python is older.
+
 Default install directory:
 
 ```text

@@ -15,9 +15,6 @@ ADMIN_PASSWORD_ENV_NAME="QASEDAK_ADMIN_PASSWORD"
 TELEGRAM_BOT_TOKEN_ENV_NAME="QASEDAK_TELEGRAM_BOT_TOKEN"
 XUI_PASSWORD_ENV_NAME="QASEDAK_XUI_PASSWORD"
 APT_PACKAGES=(
-  python3
-  python3-venv
-  python3-pip
   curl
   rsync
   sqlite3
@@ -43,6 +40,7 @@ GUNICORN_PORT="8000"
 SERVICE_USER="root"
 SERVICE_GROUP="root"
 SERVER_IP=""
+PYTHON_BIN=""
 
 on_error() {
   local line="$1"
@@ -203,7 +201,7 @@ generate_secret() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -base64 36 | tr -d '\n'
   else
-    python3 - <<'PY'
+    "${PYTHON_BIN:-python3}" - <<'PY'
 import secrets
 print(secrets.token_urlsafe(36), end="")
 PY
@@ -425,16 +423,74 @@ install_base_packages() {
   run_cmd "${SUDO_CMD[@]}" apt-get install -y "${packages[@]}"
 }
 
+python_is_compatible() {
+  local candidate="$1"
+  command -v "$candidate" >/dev/null 2>&1 || return 1
+  "$candidate" - <<'PY' >/dev/null 2>&1
+import ensurepip
+import sys
+import venv
+raise SystemExit(0 if sys.version_info >= (3, 12) else 1)
+PY
+}
+
+find_python_bin() {
+  local candidate=""
+  for candidate in "${PYTHON_BIN:-}" python3.12 python3; do
+    [[ -n "$candidate" ]] || continue
+    if python_is_compatible "$candidate"; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_python312_packages() {
+  local packages=(python3.12 python3.12-venv python3.12-dev)
+  local os_id="" os_like=""
+
+  log "Python runtime: installing Python 3.12 and venv support."
+  run_cmd "${SUDO_CMD[@]}" apt-get update
+  if apt-cache show python3.12 >/dev/null 2>&1; then
+    run_cmd "${SUDO_CMD[@]}" apt-get install -y "${packages[@]}"
+    return 0
+  fi
+
+  # Ubuntu 22.04 and older do not ship python3.12 in the default apt repo.
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck source=/dev/null
+    . /etc/os-release
+    os_id="${ID:-}"
+    os_like="${ID_LIKE:-}"
+  fi
+  if [[ "$os_id" == "ubuntu" || " $os_like " == *" ubuntu "* ]]; then
+    run_cmd "${SUDO_CMD[@]}" apt-get install -y software-properties-common ca-certificates
+    run_cmd "${SUDO_CMD[@]}" add-apt-repository -y ppa:deadsnakes/ppa
+    run_cmd "${SUDO_CMD[@]}" apt-get update
+    run_cmd "${SUDO_CMD[@]}" apt-get install -y "${packages[@]}"
+    return 0
+  fi
+
+  die "Python 3.12 is not available from apt on this OS. Install python3.12 and python3.12-venv, then rerun."
+}
+
 check_python_version() {
   if (( DRY_RUN )); then
-    log "Python check: require python3 >= 3.12."
+    PYTHON_BIN="${PYTHON_BIN:-python3.12}"
+    log "Python runtime: would ensure Python 3.12 and venv support."
+    return 0
   fi
-  command -v python3 >/dev/null 2>&1 || die "python3 is required."
-  python3 - <<'PY'
-import sys
-if sys.version_info < (3, 12):
-    raise SystemExit("python3 >= 3.12 is required.")
-PY
+  if PYTHON_BIN="$(find_python_bin)"; then
+    log "Python runtime: using $PYTHON_BIN."
+    return 0
+  fi
+  install_python312_packages
+  if PYTHON_BIN="$(find_python_bin)"; then
+    log "Python runtime: using $PYTHON_BIN."
+    return 0
+  fi
+  die "Python 3.12 installation finished, but no compatible python command was found."
 }
 
 ensure_repo_mode() {
@@ -756,7 +812,7 @@ write_env_file_from_config() {
     return 0
   fi
   ensure_can_write_file "$target"
-  CONFIG_SOURCE="$CONFIG_PATH" INSTALL_TARGET="$INSTALL_DIR" INSTALL_SERVER_IP="$SERVER_IP" INSTALL_TLS_ACTIVE="${ENABLE_TLS:-0}" python3 - "$target" <<'PY'
+  CONFIG_SOURCE="$CONFIG_PATH" INSTALL_TARGET="$INSTALL_DIR" INSTALL_SERVER_IP="$SERVER_IP" INSTALL_TLS_ACTIVE="${ENABLE_TLS:-0}" "${PYTHON_BIN:-python3}" - "$target" <<'PY'
 import json
 import os
 import secrets
@@ -861,7 +917,7 @@ write_generated_config() {
   export XUI_INBOUND_PORT XUI_INBOUND_CONFIG_PARAMS XUI_INBOUND_NETWORK XUI_INBOUND_SECURITY
   export PLAN_KEY PLAN_NAME PLAN_TRAFFIC_GB PLAN_DURATION_DAYS PLAN_PRICE PLAN_CURRENCY PLAN_DEVICE_LIMIT
 
-  python3 - "$target" <<'PY'
+  "${PYTHON_BIN:-python3}" - "$target" <<'PY'
 import json
 import os
 import re
@@ -1031,7 +1087,7 @@ source_env() {
 
 django_setup() {
   log "Setting up Python/Django inside $INSTALL_DIR."
-  run_cmd python3 -m venv "$INSTALL_DIR/venv"
+  run_cmd "$PYTHON_BIN" -m venv "$INSTALL_DIR/venv"
   run_cmd "$INSTALL_DIR/venv/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"
   source_env
   run_cmd "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/manage.py" check
@@ -1144,7 +1200,7 @@ update_env_for_tls_success() {
     log "DRY-RUN: would update $INSTALL_DIR/.env for successful TLS."
     return 0
   fi
-  ENV_PATH="$INSTALL_DIR/.env" APP_DOMAIN="$APP_DOMAIN" python3 - <<'PY'
+  ENV_PATH="$INSTALL_DIR/.env" APP_DOMAIN="$APP_DOMAIN" "${PYTHON_BIN:-python3}" - <<'PY'
 import os
 from pathlib import Path
 

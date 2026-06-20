@@ -17,6 +17,7 @@ The update command:
 - creates a backup first
 - syncs the latest code
 - installs dependencies
+- installs Python 3.12/venv if the server Python is older
 - runs Django checks and migrations
 - collects static files
 - restarts services when they exist

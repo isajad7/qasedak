@@ -11,6 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/instal
 ```
 
 The installer asks what it needs: install path, domain/TLS, admin user, database path, systemd/nginx, and doctor check.
+It also installs Python 3.12/venv if the server Python is older.
 
 Default install path is:
 

@@ -18,6 +18,7 @@ CURRENT_BACKUP=""
 SUDO_CMD=()
 WEB_SERVICE_NAME="vpn-store-web"
 TELEGRAM_SERVICE_NAME="vpn-store-telegram"
+PYTHON_BIN=""
 
 on_error() {
   local line="$1"
@@ -83,6 +84,75 @@ run_cmd() {
     return 0
   fi
   "$@"
+}
+
+python_is_compatible() {
+  local candidate="$1"
+  command -v "$candidate" >/dev/null 2>&1 || return 1
+  "$candidate" - <<'PY' >/dev/null 2>&1
+import ensurepip
+import sys
+import venv
+raise SystemExit(0 if sys.version_info >= (3, 12) else 1)
+PY
+}
+
+find_python_bin() {
+  local candidate=""
+  for candidate in "${PYTHON_BIN:-}" python3.12 python3; do
+    [[ -n "$candidate" ]] || continue
+    if python_is_compatible "$candidate"; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_python312_packages() {
+  local packages=(python3.12 python3.12-venv python3.12-dev)
+  local os_id="" os_like=""
+
+  log "Python runtime: installing Python 3.12 and venv support."
+  run_cmd "${SUDO_CMD[@]}" apt-get update
+  if apt-cache show python3.12 >/dev/null 2>&1; then
+    run_cmd "${SUDO_CMD[@]}" apt-get install -y "${packages[@]}"
+    return 0
+  fi
+
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck source=/dev/null
+    . /etc/os-release
+    os_id="${ID:-}"
+    os_like="${ID_LIKE:-}"
+  fi
+  if [[ "$os_id" == "ubuntu" || " $os_like " == *" ubuntu "* ]]; then
+    run_cmd "${SUDO_CMD[@]}" apt-get install -y software-properties-common ca-certificates
+    run_cmd "${SUDO_CMD[@]}" add-apt-repository -y ppa:deadsnakes/ppa
+    run_cmd "${SUDO_CMD[@]}" apt-get update
+    run_cmd "${SUDO_CMD[@]}" apt-get install -y "${packages[@]}"
+    return 0
+  fi
+
+  die "Python 3.12 is not available from apt on this OS. Install python3.12 and python3.12-venv, then rerun."
+}
+
+ensure_python_runtime() {
+  if (( DRY_RUN )); then
+    PYTHON_BIN="${PYTHON_BIN:-python3.12}"
+    log "Python runtime: would ensure Python 3.12 and venv support."
+    return 0
+  fi
+  if PYTHON_BIN="$(find_python_bin)"; then
+    log "Python runtime: using $PYTHON_BIN."
+    return 0
+  fi
+  install_python312_packages
+  if PYTHON_BIN="$(find_python_bin)"; then
+    log "Python runtime: using $PYTHON_BIN."
+    return 0
+  fi
+  die "Python 3.12 installation finished, but no compatible python command was found."
 }
 
 confirm() {
@@ -267,9 +337,9 @@ sync_source() {
 setup_venv_and_deps() {
   local python="$INSTALL_DIR/venv/bin/python"
   if (( DRY_RUN )); then
-    run_cmd python3 -m venv "$INSTALL_DIR/venv"
+    run_cmd "$PYTHON_BIN" -m venv "$INSTALL_DIR/venv"
   elif [[ ! -x "$python" ]]; then
-    run_cmd python3 -m venv "$INSTALL_DIR/venv"
+    run_cmd "$PYTHON_BIN" -m venv "$INSTALL_DIR/venv"
   else
     verbose_log "Reusing existing virtualenv: $INSTALL_DIR/venv"
   fi
@@ -331,6 +401,7 @@ main() {
   preflight_sudo
   preflight_paths
   print_plan
+  ensure_python_runtime
   run_backup
   sync_source
   setup_venv_and_deps
