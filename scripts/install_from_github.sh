@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 REPO_URL="${QASEDAK_REPO_URL:-https://github.com/isajad7/qasedak.git}"
 REPO_REF="${QASEDAK_REF:-main}"
+TMPDIR=""
 
 log() {
   printf '%s\n' "$*"
@@ -11,6 +12,12 @@ log() {
 die() {
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
+}
+
+cleanup_tmpdir() {
+  if [[ -n "${TMPDIR:-}" ]]; then
+    rm -rf "$TMPDIR"
+  fi
 }
 
 ensure_root() {
@@ -49,13 +56,12 @@ main() {
   ensure_root "$@"
   ensure_git
 
-  local tmpdir=""
-  tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' EXIT
+  TMPDIR="$(mktemp -d)"
+  trap cleanup_tmpdir EXIT
 
   log "Downloading Qasedak installer..."
-  git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$tmpdir/qasedak"
-  run_child_script "$tmpdir/qasedak/scripts/install.sh" "$@"
+  git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$TMPDIR/qasedak"
+  run_child_script "$TMPDIR/qasedak/scripts/install.sh" "$@"
 }
 
 main "$@"

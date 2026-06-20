@@ -8,6 +8,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DRY_RUN=0
 YES=0
 ADVANCED=0
+ADMIN_PASSWORD_GENERATED=0
 INSTALL_DIR=""
 CONFIG_PATH=""
 DEFAULT_INSTALL_DIR="/opt/qasedak"
@@ -332,11 +333,14 @@ try:
 except Exception:
     print("")
     print("0")
+    print("")
 else:
     app = data.get("app") or {}
     store = data.get("store") or {}
+    admin = data.get("admin") or {}
     print(store.get("domain") or app.get("domain") or "")
     print("1" if app.get("enable_tls") else "0")
+    print(admin.get("username") or "admin")
 PY
 }
 
@@ -693,6 +697,7 @@ collect_config() {
     mapfile -t config_metadata < <(load_config_metadata "$CONFIG_PATH")
     APP_DOMAIN="${config_metadata[0]:-}"
     APP_ENABLE_TLS="${config_metadata[1]:-0}"
+    ADMIN_USERNAME="${config_metadata[2]:-admin}"
     resolve_optional_layers
     RUN_DOCTOR="$(prompt_yes_no "Run non-live doctor after install?" "yes")"
     log "Using provided install config: $CONFIG_PATH"
@@ -807,8 +812,47 @@ collect_config() {
 materialize_generated_secrets() {
   if [[ "${ADMIN_PASSWORD:-}" == "__GENERATE__" ]]; then
     ADMIN_PASSWORD="$(generate_secret)"
-    log "Admin password generated and stored in .env as $ADMIN_PASSWORD_ENV_NAME. It was not printed."
+    ADMIN_PASSWORD_GENERATED=1
+    log "Admin password generated and stored in .env as $ADMIN_PASSWORD_ENV_NAME."
   fi
+}
+
+admin_panel_url() {
+  local scheme="http"
+  local host=""
+  if (( ENABLE_NGINX )); then
+    if [[ "${ENABLE_TLS:-0}" == "1" ]]; then
+      scheme="https"
+    fi
+    host="${APP_DOMAIN:-$SERVER_IP}"
+    host="${host:-SERVER_IP_OR_DOMAIN}"
+    printf '%s://%s/admin/' "$scheme" "$host"
+    return 0
+  fi
+  printf 'http://127.0.0.1:%s/admin/' "$GUNICORN_PORT"
+}
+
+write_admin_credentials_file() {
+  if (( ! ADMIN_PASSWORD_GENERATED )) && [[ "${ADMIN_PASSWORD:-}" != "__GENERATE__" ]]; then
+    return 0
+  fi
+  local target="$INSTALL_DIR/admin-credentials.txt"
+  local url=""
+  url="$(admin_panel_url)"
+  if (( DRY_RUN )); then
+    log "DRY-RUN: would write $target with admin login details and mode 600."
+    return 0
+  fi
+  umask 077
+  {
+    printf 'Qasedak Django Admin\n'
+    printf 'URL: %s\n' "$url"
+    printf 'Username: %s\n' "${ADMIN_USERNAME:-admin}"
+    printf 'Password: %s\n' "$ADMIN_PASSWORD"
+    printf 'Install directory: %s\n' "$INSTALL_DIR"
+  } > "$target"
+  chmod 600 "$target"
+  log "Wrote $target with admin login details."
 }
 
 prepare_install_tree() {
@@ -1383,18 +1427,34 @@ run_doctor_if_requested() {
 }
 
 print_post_install_next_steps() {
-  cat <<'EOF'
-Install complete.
-Business setup may still be incomplete.
-
-Open Django Admin and complete docs/POST_INSTALL_SETUP.md:
-- Store identity and payment/card settings
-- Telegram BotConfiguration and optional proxy/force-join settings
-- X-UI/Sanaei Panel, Inbound, Plan, and PlanInboundRoute
-- Non-live doctor/check_integrations
-- Test purchase
-- Revenue Engine dry-run review before any real sends
-EOF
+  local url=""
+  url="$(admin_panel_url)"
+  printf '\n'
+  printf 'Qasedak install complete.\n'
+  printf '\n'
+  printf 'Admin panel:\n'
+  printf '  %s\n' "$url"
+  printf '\n'
+  printf 'Login:\n'
+  printf '  username: %s\n' "${ADMIN_USERNAME:-admin}"
+  if (( ADMIN_PASSWORD_GENERATED )) || [[ "${ADMIN_PASSWORD:-}" == "__GENERATE__" ]]; then
+    printf '  password: sudo cat %s/admin-credentials.txt\n' "$INSTALL_DIR"
+  elif [[ -n "${CONFIG_PATH:-}" ]]; then
+    printf '  password: from your install config/env\n'
+  else
+    printf '  password: the one you entered during install\n'
+  fi
+  if (( ! ENABLE_NGINX )); then
+    printf '\n'
+    printf 'Nginx is disabled, so the panel URL is local-only unless you add your own reverse proxy.\n'
+  fi
+  printf '\n'
+  printf 'Useful commands:\n'
+  printf '  doctor: sudo %s/scripts/doctor.sh --install-dir %s --no-fail\n' "$INSTALL_DIR" "$INSTALL_DIR"
+  printf '  update: curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/update_from_github.sh | sudo bash\n'
+  printf '  delete: curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/uninstall_from_github.sh | sudo bash\n'
+  printf '\n'
+  printf 'Next setup in Django Admin: Store, Telegram, X-UI/Sanaei, Inbounds, Plans, Plan routes, then test purchase.\n'
 }
 
 main() {
@@ -1415,6 +1475,7 @@ main() {
   configure_systemd
   configure_nginx
   configure_tls
+  write_admin_credentials_file
   run_doctor_if_requested
   print_post_install_next_steps
 }
