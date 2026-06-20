@@ -10,6 +10,7 @@ The installer asks for the needed basics:
 
 - install directory
 - optional domain
+- server public IP
 - TLS when a domain is available
 - admin username/email/password
 - SQLite database path

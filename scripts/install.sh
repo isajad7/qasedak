@@ -346,8 +346,11 @@ PY
 
 detect_server_ip() {
   SERVER_IP=""
+  if command -v curl >/dev/null 2>&1; then
+    SERVER_IP="$(curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)"
+  fi
   if command -v ip >/dev/null 2>&1; then
-    SERVER_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
+    SERVER_IP="${SERVER_IP:-$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)}"
   fi
   if [[ -z "$SERVER_IP" ]] && command -v hostname >/dev/null 2>&1; then
     SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
@@ -707,6 +710,12 @@ collect_config() {
   INSTALL_DIR="$(prompt_value "Install directory" "$INSTALL_DIR" "yes")"
   handle_existing_install
   APP_DOMAIN="$(prompt_value "Public domain (optional)" "" "no")"
+  if [[ -z "$APP_DOMAIN" ]]; then
+    SERVER_IP="$(prompt_value "Server public IP" "$SERVER_IP" "yes")"
+    [[ -n "$SERVER_IP" ]] || die "Server public IP is required when no domain is configured."
+  else
+    SERVER_IP="$(prompt_value "Server public IP (optional)" "$SERVER_IP" "no")"
+  fi
   APP_ENABLE_TLS="0"
   resolve_optional_layers
   APP_TIMEZONE="Asia/Tehran"
@@ -1483,8 +1492,8 @@ main() {
   resolve_install_dir
   preflight_root_sudo
   preflight_os
-  collect_config
   detect_server_ip
+  collect_config
   precheck_tls_dns
   install_base_packages
   check_python_version
