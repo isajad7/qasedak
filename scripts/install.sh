@@ -346,11 +346,11 @@ PY
 
 detect_server_ip() {
   SERVER_IP=""
-  if command -v hostname >/dev/null 2>&1; then
-    SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  fi
-  if [[ -z "$SERVER_IP" ]] && command -v ip >/dev/null 2>&1; then
+  if command -v ip >/dev/null 2>&1; then
     SERVER_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
+  fi
+  if [[ -z "$SERVER_IP" ]] && command -v hostname >/dev/null 2>&1; then
+    SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   fi
 }
 
