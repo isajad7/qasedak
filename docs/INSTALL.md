@@ -20,7 +20,7 @@ The installer asks for the needed basics:
 
 It also installs Python 3.12/venv if the server Python is older.
 If an old/partial install exists, it warns before doing anything destructive.
-At the end, it prints the admin panel URL and login instructions.
+At the end, it prints the admin panel URL, username, and password.
 
 Default install directory:
 

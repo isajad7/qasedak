@@ -842,7 +842,7 @@ admin_panel_url() {
 }
 
 write_admin_credentials_file() {
-  if (( ! ADMIN_PASSWORD_GENERATED )) && [[ "${ADMIN_PASSWORD:-}" != "__GENERATE__" ]]; then
+  if [[ -z "${ADMIN_PASSWORD:-}" || "${ADMIN_PASSWORD:-}" == "__GENERATE__" ]]; then
     return 0
   fi
   local target="$INSTALL_DIR/admin-credentials.txt"
@@ -1254,11 +1254,48 @@ django_setup() {
   run_cmd "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/manage.py" check
   run_cmd "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/manage.py" migrate
   run_cmd "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/manage.py" collectstatic --noinput
+  run_cmd "${SUDO_CMD[@]}" chmod -R a+rX "$INSTALL_DIR/static_root"
+  verify_admin_static_collected
   if [[ "${RUN_LIVE_CHECKS:-0}" == "1" ]]; then
     run_cmd "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/manage.py" bootstrap_install --config "$INSTALL_DIR/install.config.json" --yes --live-check
   else
     run_cmd "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/manage.py" bootstrap_install --config "$INSTALL_DIR/install.config.json" --yes
   fi
+  ensure_admin_password_matches_output
+}
+
+verify_admin_static_collected() {
+  local admin_css="$INSTALL_DIR/static_root/admin/css/base.css"
+  if (( DRY_RUN )); then
+    log "DRY-RUN: would verify Django admin CSS exists at $admin_css."
+    return 0
+  fi
+  [[ -f "$admin_css" ]] || die "Django admin CSS was not collected: $admin_css"
+}
+
+ensure_admin_password_matches_output() {
+  if [[ -z "${ADMIN_USERNAME:-}" || -z "${ADMIN_PASSWORD:-}" || "${ADMIN_PASSWORD:-}" == "__GENERATE__" ]]; then
+    return 0
+  fi
+  if (( DRY_RUN )); then
+    log "DRY-RUN: would reset Django admin password for ${ADMIN_USERNAME:-admin} to the installer output password."
+    return 0
+  fi
+  run_cmd env QASEDAK_INSTALL_ADMIN_USERNAME="$ADMIN_USERNAME" QASEDAK_INSTALL_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+    "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/manage.py" shell -c '
+import os
+from django.contrib.auth import get_user_model
+
+username = os.environ["QASEDAK_INSTALL_ADMIN_USERNAME"]
+password = os.environ["QASEDAK_INSTALL_ADMIN_PASSWORD"]
+User = get_user_model()
+user = User.objects.get(username=username)
+user.set_password(password)
+user.is_staff = True
+user.is_superuser = True
+user.is_active = True
+user.save()
+'
 }
 
 sed_escape() {
@@ -1466,8 +1503,11 @@ print_post_install_next_steps() {
   printf '\n'
   printf 'Login:\n'
   printf '  username: %s\n' "${ADMIN_USERNAME:-admin}"
-  if (( ADMIN_PASSWORD_GENERATED )) || [[ "${ADMIN_PASSWORD:-}" == "__GENERATE__" ]]; then
-    printf '  password: sudo cat %s/admin-credentials.txt\n' "$INSTALL_DIR"
+  if [[ -n "${ADMIN_PASSWORD:-}" && "${ADMIN_PASSWORD:-}" != "__GENERATE__" ]]; then
+    printf '  password: %s\n' "$ADMIN_PASSWORD"
+    printf '  saved at: sudo cat %s/admin-credentials.txt\n' "$INSTALL_DIR"
+  elif [[ "${ADMIN_PASSWORD:-}" == "__GENERATE__" ]]; then
+    printf '  password: generated during real install\n'
   elif [[ -n "${CONFIG_PATH:-}" ]]; then
     printf '  password: from your install config/env\n'
   else
