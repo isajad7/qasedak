@@ -7,8 +7,9 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections
 
 from store.bot_proxy import sanitized_telegram_proxy_url, telegram_proxy_url
-from store.bots import BotClient, BotDeliveryError, handle_bot_update
+from store.bots import handle_bot_update
 from store.models import BotConfiguration
+from store.telegram_bot.client import BotClient, BotDeliveryError
 
 logger = logging.getLogger(__name__)
 

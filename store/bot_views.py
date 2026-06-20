@@ -4,9 +4,10 @@ import logging
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
-from .bots import handle_bot_update, sanitize_bot_event_log_value
+from .bots import handle_bot_update
 from .bot_proxy import telegram_webhook_response_context
 from .models import BotConfiguration, BotEventLog
+from .telegram_bot.redaction import sanitize_bot_event_log_value
 
 logger = logging.getLogger(__name__)
 

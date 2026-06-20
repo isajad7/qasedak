@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  django:
+    runs-on: ubuntu-latest
+    env:
+      DJANGO_SETTINGS_MODULE: core.settings.development
+      DJANGO_SECRET_KEY: ci-test-secret
+      DJANGO_DEBUG: "False"
+      SQLITE_DATABASE_PATH: /tmp/vpn-store-ci.sqlite3
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      DJANGO_CSRF_TRUSTED_ORIGINS: http://localhost
+      INSTALL_RUN_LIVE_BOT_CHECK: "false"
+      INSTALL_RUN_LIVE_XUI_CHECK: "false"
+      INSTALL_SEND_TELEGRAM_TEST_MESSAGE: "false"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Django system checks
+        run: python manage.py check
+
+      - name: Django tests
+        run: python manage.py test store.tests payments.tests
+
+      - name: Migration drift check
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Shell syntax
+        run: bash -n scripts/install.sh scripts/doctor.sh scripts/backup.sh scripts/update.sh scripts/timers.sh scripts/release_check.sh
+
+      - name: Whitespace check
+        run: git diff --check

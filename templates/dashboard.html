@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% load store_formatters %}
 
-{% block title %}داشبورد {{ store.name|default:"آزادنت" }}{% endblock %}
+{% block title %}داشبورد {{ store.name|default:"VPN Store" }}{% endblock %}
 
 {% block content %}
 <div class="mx-auto max-w-3xl space-y-4">
@@ -18,6 +18,43 @@
                 <a href="{% url 'home' %}#plans" class="inline-flex rounded-full bg-sky-500 px-3 py-2 text-xs font-black text-slate-950 transition-colors hover:bg-sky-400">
                     خرید
                 </a>
+            </div>
+        </div>
+    </section>
+
+    <section id="telegram-link" class="rounded-[1.25rem] border border-sky-300/20 bg-white/85 p-4 shadow-[0_14px_34px_rgba(15,23,42,0.06)]">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+                <p class="text-xs font-black text-sky-300">اتصال به ربات تلگرام 🤖</p>
+                {% if telegram_link_status.is_linked %}
+                    <h2 class="mt-1 text-lg font-black text-white">✅ حساب شما به ربات تلگرام وصل است.</h2>
+                {% else %}
+                    <h2 class="mt-1 text-lg font-black text-white">ربات را به حساب وب وصل کنید</h2>
+                    <p class="mt-2 text-xs font-bold leading-6 text-slate-500">
+                        برای دریافت یادآوری تمدید، مدیریت سرویس‌ها و پشتیبانی سریع، حساب خود را به ربات وصل کنید.
+                    </p>
+                {% endif %}
+            </div>
+            <div class="shrink-0">
+                {% if telegram_link_status.is_linked %}
+                    {% if telegram_link_status.bot_url %}
+                        <a href="{{ telegram_link_status.bot_url }}" class="inline-flex w-full items-center justify-center rounded-full bg-sky-500 px-4 py-2 text-xs font-black text-slate-950 transition-colors hover:bg-sky-400">
+                            باز کردن ربات
+                        </a>
+                    {% else %}
+                        <div class="rounded-xl border border-amber-300/30 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
+                            {{ telegram_link_status.missing_username_message }}
+                        </div>
+                    {% endif %}
+                {% elif telegram_link.telegram_link %}
+                    <a href="{{ telegram_link.telegram_link }}" class="inline-flex w-full items-center justify-center rounded-full bg-sky-500 px-4 py-2 text-xs font-black text-slate-950 transition-colors hover:bg-sky-400">
+                        اتصال به ربات تلگرام
+                    </a>
+                {% else %}
+                    <div class="rounded-xl border border-amber-300/30 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
+                        {{ telegram_link.missing_username_message|default:telegram_link_status.missing_username_message }}
+                    </div>
+                {% endif %}
             </div>
         </div>
     </section>

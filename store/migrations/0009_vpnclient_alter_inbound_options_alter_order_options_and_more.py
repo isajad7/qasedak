@@ -599,7 +599,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='store',
             name='english_name',
-            field=models.CharField(default='AzadNet', max_length=100),
+            field=models.CharField(default='VPN Store', max_length=100),
         ),
         migrations.AlterField(
             model_name='store',
@@ -614,7 +614,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='store',
             name='name',
-            field=models.CharField(default='AzadNet', max_length=100),
+            field=models.CharField(default='VPN Store', max_length=100),
         ),
         migrations.AlterField(
             model_name='store',

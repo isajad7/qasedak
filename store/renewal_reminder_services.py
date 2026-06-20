@@ -550,7 +550,7 @@ def _skip_result(vpn_client, customer, reminder_type, trigger_key, reason, *, se
 
 
 def send_reminder_to_customer(vpn_client, reminder_type, trigger_key, live_usage=None, *, settings=None, dry_run=False, now=None):
-    from .bots import BotClient, BotDeliveryError
+    from .telegram_bot.client import BotClient, BotDeliveryError
 
     now = now or timezone.now()
     settings = settings or get_reminder_settings(_client_store(vpn_client))

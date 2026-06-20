@@ -1,0 +1,20 @@
+[Unit]
+Description=VPN Store Telegram polling service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{SERVICE_USER}}
+Group={{SERVICE_GROUP}}
+WorkingDirectory={{INSTALL_DIR}}
+EnvironmentFile={{INSTALL_DIR}}/.env
+ExecStart={{INSTALL_DIR}}/venv/bin/python manage.py run_telegram_polling
+Restart=always
+RestartSec=10
+TimeoutStartSec=30
+TimeoutStopSec=30
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

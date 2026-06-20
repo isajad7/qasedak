@@ -18,7 +18,7 @@ from .customer_analytics import (
     SEGMENT_TOP_REFERRER,
     get_customers_by_segment,
 )
-from .models import BotUser, BroadcastMessage, BroadcastRecipient, Customer, Store
+from .models import BotUser, BroadcastMessage, BroadcastRecipient, Customer, LegacyWizWizImportJob, LegacyWizWizImportRow, Store
 
 
 AUDIENCE_SEGMENT_MAP = {
@@ -71,16 +71,39 @@ def _apply_store_scope(queryset, store):
     ).distinct()
 
 
+def get_legacy_wizwiz_imported_customers():
+    return (
+        Customer.objects.filter(
+            legacy_wizwiz_import_rows__source="wizwiz",
+            legacy_wizwiz_import_rows__job__status=LegacyWizWizImportJob.Status.APPLIED,
+            legacy_wizwiz_import_rows__status__in=(
+                LegacyWizWizImportRow.Status.CREATED,
+                LegacyWizWizImportRow.Status.LINKED,
+                LegacyWizWizImportRow.Status.EXISTING,
+                LegacyWizWizImportRow.Status.UPDATED,
+            ),
+        )
+        .distinct()
+        .order_by("display_name", "pk")
+    )
+
+
 def get_customers_for_audience(audience_type, *, store=None, limit=None):
     audience_type = audience_type or BroadcastMessage.AudienceType.ALL
-    segment = AUDIENCE_SEGMENT_MAP.get(audience_type)
-    if not segment:
-        raise ValueError(f"Unsupported broadcast audience: {audience_type}")
+    if audience_type == BroadcastMessage.AudienceType.LEGACY_WIZWIZ_IMPORTED:
+        queryset = get_legacy_wizwiz_imported_customers()
+        if limit is not None:
+            queryset = queryset[: _positive_int(limit, 1000)]
+        return queryset
+    else:
+        segment = AUDIENCE_SEGMENT_MAP.get(audience_type)
+        if not segment:
+            raise ValueError(f"Unsupported broadcast audience: {audience_type}")
 
-    queryset = get_customers_by_segment(segment)
-    if store and getattr(queryset.query, "is_sliced", False):
-        ordered_ids = list(queryset.values_list("pk", flat=True))
-        queryset = Customer.objects.filter(pk__in=ordered_ids).order_by("display_name", "pk")
+        queryset = get_customers_by_segment(segment)
+        if store and getattr(queryset.query, "is_sliced", False):
+            ordered_ids = list(queryset.values_list("pk", flat=True))
+            queryset = Customer.objects.filter(pk__in=ordered_ids).order_by("display_name", "pk")
     queryset = _apply_store_scope(queryset, store)
     if limit is not None:
         queryset = queryset[: _positive_int(limit, 1000)]
@@ -262,7 +285,7 @@ def send_message_to_customer(campaign, recipient, *, bot_config=None):
             error_message="Bot user target is no longer active.",
         )
 
-    from .bots import BotClient, BotDeliveryError
+    from .telegram_bot.client import BotClient, BotDeliveryError
 
     try:
         BotClient(bot_user.bot_config).send_message(

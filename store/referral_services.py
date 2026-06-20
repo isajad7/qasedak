@@ -2,15 +2,14 @@ from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 import logging
-import os
 from urllib.parse import quote
 
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, F, Sum
 from django.utils import timezone
 
-from .models import BotConfiguration, Customer, Order, Referral, ReferralRewardLedger, Store, VPNClient
+from .configuration_services import get_telegram_bot_username
+from .models import Customer, Order, Referral, ReferralRewardLedger, Store, VPNClient
 from .referrals import assign_referrer, build_referral_link, normalize_referral_code
 from .xui_api import add_client_traffic, bytes_from_gb
 
@@ -257,41 +256,13 @@ def get_referral_stats(customer):
     }
 
 
-def configured_telegram_bot_username(bot_config=None):
-    username = (
-        getattr(settings, "TELEGRAM_BOT_USERNAME", "")
-        or os.environ.get("TELEGRAM_BOT_USERNAME", "")
-        or ""
-    )
-    username = str(username).strip().lstrip("@")
-    if username:
-        return username
-
-    username = str(getattr(bot_config, "username", "") or "").strip().lstrip("@")
-    if username:
-        return username
-
-    has_username_field = any(field.name == "username" for field in BotConfiguration._meta.get_fields())
-    if has_username_field:
-        config = (
-            BotConfiguration.objects.filter(
-                provider=BotConfiguration.Provider.TELEGRAM,
-                is_active=True,
-            )
-            .exclude(username="")
-            .order_by("pk")
-            .first()
-        )
-        username = str(getattr(config, "username", "") or "").strip().lstrip("@")
-        if username:
-            return username
-
-    return ""
+def configured_telegram_bot_username(bot_config=None, *, store=None):
+    return get_telegram_bot_username(bot_config=bot_config, store=store)
 
 
-def build_telegram_referral_link(customer, *, bot_username=None, bot_config=None):
+def build_telegram_referral_link(customer, *, bot_username=None, bot_config=None, store=None):
     code = ensure_referral_code(customer)
-    username = (bot_username or configured_telegram_bot_username(bot_config=bot_config)).strip().lstrip("@")
+    username = (bot_username or configured_telegram_bot_username(bot_config=bot_config, store=store)).strip().lstrip("@")
     if not username:
         return ""
     return f"https://t.me/{username}?start=ref_{code}"
@@ -319,11 +290,12 @@ def get_referral_summary(customer, *, request=None, store=None, bot_username=Non
     store = get_referral_store(store)
     code = ensure_referral_code(customer)
     stats = get_referral_stats(customer)
-    telegram_username = configured_telegram_bot_username(bot_config=bot_config)
+    telegram_username = configured_telegram_bot_username(bot_config=bot_config, store=store)
     telegram_link = build_telegram_referral_link(
         customer,
         bot_username=bot_username or telegram_username,
         bot_config=bot_config,
+        store=store,
     ) if customer else ""
     invite_text = build_referral_invite_text(telegram_link)
     return {

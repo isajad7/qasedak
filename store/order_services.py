@@ -17,6 +17,7 @@ from .models import (
     Operator,
     Order,
     Plan,
+    PlanInboundRoute,
     Store,
     VPNClient,
     clean_bank_tracking_code,
@@ -42,9 +43,11 @@ OPERATOR_NO_PLANS_MESSAGE = "برای این اپراتور فعلاً پلن ف
 PLAN_OPERATOR_MISMATCH_MESSAGE = "این پلن برای اپراتور انتخاب‌شده فعال نیست."
 INBOUND_MISSING_PANEL_MESSAGE = "اینباند انتخاب‌شده به هیچ پنل معتبری وصل نیست. لطفاً تنظیمات سرور را بررسی کن."
 INBOUND_INACTIVE_MESSAGE = "اینباند انتخاب‌شده غیرفعال است و نمی‌تواند برای سفارش جدید استفاده شود."
+INBOUND_NOT_FOR_NEW_ORDERS_MESSAGE = "اینباند انتخاب‌شده برای فروش یا ساخت کانفیگ جدید مجاز نیست."
 INBOUND_PANEL_INACTIVE_MESSAGE = "پنل متصل به اینباند غیرفعال است و نمی‌تواند برای سفارش جدید استفاده شود."
 INBOUND_STORE_MISMATCH_MESSAGE = "اینباند انتخاب‌شده به فروشگاه دیگری وصل است."
 INBOUND_CAPACITY_MESSAGE = "ظرفیت اینباند انتخاب‌شده برای تعداد کانفیگ درخواستی کافی نیست."
+PLAN_INBOUND_ROUTE_MISSING_MESSAGE = "برای این پلن مسیر سرور/اینباند تعریف نشده است. لطفاً با پشتیبانی تماس بگیرید."
 
 
 @dataclass
@@ -100,6 +103,8 @@ def validate_inbound_for_order(inbound, store=None, *, required_slots=1):
         raise ValidationError("سرور فعالی برای ساخت کانفیگ پیدا نشد.")
     if not getattr(inbound, "is_active", False):
         raise ValidationError(INBOUND_INACTIVE_MESSAGE)
+    if not getattr(inbound, "available_for_new_orders", True):
+        raise ValidationError(INBOUND_NOT_FOR_NEW_ORDERS_MESSAGE)
 
     panel = inbound_panel(inbound)
     if not panel or not getattr(inbound, "panel_id", None):
@@ -256,6 +261,7 @@ def get_available_inbound(store, *, required_slots=1):
     required_slots = max(int(required_slots or 1), 1)
     inbound_qs = Inbound.objects.filter(
         is_active=True,
+        available_for_new_orders=True,
         panel_id__isnull=False,
         panel__is_active=True,
     ).select_related("panel")
@@ -279,6 +285,113 @@ def get_available_inbound(store, *, required_slots=1):
         if inbound.max_clients is None or inbound.available_capacity >= required_slots:
             return inbound
     return None
+
+
+def store_allows_plan_inbound_routing(store):
+    return bool(store and getattr(store, "plan_inbound_routing_enabled", True))
+
+
+def store_allows_global_inbound_fallback(store):
+    return not store or bool(getattr(store, "allow_global_inbound_fallback", True))
+
+
+def _route_queryset_for_store(route_qs, store):
+    if not store:
+        return route_qs.annotate(
+            store_route_priority=models.Value(1, output_field=models.IntegerField())
+        )
+    return route_qs.filter(
+        models.Q(store=store) | models.Q(store__isnull=True),
+        models.Q(inbound__panel__store=store) | models.Q(inbound__panel__store__isnull=True),
+    ).annotate(
+        store_route_priority=models.Case(
+            models.When(store=store, then=0),
+            default=1,
+            output_field=models.IntegerField(),
+        )
+    )
+
+
+def _first_valid_route_inbound(route_qs, store, *, required_slots=1):
+    route_qs = route_qs.select_related(
+        "store",
+        "plan",
+        "operator",
+        "inbound",
+        "inbound__panel",
+    ).order_by("store_route_priority", "priority", "inbound__current_users", "id")
+    for route in route_qs:
+        try:
+            return validate_inbound_for_order(route.inbound, store, required_slots=required_slots)
+        except ValidationError as exc:
+            logger.warning(
+                "Skipping invalid plan inbound route route_id=%s plan_id=%s operator_id=%s store_id=%s inbound_id=%s: %s",
+                route.pk,
+                route.plan_id,
+                route.operator_id,
+                getattr(store, "pk", None),
+                route.inbound_id,
+                exc.messages[0],
+            )
+    return None
+
+
+def select_inbound_for_plan(plan, store=None, operator=None, purpose="new_order", quantity=1):
+    required_slots = max(int(quantity or 1), 1)
+    effective_store = store or getattr(plan, "store", None)
+
+    if not store_allows_plan_inbound_routing(effective_store):
+        return get_available_inbound(effective_store, required_slots=required_slots)
+
+    base_routes = PlanInboundRoute.objects.filter(
+        plan=plan,
+        is_active=True,
+        inbound__is_active=True,
+        inbound__available_for_new_orders=True,
+        inbound__panel_id__isnull=False,
+        inbound__panel__is_active=True,
+    )
+    base_routes = _route_queryset_for_store(base_routes, effective_store)
+
+    candidate_sets = []
+    if operator:
+        candidate_sets.append(base_routes.filter(operator=operator))
+    candidate_sets.append(base_routes.filter(operator__isnull=True))
+
+    for route_qs in candidate_sets:
+        inbound = _first_valid_route_inbound(route_qs, effective_store, required_slots=required_slots)
+        if inbound:
+            logger.info(
+                "Selected plan inbound route plan_id=%s operator_id=%s store_id=%s inbound_pk=%s purpose=%s quantity=%s",
+                getattr(plan, "pk", None),
+                getattr(operator, "pk", None),
+                getattr(effective_store, "pk", None),
+                inbound.pk,
+                purpose,
+                required_slots,
+            )
+            return inbound
+
+    if store_allows_global_inbound_fallback(effective_store):
+        logger.warning(
+            "No plan inbound route found; using global fallback plan_id=%s operator_id=%s store_id=%s purpose=%s quantity=%s",
+            getattr(plan, "pk", None),
+            getattr(operator, "pk", None),
+            getattr(effective_store, "pk", None),
+            purpose,
+            required_slots,
+        )
+        return get_available_inbound(effective_store, required_slots=required_slots)
+
+    logger.warning(
+        "No plan inbound route found and fallback is disabled plan_id=%s operator_id=%s store_id=%s purpose=%s quantity=%s",
+        getattr(plan, "pk", None),
+        getattr(operator, "pk", None),
+        getattr(effective_store, "pk", None),
+        purpose,
+        required_slots,
+    )
+    raise ValidationError(PLAN_INBOUND_ROUTE_MISSING_MESSAGE)
 
 
 def validate_order_quantity(quantity=1):
@@ -397,7 +510,7 @@ def mark_duplicate_attempt(order, *, source="", reason="similar_order"):
 
 def notify_duplicate_attempt(order):
     try:
-        from .bots import notify_duplicate_order_attempt
+        from .telegram_bot.notifications import notify_duplicate_order_attempt
 
         transaction.on_commit(lambda: notify_duplicate_order_attempt(order))
     except Exception:
@@ -753,7 +866,21 @@ def create_manual_payment_order(
                 if discount_amount:
                     discount_source = Order.DiscountSource.WHOLESALE
 
-        inbound = inbound or get_available_inbound(store, required_slots=quantity)
+        try:
+            inbound = inbound or select_inbound_for_plan(
+                plan,
+                store=store,
+                operator=operator,
+                purpose="manual_payment_order",
+                quantity=quantity,
+            )
+        except ValidationError as exc:
+            release_discount_usage(reserved_discount)
+            return ProvisionedOrderResult(False, exc.messages[0])
+        if not inbound:
+            release_discount_usage(reserved_discount)
+            return ProvisionedOrderResult(False, "فعلاً سرور VPN فعالی برای ساخت کانفیگ در دسترس نیست. کمی بعد دوباره تلاش کن.")
+
         client_result = None
         if inbound:
             try:
@@ -965,7 +1092,14 @@ def grant_free_subscription(
 ):
     from .order_actions import activate_order
 
-    inbound = inbound or get_available_inbound(store)
+    try:
+        inbound = inbound or select_inbound_for_plan(
+            plan,
+            store=store,
+            purpose="admin_free_subscription",
+        )
+    except ValidationError as exc:
+        return ProvisionedOrderResult(False, exc.messages[0])
     if not inbound:
         return ProvisionedOrderResult(False, "فعلاً سرور VPN فعالی در دسترس نیست. کمی بعد دوباره تلاش کن.")
     try:

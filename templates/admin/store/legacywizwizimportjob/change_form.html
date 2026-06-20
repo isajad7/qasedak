@@ -1,0 +1,99 @@
+{% extends "admin/change_form.html" %}
+{% load i18n %}
+
+{% block object-tools-items %}
+  {{ block.super }}
+  {% if original %}
+    {% if original.status == "uploaded" or original.status == "analyzed" or original.status == "failed" %}
+      <li>
+        <form method="post" action="{{ legacy_analyze_url }}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit" class="button">{% translate "Analyze" %}</button>
+        </form>
+      </li>
+    {% endif %}
+    {% if original.status == "analyzed" %}
+      <li>
+        <a href="{{ legacy_apply_url }}" class="button">{% translate "Apply Import" %}</a>
+      </li>
+    {% endif %}
+    <li>
+      <a href="{{ legacy_export_csv_url }}" class="button">{% translate "Export CSV" %}</a>
+    </li>
+  {% endif %}
+{% endblock %}
+
+{% block after_related_objects %}
+  {{ block.super }}
+  {% if original %}
+    <div class="module">
+      <h2>{% translate "WizWiz import summary" %}</h2>
+      <table>
+        <tbody>
+          {% for label, value in legacy_summary_items %}
+            <tr>
+              <th>{{ label }}</th>
+              <td>{{ value }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if original.status == "applied" %}
+      <div class="module">
+        <h2>{% translate "Send message to users imported in this job" %}</h2>
+        <form method="post" action="{{ legacy_message_url }}" novalidate>
+          {% csrf_token %}
+          {{ legacy_message_form.non_field_errors }}
+          <div class="form-row">
+            {{ legacy_message_form.text.errors }}
+            {{ legacy_message_form.text.label_tag }}
+            {{ legacy_message_form.text }}
+            {% if legacy_message_form.text.help_text %}<div class="help">{{ legacy_message_form.text.help_text }}</div>{% endif %}
+          </div>
+          <div class="form-row">
+            {{ legacy_message_form.confirm_large_send.errors }}
+            {{ legacy_message_form.confirm_large_send }} {{ legacy_message_form.confirm_large_send.label_tag }}
+          </div>
+          <div class="submit-row">
+            <button type="submit" class="button" name="action" value="preview_message">{% translate "Preview message" %}</button>
+            <button type="submit" class="default" name="action" value="send_message" onclick="return confirm('{% translate 'Send this message only to users imported in this job?' %}');">{% translate "Send message to this import" %}</button>
+          </div>
+        </form>
+      </div>
+      <div class="module">
+        <h2>{% translate "Previous message batches" %}</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>{% translate "Batch" %}</th>
+              <th>{% translate "Status" %}</th>
+              <th>{% translate "Total" %}</th>
+              <th>{% translate "Sent" %}</th>
+              <th>{% translate "Failed" %}</th>
+              <th>{% translate "Skipped" %}</th>
+              <th>{% translate "Blocked" %}</th>
+              <th>{% translate "Created" %}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for batch in legacy_message_batches %}
+              <tr>
+                <td><a href="{% url 'admin:store_legacywizwizimportmessagebatch_change' batch.pk %}">#{{ batch.pk }}</a></td>
+                <td>{{ batch.get_status_display }}</td>
+                <td>{{ batch.total_recipients }}</td>
+                <td>{{ batch.sent_count }}</td>
+                <td>{{ batch.failed_count }}</td>
+                <td>{{ batch.skipped_count }}</td>
+                <td>{{ batch.blocked_count }}</td>
+                <td>{{ batch.created_at }}</td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="8">{% translate "No message batches yet." %}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  {% endif %}
+{% endblock %}

@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% load store_formatters %}
 
-{% block title %}{{ store.name|default:"آزادنت" }} | خرید اشتراک{% endblock %}
+{% block title %}{{ store.name|default:"VPN Store" }} | خرید اشتراک{% endblock %}
 
 {% block content %}
 <div id="checkout-flow" dir="ltr" data-selected-plan-id="{{ selected_plan_id }}" data-selected-operator-id="{{ selected_operator_id }}" data-sales-mode="{{ sales_mode }}" data-scroll-to="{{ scroll_to }}" data-discount-url="{% url 'discount_preview' %}" data-wholesale-discount-percent="{{ current_customer.wholesale_discount_percent|default:0 }}" class="space-y-4">

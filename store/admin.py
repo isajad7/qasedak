@@ -1,9 +1,11 @@
 import csv
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
 
 from django import forms
 from django.contrib import admin, messages
+from django.contrib.admin.widgets import FilteredSelectMultiple
 from django.contrib.admin.sites import NotRegistered
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import GroupAdmin as DjangoGroupAdmin
@@ -12,8 +14,9 @@ from django.contrib.auth.models import Group
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.db.models import Count, Max, Min, OuterRef, Q, Subquery, Sum
-from django.http import HttpResponse, HttpResponseRedirect
-from django.urls import reverse
+from django.http import Http404, HttpResponse, HttpResponseRedirect
+from django.template.response import TemplateResponse
+from django.urls import path, reverse
 from django.utils.http import urlencode
 from django.utils import timezone
 from django.utils.html import format_html
@@ -38,21 +41,45 @@ from .models import (
     DiscountCode,
     FreeTrialRequest,
     Inbound,
+    LegacyWizWizImportJob,
+    LegacyWizWizImportMessageBatch,
+    LegacyWizWizImportMessageRecipient,
+    LegacyWizWizImportRow,
     Order,
     Operator,
     Panel,
+    PanelClientUsageSnapshot,
+    PanelDailyUsage,
+    PanelHealthCheckLog,
+    PanelHealthStatus,
+    PanelUsageSnapshot,
     Plan,
+    PlanInboundRoute,
     Referral,
     ReferralRewardLedger,
+    RevenueOfferLog,
     Store,
     SupportConversation,
     SupportMessage,
     VPNClient,
+    VPNClientActionLog,
     VPNClientReminderLog,
     VPNClientUsageSnapshot,
+    WebTelegramLinkToken,
+    DailyAdminReportLog,
 )
 from .broadcast_services import create_campaign_recipients, resolve_campaign_recipients, send_campaign
-from .bots import build_sales_report, send_to_config
+from .legacy_wizwiz_import_services import (
+    analyze_wizwiz_import_job,
+    apply_wizwiz_import_job,
+    calculate_file_sha256,
+    create_legacy_import_message_batch,
+    export_wizwiz_import_rows_csv,
+    preview_legacy_import_message_batch,
+    send_legacy_import_message_batch,
+    validate_legacy_import_message_text,
+    wizwiz_simple_restore,
+)
 from .customer_analytics import (
     METRIC_FIELDS,
     PERIOD_ALL_TIME,
@@ -78,7 +105,19 @@ from .customer_analytics import (
     inactive_customer_days,
     loyal_customer_min_orders_30d,
 )
+from .telegram_bot.notifications import build_sales_report, send_to_config
 from .order_actions import activate_order, reject_order
+from .plan_route_services import (
+    BULK_ROUTE_STRATEGY_ADD_NEW,
+    BULK_ROUTE_STRATEGY_REPLACE_ACTIVE,
+    BULK_ROUTE_STRATEGY_SKIP_EXISTING,
+    BULK_ROUTE_STRATEGY_UPDATE_EXISTING,
+    apply_bulk_plan_routes,
+    get_bulk_route_target_plans,
+    get_valid_sales_inbounds,
+    normalize_plan_ids,
+    preview_bulk_plan_routes,
+)
 from .xui_api import sync_inbound_data
 
 
@@ -88,6 +127,12 @@ admin.site.site_header = _("VPN Store Administration")
 admin.site.site_title = _("VPN Store Admin")
 admin.site.index_title = _("Operations dashboard")
 admin.site.index_template = "admin/dashboard.html"
+
+
+def format_usage_bytes(value):
+    from .panel_usage_services import format_bytes_fa
+
+    return format_bytes_fa(value)
 
 
 class UserResource(resources.ModelResource):
@@ -159,16 +204,64 @@ class GroupAdmin(ImportExportModelAdmin, DjangoGroupAdmin):
     ordering = ("name",)
 
 
+class StoreAdminForm(forms.ModelForm):
+    new_smsforwarder_webhook_token = forms.CharField(
+        label=_("Set or rotate SMSForwarder webhook token"),
+        required=False,
+        strip=True,
+        widget=forms.PasswordInput(render_value=False),
+        help_text=_("پس از تغییر توکن، همین مقدار را در اپ SMS Forwarder هم تنظیم کنید."),
+    )
+
+    class Meta:
+        model = Store
+        fields = "__all__"
+
+    def save(self, commit=True):
+        store = super().save(commit=False)
+        token = self.cleaned_data.get("new_smsforwarder_webhook_token")
+        if token:
+            store.set_smsforwarder_webhook_token(token)
+        if commit:
+            store.save()
+            self.save_m2m()
+        return store
+
+
 @admin.register(Store)
 class StoreAdmin(ImportExportModelAdmin):
+    form = StoreAdminForm
+    revenue_engine_fields = (
+        "revenue_engine_enabled",
+        "revenue_engine_dry_run",
+        "revenue_engine_quiet_hours_enabled",
+        "revenue_engine_quiet_hours_start",
+        "revenue_engine_quiet_hours_end",
+        "revenue_engine_timezone",
+        "renewal_engine_enabled",
+        "upsell_engine_enabled",
+        "retention_engine_enabled",
+        "ai_revenue_optimizer_enabled",
+        "revenue_optimization_enabled",
+        "revenue_max_offers_per_user_per_day",
+        "revenue_max_offers_per_user_per_week",
+        "revenue_max_total_offers_per_day",
+        "revenue_min_ai_confidence",
+        "revenue_offer_cooldown_hours",
+        "retention_offer_cooldown_hours",
+    )
     list_display = (
         "name",
         "english_name",
         "domain",
         "sales_mode",
+        "plan_inbound_routing_enabled",
+        "allow_global_inbound_fallback",
         "telegram_support",
         "bale_support",
         "receipt_image_only_payment",
+        "payment_sms_time_zone",
+        "sms_webhook_token_status",
         "custom_volume_price_per_gb",
         "referral_system_enabled",
         "referral_reward_traffic_gb",
@@ -180,6 +273,11 @@ class StoreAdmin(ImportExportModelAdmin):
         "analytics_enabled",
         "broadcast_enabled",
         "renewal_reminders_enabled",
+        "panel_monitor_enabled",
+        "panel_monitor_alerts_enabled",
+        "daily_admin_report_enabled",
+        "panel_usage_tracking_enabled",
+        "panel_usage_report_enabled",
         "renewal_reminders_start_at",
         "low_traffic_reminders_enabled",
         "broadcast_rate_limit_per_second",
@@ -189,6 +287,8 @@ class StoreAdmin(ImportExportModelAdmin):
     )
     list_filter = (
         "sales_mode",
+        "plan_inbound_routing_enabled",
+        "allow_global_inbound_fallback",
         "is_active",
         "receipt_image_only_payment",
         "referral_system_enabled",
@@ -196,6 +296,12 @@ class StoreAdmin(ImportExportModelAdmin):
         "analytics_enabled",
         "broadcast_enabled",
         "renewal_reminders_enabled",
+        "panel_monitor_enabled",
+        "panel_monitor_alerts_enabled",
+        "daily_admin_report_enabled",
+        "panel_usage_tracking_enabled",
+        "panel_usage_report_enabled",
+        "panel_usage_active_user_method",
         "renewal_reminders_start_at",
         "low_traffic_reminders_enabled",
     )
@@ -203,10 +309,56 @@ class StoreAdmin(ImportExportModelAdmin):
     date_hierarchy = "created_at"
     prepopulated_fields = {"slug": ("english_name",)}
     autocomplete_fields = ("free_trial_panel", "free_trial_inbound")
+    readonly_fields = (
+        "sms_webhook_token_status",
+        "smsforwarder_webhook_token_hint",
+        "sms_webhook_token_rotation_help",
+    )
+
+    def get_fieldsets(self, request, obj=None):
+        fieldsets = []
+        revenue_fields = set(self.revenue_engine_fields)
+        for title, options in super().get_fieldsets(request, obj):
+            fields = options.get("fields", ())
+            filtered_fields = tuple(field for field in fields if field not in revenue_fields)
+            if filtered_fields:
+                next_options = dict(options)
+                next_options["fields"] = filtered_fields
+                fieldsets.append((title, next_options))
+        fieldsets.append(
+            (
+                _("Revenue Engine Controls"),
+                {
+                    "classes": ("collapse",),
+                    "fields": self.revenue_engine_fields,
+                },
+            )
+        )
+        return tuple(fieldsets)
 
     @admin.display(description=_("Referral traffic GB"), ordering="referral_reward_gb")
     def referral_reward_traffic_gb(self, obj):
         return obj.referral_reward_gb
+
+    @admin.display(description=_("SMS webhook token"))
+    def sms_webhook_token_status(self, obj):
+        if getattr(obj, "smsforwarder_webhook_token_hash", ""):
+            hint = obj.smsforwarder_webhook_token_hint or "----"
+            return _("Configured, ending in %(hint)s") % {"hint": hint}
+        return _("Not configured")
+
+    @admin.display(description=_("SMS token rotation"))
+    def sms_webhook_token_rotation_help(self, obj):
+        return _("پس از تغییر توکن، همین مقدار را در اپ SMS Forwarder هم تنظیم کنید.")
+
+    def save_model(self, request, obj, form, change):
+        token_changed = bool(form.cleaned_data.get("new_smsforwarder_webhook_token"))
+        super().save_model(request, obj, form, change)
+        if token_changed:
+            messages.success(
+                request,
+                _("SMSForwarder webhook token was updated. Configure the same token in the SMS Forwarder app."),
+            )
 
 
 @admin.register(Operator)
@@ -232,12 +384,49 @@ class BotEventLogInline(admin.TabularInline):
         return False
 
 
+@admin.register(RevenueOfferLog)
+class RevenueOfferLogAdmin(ImportExportModelAdmin):
+    list_display = (
+        "created_at",
+        "customer",
+        "bot_user",
+        "engine_type",
+        "event_type",
+        "offer_type",
+        "variant",
+        "decision_source",
+        "status",
+        "skip_reason",
+        "ai_confidence",
+        "predicted_purchase_probability",
+        "sent_at",
+        "converted_at",
+    )
+    list_filter = ("engine_type", "status", "decision_source", "event_type", "created_at")
+    search_fields = (
+        "customer__display_name",
+        "customer__username",
+        "bot_user__display_name",
+        "bot_user__username",
+        "event_type",
+        "offer_type",
+    )
+    readonly_fields = ("metadata", "error_message", "created_at", "sent_at", "converted_at")
+    date_hierarchy = "created_at"
+    list_select_related = ("store", "customer", "bot_user", "vpn_client")
+    autocomplete_fields = ("store", "customer", "bot_user", "vpn_client")
+
+    def has_add_permission(self, request):
+        return False
+
+
 @admin.register(BotConfiguration)
 class BotConfigurationAdmin(ImportExportModelAdmin):
     list_display = (
         "name",
         "provider",
         "store",
+        "telegram_bot_username",
         "admin_user_id",
         "additional_admin_user_ids",
         "is_active",
@@ -261,6 +450,7 @@ class BotConfigurationAdmin(ImportExportModelAdmin):
         "name",
         "admin_user_id",
         "additional_admin_user_ids",
+        "telegram_bot_username",
         "telegram_required_channel_id",
         "telegram_required_channel_username",
         "store__name",
@@ -285,6 +475,7 @@ class BotConfigurationAdmin(ImportExportModelAdmin):
                     "name",
                     "store",
                     "provider",
+                    "telegram_bot_username",
                     "bot_token",
                     "admin_user_id",
                     "additional_admin_user_ids",
@@ -408,6 +599,7 @@ class BotAdminOrderMessageAdmin(ImportExportModelAdmin):
 
 @admin.register(BotUser)
 class BotUserAdmin(ImportExportModelAdmin):
+    change_list_template = "admin/store/botuser/change_list.html"
     list_display = (
         "display_name",
         "provider_user_id",
@@ -437,6 +629,129 @@ class BotUserAdmin(ImportExportModelAdmin):
     ordering = ("-last_seen_at",)
     actions = ("activate_users", "deactivate_users", "reset_state_selected")
 
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "wizwiz-restore/",
+                self.admin_site.admin_view(self.wizwiz_restore_view),
+                name="store_botuser_wizwiz_restore",
+            ),
+        ]
+        return custom_urls + urls
+
+    def changelist_view(self, request, extra_context=None):
+        extra_context = extra_context or {}
+        extra_context.update(
+            {
+                "wizwiz_restore_url": reverse("admin:store_botuser_wizwiz_restore"),
+                "can_import_wizwiz": self._has_legacy_import_permission(request, "add"),
+            }
+        )
+        return super().changelist_view(request, extra_context=extra_context)
+
+    def _has_legacy_import_permission(self, request, action):
+        return request.user.is_active and request.user.is_staff and request.user.has_perm(
+            f"store.{action}_legacywizwizimportjob"
+        )
+
+    def _require_legacy_import_permission(self, request, action):
+        if not self._has_legacy_import_permission(request, action):
+            raise PermissionDenied
+
+    def _get_wizwiz_job(self, request, job_id, *, action="view"):
+        self._require_legacy_import_permission(request, action)
+        try:
+            return LegacyWizWizImportJob.objects.get(pk=job_id)
+        except LegacyWizWizImportJob.DoesNotExist as exc:
+            raise Http404 from exc
+
+    def _require_simple_restore_permission(self, request):
+        self._require_legacy_import_permission(request, "add")
+        self._require_legacy_import_permission(request, "change")
+
+    def wizwiz_restore_view(self, request):
+        self._require_simple_restore_permission(request)
+        restore_state = request.session.get("wizwiz_restore_last") or {}
+        import_form = WizWizSimpleRestoreForm()
+        message_form = WizWizSimpleRestoreMessageForm()
+
+        if request.method == "POST":
+            action = request.POST.get("action")
+            if action == "start_import":
+                import_form = WizWizSimpleRestoreForm(request.POST, request.FILES)
+                if import_form.is_valid():
+                    uploaded_file = import_form.cleaned_data["sql_file"]
+                    try:
+                        result = wizwiz_simple_restore(
+                            uploaded_file,
+                            created_by=request.user,
+                            title=Path(uploaded_file.name or "wizwiz.sql").name,
+                            skip_admins=True,
+                            import_agents=True,
+                            only_wallet_positive=False,
+                            update_existing=False,
+                            create_customers=True,
+                        )
+                    except Exception:
+                        messages.error(request, _("Import failed. Please verify the backup file and try again."))
+                    else:
+                        request.session["wizwiz_restore_last"] = {
+                            "job_id": result["job_id"],
+                            "result": result,
+                            "message_result": None,
+                        }
+                        request.session.modified = True
+                        messages.success(request, _("WizWiz restore completed."))
+                        return HttpResponseRedirect(reverse("admin:store_botuser_wizwiz_restore"))
+                else:
+                    messages.error(request, _("Please upload a valid WizWiz SQL backup file."))
+            elif action == "send_message":
+                message_form = WizWizSimpleRestoreMessageForm(request.POST)
+                job_id = restore_state.get("job_id")
+                if not job_id:
+                    messages.error(request, _("Run an import before sending a message."))
+                elif message_form.is_valid():
+                    job = self._get_wizwiz_job(request, job_id, action="change")
+                    try:
+                        batch = create_legacy_import_message_batch(
+                            job,
+                            message_form.cleaned_data["text"],
+                            request.user,
+                        )
+                        counts = send_legacy_import_message_batch(batch)
+                    except Exception:
+                        messages.error(request, _("Message send failed. Please try again."))
+                    else:
+                        restore_state["message_result"] = {
+                            "sent": counts["sent"],
+                            "failed": counts["failed"],
+                            "skipped": counts["skipped_no_chat_id"],
+                            "blocked": counts["blocked"],
+                        }
+                        request.session["wizwiz_restore_last"] = restore_state
+                        request.session.modified = True
+                        messages.success(request, _("Message sent to imported users."))
+                        return HttpResponseRedirect(reverse("admin:store_botuser_wizwiz_restore"))
+                else:
+                    messages.error(request, _("Please fix the message form errors."))
+            elif action == "clear":
+                request.session.pop("wizwiz_restore_last", None)
+                request.session.modified = True
+                return HttpResponseRedirect(reverse("admin:store_botuser_wizwiz_restore"))
+
+        context = {
+            **self.admin_site.each_context(request),
+            "opts": self.model._meta,
+            "title": _("WizWiz Restore"),
+            "import_form": import_form,
+            "message_form": message_form,
+            "restore_state": restore_state,
+            "restore_result": restore_state.get("result"),
+            "message_result": restore_state.get("message_result"),
+        }
+        return TemplateResponse(request, "admin/store/botuser/wizwiz_restore.html", context)
+
     @admin.action(description=_("Activate selected bot users"))
     def activate_users(self, request, queryset):
         updated = queryset.update(is_active=True, updated_at=timezone.now())
@@ -451,6 +766,44 @@ class BotUserAdmin(ImportExportModelAdmin):
     def reset_state_selected(self, request, queryset):
         updated = queryset.update(state=BotUser.State.IDLE, state_data={}, updated_at=timezone.now())
         messages.success(request, _("%(count)s bot user state(s) reset.") % {"count": updated})
+
+
+@admin.register(WebTelegramLinkToken)
+class WebTelegramLinkTokenAdmin(ImportExportModelAdmin):
+    list_display = (
+        "customer",
+        "status",
+        "bot_user",
+        "source",
+        "created_at",
+        "expires_at",
+        "used_at",
+    )
+    list_filter = ("status", "source", "created_at")
+    search_fields = (
+        "customer__display_name",
+        "customer__username",
+        "customer__phone_number",
+        "customer__referral_code",
+        "bot_user__provider_user_id",
+        "bot_user__chat_id",
+        "bot_user__username",
+    )
+    autocomplete_fields = ("customer", "bot_user")
+    readonly_fields = (
+        "token_hash",
+        "created_at",
+        "updated_at",
+        "used_at",
+        "revoked_at",
+        "metadata",
+    )
+    date_hierarchy = "created_at"
+    list_select_related = ("customer", "bot_user", "bot_user__bot_config")
+    ordering = ("-created_at",)
+
+    def has_add_permission(self, request):
+        return False
 
 
 class SupportMessageInline(admin.TabularInline):
@@ -566,13 +919,180 @@ def calculate_plan_price_from_per_gb(volume_gb, price_per_gb):
     return int(raw_price.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+class SalesInboundChoiceField(forms.ModelChoiceField):
+    def label_from_instance(self, obj):
+        panel_name = getattr(getattr(obj, "panel", None), "name", None) or _("بدون پنل")
+        remark = obj.remark or _("بدون remark")
+        return f"{panel_name} / inbound {obj.xui_inbound_id} / {remark} / {obj.protocol}"
+
+
+class BulkPlanInboundRouteForm(forms.Form):
+    PLAN_SELECTION_ALL_ACTIVE = "all_active"
+    PLAN_SELECTION_MANUAL = "manual"
+
+    store = forms.ModelChoiceField(
+        label=_("Store"),
+        queryset=Store.objects.none(),
+        required=True,
+        help_text=_("پلن‌ها و inboundها بر اساس این فروشگاه فیلتر می‌شوند."),
+    )
+    inbound = SalesInboundChoiceField(
+        label=_("Destination inbound"),
+        queryset=Inbound.objects.none(),
+        required=True,
+        help_text=_("فقط inboundهای فعال، قابل فروش، غیر legacy و متصل به پنل فعال نمایش داده می‌شوند."),
+    )
+    operator = forms.ModelChoiceField(
+        label=_("Operator"),
+        queryset=Operator.objects.none(),
+        required=False,
+        help_text=_("خالی یعنی route عمومی برای پلن ساخته یا به‌روزرسانی شود."),
+    )
+    plan_selection_mode = forms.ChoiceField(
+        label=_("Plans"),
+        choices=(
+            (PLAN_SELECTION_ALL_ACTIVE, _("All active plans")),
+            (PLAN_SELECTION_MANUAL, _("Selected plans")),
+        ),
+        initial=PLAN_SELECTION_ALL_ACTIVE,
+        widget=forms.RadioSelect,
+    )
+    plans = forms.ModelMultipleChoiceField(
+        label=_("Selected plans"),
+        queryset=Plan.objects.none(),
+        required=False,
+        widget=FilteredSelectMultiple(_("plans"), is_stacked=False),
+        help_text=_("اگر انتخاب دستی فعال باشد، فقط همین پلن‌های فعال route می‌گیرند."),
+    )
+    priority = forms.IntegerField(
+        label=_("Priority"),
+        min_value=0,
+        initial=100,
+        help_text=_("عدد کمتر یعنی اولویت بالاتر."),
+    )
+    weight = forms.IntegerField(
+        label=_("Weight"),
+        min_value=1,
+        initial=1,
+    )
+    existing_strategy = forms.ChoiceField(
+        label=_("Existing routes"),
+        choices=(
+            (BULK_ROUTE_STRATEGY_UPDATE_EXISTING, _("Update existing, create missing")),
+            (BULK_ROUTE_STRATEGY_SKIP_EXISTING, _("Skip plans with an active route")),
+            (BULK_ROUTE_STRATEGY_ADD_NEW, _("Add a new route and keep existing active routes")),
+            (BULK_ROUTE_STRATEGY_REPLACE_ACTIVE, _("Deactivate active routes and create/reuse one route")),
+        ),
+        initial=BULK_ROUTE_STRATEGY_UPDATE_EXISTING,
+    )
+    note = forms.CharField(
+        label=_("Note"),
+        required=False,
+        initial="Bulk assigned from admin",
+        widget=forms.Textarea(attrs={"rows": 2}),
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        store_queryset = Store.objects.filter(is_active=True).order_by("name", "pk")
+        self.fields["store"].queryset = store_queryset
+
+        store = self.selected_store()
+        if not self.is_bound and not self.initial.get("store") and store:
+            self.initial["store"] = store.pk
+
+        self.fields["inbound"].queryset = get_valid_sales_inbounds(store)
+        self.fields["operator"].queryset = self.active_operators(store)
+        self.fields["plans"].queryset = get_bulk_route_target_plans(store=store, all_active=True)
+
+    def selected_store(self):
+        raw_value = self.data.get(self.add_prefix("store")) if self.is_bound else self.initial.get("store")
+        if isinstance(raw_value, Store):
+            return raw_value
+        if raw_value:
+            try:
+                return Store.objects.filter(is_active=True).get(pk=raw_value)
+            except (Store.DoesNotExist, ValueError, TypeError):
+                return None
+        return Store.objects.filter(is_active=True).order_by("name", "pk").first()
+
+    def active_operators(self, store):
+        operators = Operator.objects.filter(is_active=True)
+        if store:
+            operators = operators.filter(Q(store=store) | Q(store__isnull=True))
+        return operators.order_by("sort_order", "name", "pk")
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if cleaned_data.get("plan_selection_mode") == self.PLAN_SELECTION_MANUAL and not cleaned_data.get("plans"):
+            self.add_error("plans", _("برای انتخاب دستی، حداقل یک پلن فعال انتخاب کن."))
+        return cleaned_data
+
+    def service_kwargs(self):
+        plan_selection_mode = self.cleaned_data["plan_selection_mode"]
+        all_active = plan_selection_mode == self.PLAN_SELECTION_ALL_ACTIVE
+        selected_plan_ids = []
+        if not all_active:
+            selected_plan_ids = [plan.pk for plan in self.cleaned_data["plans"]]
+
+        return {
+            "store": self.cleaned_data["store"],
+            "inbound": self.cleaned_data["inbound"],
+            "operator": self.cleaned_data.get("operator"),
+            "selected_plan_ids": selected_plan_ids,
+            "all_active": all_active,
+            "priority": self.cleaned_data["priority"],
+            "weight": self.cleaned_data["weight"],
+            "existing_strategy": self.cleaned_data["existing_strategy"],
+            "note": self.cleaned_data.get("note") or "",
+        }
+
+
+class PlanInboundRouteInline(admin.TabularInline):
+    model = PlanInboundRoute
+    extra = 0
+    fields = (
+        "store",
+        "operator",
+        "inbound",
+        "route_status",
+        "is_active",
+        "priority",
+        "weight",
+        "note",
+    )
+    readonly_fields = ("route_status",)
+    autocomplete_fields = ("store", "operator", "inbound")
+    show_change_link = True
+
+    @admin.display(description=_("Route status"))
+    def route_status(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        if obj.is_active and obj.plan_id and not obj.plan.is_active:
+            return format_html('<span class="badge bg-warning text-dark">{}</span>', _("پلن غیرفعال است"))
+        inbound = getattr(obj, "inbound", None)
+        panel = getattr(inbound, "panel", None) if inbound else None
+        if not obj.is_active:
+            return _("Inactive")
+        if not inbound or not getattr(inbound, "is_active", False):
+            return format_html('<span class="badge bg-danger">{}</span>', _("Inbound inactive"))
+        if not getattr(inbound, "available_for_new_orders", True):
+            return format_html('<span class="badge bg-danger">{}</span>', _("Legacy / unavailable"))
+        if not panel or not panel.is_active:
+            return format_html('<span class="badge bg-danger">{}</span>', _("Panel inactive"))
+        return format_html('<span class="badge bg-success">{}</span>', _("Ready"))
+
+
 @admin.register(Plan)
 class PlanAdmin(ImportExportModelAdmin):
     import_export_change_list_template = "admin/store/plan/change_list.html"
+    inlines = (PlanInboundRouteInline,)
     list_display = (
         "name",
         "store",
         "operator_names",
+        "active_route_count",
         "volume_gb",
         "duration_days",
         "price",
@@ -589,6 +1109,7 @@ class PlanAdmin(ImportExportModelAdmin):
     prepopulated_fields = {"slug": ("name",)}
     list_editable = ("is_active", "is_public", "sort_order")
     filter_horizontal = ("operators",)
+    actions = ["bulk_assign_inbound_routes"]
 
     @admin.display(description=_("Operators"))
     def operator_names(self, obj):
@@ -599,8 +1120,20 @@ class PlanAdmin(ImportExportModelAdmin):
         suffix = f" +{total - len(names)}" if total > len(names) else ""
         return ", ".join(names) + suffix
 
+    @admin.display(description=_("Active routes"), ordering="admin_active_route_count")
+    def active_route_count(self, obj):
+        value = getattr(obj, "admin_active_route_count", None)
+        if value is None:
+            value = obj.inbound_routes.filter(is_active=True).count()
+        return value
+
     def get_queryset(self, request):
-        return super().get_queryset(request).prefetch_related("operators")
+        return (
+            super()
+            .get_queryset(request)
+            .prefetch_related("operators")
+            .annotate(admin_active_route_count=Count("inbound_routes", filter=Q(inbound_routes__is_active=True)))
+        )
 
     def changelist_view(self, request, extra_context=None):
         bulk_price_form = PlanBulkPriceForm()
@@ -631,6 +1164,7 @@ class PlanAdmin(ImportExportModelAdmin):
         context = {
             **(extra_context or {}),
             "bulk_price_per_gb_form": bulk_price_form,
+            "bulk_route_assign_url": reverse("admin:store_planinboundroute_bulk_assign"),
         }
         return super().changelist_view(request, context)
 
@@ -655,14 +1189,223 @@ class PlanAdmin(ImportExportModelAdmin):
 
         return len(plans_to_update), len(plans)
 
+    @admin.action(description=_("Set sales inbound for selected plans"))
+    def bulk_assign_inbound_routes(self, request, queryset):
+        selected_plan_ids = ",".join(str(plan_id) for plan_id in queryset.values_list("pk", flat=True))
+        params = urlencode(
+            {
+                "plan_selection_mode": BulkPlanInboundRouteForm.PLAN_SELECTION_MANUAL,
+                "plan_ids": selected_plan_ids,
+            }
+        )
+        return HttpResponseRedirect(f"{reverse('admin:store_planinboundroute_bulk_assign')}?{params}")
+
+
+@admin.register(PlanInboundRoute)
+class PlanInboundRouteAdmin(ImportExportModelAdmin):
+    import_export_change_list_template = "admin/store/planinboundroute/change_list.html"
+    list_display = (
+        "plan",
+        "store",
+        "operator",
+        "inbound",
+        "panel",
+        "is_active",
+        "priority",
+        "weight",
+        "inbound_available_for_new_orders",
+        "inbound_health_monitor_enabled",
+        "route_health",
+        "created_at",
+    )
+    list_filter = (
+        "is_active",
+        "store",
+        "plan",
+        "operator",
+        "inbound__panel",
+        "inbound__available_for_new_orders",
+    )
+    search_fields = (
+        "plan__name",
+        "plan__slug",
+        "operator__name",
+        "operator__slug",
+        "inbound__remark",
+        "=inbound__inbound_id",
+        "inbound__panel__name",
+        "inbound__panel__url",
+        "store__name",
+        "store__english_name",
+    )
+    date_hierarchy = "created_at"
+    list_select_related = ("store", "plan", "operator", "inbound", "inbound__panel")
+    autocomplete_fields = ("store", "plan", "operator", "inbound")
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "bulk-assign/",
+                self.admin_site.admin_view(self.bulk_assign_view),
+                name="store_planinboundroute_bulk_assign",
+            ),
+        ]
+        return custom_urls + urls
+
+    def changelist_view(self, request, extra_context=None):
+        context = {
+            **(extra_context or {}),
+            "bulk_route_assign_url": reverse("admin:store_planinboundroute_bulk_assign"),
+        }
+        return super().changelist_view(request, context)
+
+    def bulk_assign_view(self, request):
+        if not self.has_change_permission(request):
+            raise PermissionDenied
+
+        preview = None
+        if request.method == "POST":
+            form = BulkPlanInboundRouteForm(request.POST)
+            if form.is_valid():
+                kwargs = form.service_kwargs()
+                if "_apply" in request.POST:
+                    try:
+                        result = apply_bulk_plan_routes(**kwargs)
+                    except ValidationError as exc:
+                        messages.error(
+                            request,
+                            _("Routeها اعمال نشدند؛ خطا باعث rollback کامل شد: %(error)s")
+                            % {"error": self.format_validation_error(exc)},
+                        )
+                    else:
+                        if result["errors"]:
+                            preview = result
+                            messages.error(request, _("قبل از اعمال، خطاهای preview را برطرف کن."))
+                        else:
+                            messages.success(request, self.bulk_apply_success_message(result))
+                            for warning in result["warnings"][:5]:
+                                messages.warning(request, warning)
+                            return HttpResponseRedirect(reverse("admin:store_planinboundroute_changelist"))
+                else:
+                    preview = preview_bulk_plan_routes(**kwargs)
+                    if preview["errors"]:
+                        messages.error(request, _("Preview خطا دارد؛ routeها هنوز اعمال نشده‌اند."))
+                    elif preview["warnings"]:
+                        messages.warning(request, _("Preview با هشدار آماده است؛ قبل از تایید آن‌ها را بررسی کن."))
+            else:
+                messages.error(request, _("فرم تنظیم گروهی routeها معتبر نیست."))
+        else:
+            form = BulkPlanInboundRouteForm(initial=self.bulk_assign_initial(request))
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": _("Bulk assign inbound routes"),
+            "subtitle": _("تنظیم گروهی مسیر فروش پلن‌ها"),
+            "opts": self.model._meta,
+            "form": form,
+            "preview": preview,
+            "media": self.media + form.media,
+            "changelist_url": reverse("admin:store_planinboundroute_changelist"),
+        }
+        return TemplateResponse(request, "admin/store/planinboundroute/bulk_assign.html", context)
+
+    def bulk_assign_initial(self, request):
+        initial = {
+            "plan_selection_mode": BulkPlanInboundRouteForm.PLAN_SELECTION_ALL_ACTIVE,
+            "priority": 100,
+            "weight": 1,
+            "existing_strategy": BULK_ROUTE_STRATEGY_UPDATE_EXISTING,
+            "note": "Bulk assigned from admin",
+        }
+        plan_ids = normalize_plan_ids(request.GET.get("plan_ids"))
+        store = None
+        store_id = request.GET.get("store")
+        if store_id:
+            try:
+                store = Store.objects.filter(is_active=True).get(pk=store_id)
+            except (Store.DoesNotExist, ValueError, TypeError):
+                store = None
+
+        if not store and plan_ids:
+            plan_store_ids = list(
+                Plan.objects.filter(pk__in=plan_ids, is_active=True, store__isnull=False)
+                .values_list("store_id", flat=True)
+                .distinct()
+            )
+            if len(plan_store_ids) == 1:
+                store = Store.objects.filter(is_active=True, pk=plan_store_ids[0]).first()
+
+        if not store:
+            store = Store.objects.filter(is_active=True).order_by("name", "pk").first()
+        if store:
+            initial["store"] = store.pk
+
+        if plan_ids:
+            valid_plan_ids = list(
+                get_bulk_route_target_plans(store=store, selected_plan_ids=plan_ids).values_list("pk", flat=True)
+            )
+            initial["plan_selection_mode"] = BulkPlanInboundRouteForm.PLAN_SELECTION_MANUAL
+            initial["plans"] = valid_plan_ids
+
+        return initial
+
+    def bulk_apply_success_message(self, result):
+        return (
+            _("Routeها با موفقیت اعمال شدند: %(created)s ساخته شد، %(updated)s آپدیت شد، %(skipped)s skip شد، %(deactivated)s غیرفعال شد.")
+            % {
+                "created": result["created"],
+                "updated": result["updated"],
+                "skipped": result["skipped"],
+                "deactivated": result["deactivated"],
+            }
+        )
+
+    def format_validation_error(self, exc):
+        if hasattr(exc, "message_dict"):
+            parts = []
+            for field, field_messages in exc.message_dict.items():
+                parts.append(f"{field}: {', '.join(str(message) for message in field_messages)}")
+            return "; ".join(parts)
+        return "; ".join(str(message) for message in getattr(exc, "messages", [str(exc)]))
+
+    @admin.display(description=_("Panel"), ordering="inbound__panel__name")
+    def panel(self, obj):
+        return obj.inbound.panel if obj.inbound_id else "-"
+
+    @admin.display(description=_("Available for new orders"), boolean=True, ordering="inbound__available_for_new_orders")
+    def inbound_available_for_new_orders(self, obj):
+        return bool(obj.inbound_id and obj.inbound.available_for_new_orders)
+
+    @admin.display(description=_("Health monitor"), boolean=True, ordering="inbound__health_monitor_enabled")
+    def inbound_health_monitor_enabled(self, obj):
+        return bool(obj.inbound_id and obj.inbound.health_monitor_enabled)
+
+    @admin.display(description=_("Route health"))
+    def route_health(self, obj):
+        if obj.is_active and obj.plan_id and not obj.plan.is_active:
+            return format_html('<span class="badge bg-warning text-dark">{}</span>', _("پلن غیرفعال است"))
+        inbound = obj.inbound if obj.inbound_id else None
+        panel = inbound.panel if inbound else None
+        if not obj.is_active:
+            return _("Inactive")
+        if not inbound or not inbound.is_active:
+            return format_html('<span class="badge bg-danger">{}</span>', _("Inbound inactive"))
+        if not inbound.available_for_new_orders:
+            return format_html('<span class="badge bg-danger">{}</span>', _("Legacy / unavailable"))
+        if not panel or not panel.is_active:
+            return format_html('<span class="badge bg-danger">{}</span>', _("Panel inactive"))
+        return format_html('<span class="badge bg-success">{}</span>', _("Ready"))
+
 
 @admin.register(Panel)
 class PanelAdmin(ImportExportModelAdmin):
-    list_display = ("name", "store", "url", "uses_proxy", "is_active", "inbound_count", "last_sync_at")
+    list_display = ("name", "store", "url", "uses_proxy", "is_active", "inbound_count", "latest_daily_usage", "last_sync_at")
     list_filter = ("store", "is_active")
     search_fields = ("name", "url", "username", "proxy_url")
     date_hierarchy = "created_at"
     list_select_related = ("store",)
+    actions = ("run_health_check",)
 
     def get_queryset(self, request):
         return super().get_queryset(request).annotate(admin_inbound_count=Count("inbounds"))
@@ -674,6 +1417,246 @@ class PanelAdmin(ImportExportModelAdmin):
     @admin.display(description=_("Proxy"), boolean=True)
     def uses_proxy(self, obj):
         return bool(obj.proxy_url)
+
+    @admin.display(description=_("Latest daily usage"))
+    def latest_daily_usage(self, obj):
+        usage = obj.daily_usages.order_by("-usage_date").first()
+        if not usage:
+            return "-"
+        return _("%(date)s: %(usage)s (%(quality)s)") % {
+            "date": usage.usage_date,
+            "usage": format_usage_bytes(usage.used_bytes),
+            "quality": usage.data_quality,
+        }
+
+    @admin.action(description=_("Run health check without alerts"))
+    def run_health_check(self, request, queryset):
+        from .panel_health_services import check_panel_health
+
+        checked = 0
+        errors = 0
+        for panel in queryset.select_related("store"):
+            try:
+                check_panel_health(panel, send_alerts=False)
+                checked += 1
+            except Exception as exc:
+                errors += 1
+                messages.error(request, _("Could not check %(panel)s: %(error)s") % {"panel": panel, "error": exc})
+        if checked:
+            messages.success(request, _("%(count)s panel(s) checked.") % {"count": checked})
+        if errors:
+            messages.warning(request, _("%(count)s panel health check(s) failed.") % {"count": errors})
+
+
+@admin.register(PanelHealthStatus)
+class PanelHealthStatusAdmin(ImportExportModelAdmin):
+    list_display = (
+        "panel",
+        "status",
+        "last_checked_at",
+        "last_ok_at",
+        "last_error_at",
+        "consecutive_failures",
+        "response_time_ms",
+        "summary_short",
+    )
+    list_filter = ("status", "panel__store", "last_checked_at", "last_error_at")
+    search_fields = ("panel__name", "summary", "error_code", "error_message")
+    date_hierarchy = "last_checked_at"
+    list_select_related = ("panel", "panel__store")
+    autocomplete_fields = ("panel",)
+    readonly_fields = (
+        "last_checked_at",
+        "last_ok_at",
+        "last_error_at",
+        "last_alert_sent_at",
+        "last_recovery_alert_sent_at",
+        "consecutive_failures",
+        "consecutive_successes",
+        "response_time_ms",
+        "error_code",
+        "error_message",
+        "summary",
+        "metadata",
+        "created_at",
+        "updated_at",
+    )
+    actions = ("run_health_check",)
+
+    @admin.display(description=_("Summary"))
+    def summary_short(self, obj):
+        return (obj.summary or "-")[:140]
+
+    @admin.action(description=_("Run health check for selected panels without alerts"))
+    def run_health_check(self, request, queryset):
+        from .panel_health_services import check_panel_health
+
+        checked = 0
+        errors = 0
+        for health_status in queryset.select_related("panel", "panel__store"):
+            try:
+                check_panel_health(health_status.panel, send_alerts=False)
+                checked += 1
+            except Exception as exc:
+                errors += 1
+                messages.error(
+                    request,
+                    _("Could not check %(panel)s: %(error)s") % {"panel": health_status.panel, "error": exc},
+                )
+        if checked:
+            messages.success(request, _("%(count)s panel(s) checked.") % {"count": checked})
+        if errors:
+            messages.warning(request, _("%(count)s panel health check(s) failed.") % {"count": errors})
+
+
+@admin.register(PanelHealthCheckLog)
+class PanelHealthCheckLogAdmin(ImportExportModelAdmin):
+    list_display = (
+        "panel",
+        "status",
+        "checked_at",
+        "response_time_ms",
+        "login_ok",
+        "inbounds_checked",
+        "inbounds_ok",
+        "inbounds_warning",
+        "inbounds_error",
+        "alert_sent",
+    )
+    list_filter = ("status", "panel", "panel__store", "checked_at", "alert_sent")
+    search_fields = ("panel__name", "error_code", "error_message", "metadata")
+    date_hierarchy = "checked_at"
+    list_select_related = ("panel", "panel__store")
+    readonly_fields = (
+        "panel",
+        "status",
+        "checked_at",
+        "response_time_ms",
+        "login_ok",
+        "inbounds_checked",
+        "inbounds_ok",
+        "inbounds_warning",
+        "inbounds_error",
+        "error_code",
+        "error_message",
+        "metadata",
+        "alert_sent",
+    )
+
+
+@admin.register(PanelUsageSnapshot)
+class PanelUsageSnapshotAdmin(ImportExportModelAdmin):
+    list_display = (
+        "panel",
+        "captured_at",
+        "status",
+        "used_bytes_display",
+        "clients_count",
+        "online_clients_count",
+        "checked_inbounds_count",
+        "active_inbounds_count",
+    )
+    list_filter = ("status", "panel", "panel__store", "captured_at")
+    search_fields = ("panel__name", "error_message", "metadata")
+    date_hierarchy = "captured_at"
+    list_select_related = ("panel", "panel__store")
+    readonly_fields = (
+        "panel",
+        "captured_at",
+        "status",
+        "total_upload_bytes",
+        "total_download_bytes",
+        "total_used_bytes",
+        "clients_count",
+        "online_clients_count",
+        "active_inbounds_count",
+        "checked_inbounds_count",
+        "error_message",
+        "metadata",
+        "created_at",
+    )
+
+    @admin.display(description=_("Used"))
+    def used_bytes_display(self, obj):
+        return format_usage_bytes(obj.total_used_bytes)
+
+
+@admin.register(PanelClientUsageSnapshot)
+class PanelClientUsageSnapshotAdmin(ImportExportModelAdmin):
+    list_display = (
+        "panel",
+        "inbound",
+        "captured_at",
+        "client_identifier_masked",
+        "used_bytes_display",
+        "online",
+        "enabled",
+        "source",
+    )
+    list_filter = ("panel", "panel__store", "inbound", "captured_at", "online", "enabled", "source")
+    search_fields = ("panel__name", "client_identifier_hash", "client_identifier_masked", "email_masked")
+    date_hierarchy = "captured_at"
+    list_select_related = ("panel", "panel__store", "inbound")
+    readonly_fields = (
+        "panel",
+        "inbound",
+        "captured_at",
+        "client_identifier_hash",
+        "client_identifier_masked",
+        "email_masked",
+        "upload_bytes",
+        "download_bytes",
+        "used_bytes",
+        "total_bytes",
+        "expiry_time",
+        "enabled",
+        "online",
+        "source",
+        "metadata",
+    )
+
+    @admin.display(description=_("Used"))
+    def used_bytes_display(self, obj):
+        return format_usage_bytes(obj.used_bytes)
+
+
+@admin.register(PanelDailyUsage)
+class PanelDailyUsageAdmin(ImportExportModelAdmin):
+    list_display = (
+        "panel",
+        "usage_date",
+        "timezone",
+        "used_bytes_display",
+        "active_users_count",
+        "online_users_count",
+        "data_quality",
+        "calculated_at",
+    )
+    list_filter = ("data_quality", "panel", "panel__store", "usage_date", "timezone")
+    search_fields = ("panel__name", "metadata")
+    date_hierarchy = "usage_date"
+    list_select_related = ("panel", "panel__store")
+    readonly_fields = (
+        "panel",
+        "usage_date",
+        "timezone",
+        "upload_bytes",
+        "download_bytes",
+        "used_bytes",
+        "active_users_count",
+        "online_users_count",
+        "clients_count_start",
+        "clients_count_end",
+        "snapshot_start_at",
+        "snapshot_end_at",
+        "data_quality",
+        "metadata",
+        "calculated_at",
+    )
+
+    @admin.display(description=_("Used"))
+    def used_bytes_display(self, obj):
+        return format_usage_bytes(obj.used_bytes)
 
 
 class OrderResource(resources.ModelResource):
@@ -828,6 +1811,8 @@ class VPNClientInline(admin.TabularInline):
         "username",
         "inbound",
         "status",
+        "deleted_at",
+        "remote_deleted_at",
         "traffic_limit_bytes",
         "used_traffic_bytes",
         "activated_at",
@@ -841,6 +1826,30 @@ class VPNClientInline(admin.TabularInline):
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("inbound")
+
+
+class VPNClientActionLogInline(admin.TabularInline):
+    model = VPNClientActionLog
+    extra = 0
+    can_delete = False
+    show_change_link = True
+    fields = (
+        "action",
+        "actor_type",
+        "actor_telegram_id",
+        "status",
+        "xui_identifier_masked",
+        "old_total_bytes",
+        "new_total_bytes",
+        "old_expiry_time",
+        "new_expiry_time",
+        "created_at",
+        "completed_at",
+    )
+    readonly_fields = fields
+
+    def has_add_permission(self, request, obj=None):
+        return False
 
 
 class OrderReferralRewardLedgerInline(admin.TabularInline):
@@ -1210,10 +2219,11 @@ class OrderAdmin(ImportExportModelAdmin):
 
 @admin.register(Inbound)
 class InboundAdmin(ImportExportModelAdmin):
+    legacy_default_note = "Legacy inbound kept for old orders/clients; not present in current X-UI."
+
     list_display = (
-        "display_name",
-        "panel_status",
-        "inbound_id",
+        "panel",
+        "xui_inbound_id",
         "remark",
         "protocol",
         "network_type",
@@ -1221,10 +2231,25 @@ class InboundAdmin(ImportExportModelAdmin):
         "current_users",
         "max_clients",
         "is_active",
+        "available_for_new_orders",
+        "health_monitor_enabled",
+        "legacy_status",
+        "active_plan_route_count",
+        "active_route_warning",
     )
-    list_filter = ("panel", "panel__store", "protocol", "network_type", "security", "is_active")
+    list_filter = (
+        "panel",
+        "panel__store",
+        "protocol",
+        "network_type",
+        "security",
+        "is_active",
+        "available_for_new_orders",
+        "health_monitor_enabled",
+    )
     search_fields = (
         "remark",
+        "legacy_note",
         "server_ip",
         "port",
         "=inbound_id",
@@ -1236,7 +2261,7 @@ class InboundAdmin(ImportExportModelAdmin):
     date_hierarchy = "created_at"
     list_select_related = ("panel", "panel__store")
     autocomplete_fields = ("panel",)
-    actions = ["sync_from_panel"]
+    actions = ["sync_from_panel", "mark_as_legacy", "enable_for_new_orders_and_health"]
 
     @admin.display(description=_("Name"))
     def display_name(self, obj):
@@ -1257,6 +2282,84 @@ class InboundAdmin(ImportExportModelAdmin):
                 panel.name,
             )
         return panel.name
+
+    @admin.display(description=_("X-UI inbound ID"), ordering="inbound_id")
+    def xui_inbound_id(self, obj):
+        return obj.inbound_id
+
+    def get_queryset(self, request):
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(admin_active_plan_route_count=Count("plan_routes", filter=Q(plan_routes__is_active=True)))
+        )
+
+    @admin.display(description=_("Legacy"))
+    def legacy_status(self, obj):
+        if obj.legacy_note:
+            return _("Legacy")
+        return "-"
+
+    @admin.display(description=_("Active plan routes"), ordering="admin_active_plan_route_count")
+    def active_plan_route_count(self, obj):
+        value = getattr(obj, "admin_active_plan_route_count", None)
+        if value is None:
+            value = obj.plan_routes.filter(is_active=True).count()
+        return value
+
+    @admin.display(description=_("Route warning"))
+    def active_route_warning(self, obj):
+        active_routes = self.active_plan_route_count(obj)
+        if active_routes and not obj.available_for_new_orders:
+            return format_html('<span class="badge bg-danger">{}</span>', _("Active route on legacy inbound"))
+        if active_routes and not obj.is_active:
+            return format_html('<span class="badge bg-danger">{}</span>', _("Active route on inactive inbound"))
+        if active_routes and obj.panel_id and not obj.panel.is_active:
+            return format_html('<span class="badge bg-danger">{}</span>', _("Active route on inactive panel"))
+        return "-"
+
+    @admin.action(description=_("Mark as legacy / exclude from sales and health monitor"))
+    def mark_as_legacy(self, request, queryset):
+        updated = 0
+        for inbound in queryset:
+            changed_fields = []
+            if inbound.available_for_new_orders:
+                inbound.available_for_new_orders = False
+                changed_fields.append("available_for_new_orders")
+            if inbound.health_monitor_enabled:
+                inbound.health_monitor_enabled = False
+                changed_fields.append("health_monitor_enabled")
+            if not (inbound.legacy_note or "").strip():
+                inbound.legacy_note = self.legacy_default_note
+                changed_fields.append("legacy_note")
+            if changed_fields:
+                inbound.save(update_fields=[*changed_fields, "updated_at"])
+                updated += 1
+        if request is not None:
+            self.message_user(
+                request,
+                _("%(count)s inbound(s) marked as legacy and excluded from new orders and health monitor.")
+                % {"count": updated},
+                level=messages.SUCCESS,
+            )
+
+    @admin.action(description=_("Enable for new orders and health monitor"))
+    def enable_for_new_orders_and_health(self, request, queryset):
+        updated = queryset.update(
+            available_for_new_orders=True,
+            health_monitor_enabled=True,
+            updated_at=timezone.now(),
+        )
+        if request is not None:
+            self.message_user(
+                request,
+                _(
+                    "%(count)s inbound(s) enabled for new orders and health monitor. "
+                    "Use this only after confirming the inbound exists in X-UI."
+                )
+                % {"count": updated},
+                level=messages.WARNING,
+            )
 
     @admin.action(description=_("Sync inbound settings from Sanaei/X-UI"))
     def sync_from_panel(self, request, queryset):
@@ -1312,12 +2415,15 @@ class InboundAdmin(ImportExportModelAdmin):
 
 @admin.register(VPNClient)
 class VPNClientAdmin(ImportExportModelAdmin):
+    inlines = (VPNClientActionLogInline,)
     list_display = (
         "username",
         "store",
         "order",
         "inbound",
         "status",
+        "deleted_at",
+        "remote_deleted_at",
         "duration_days",
         "used_traffic_bytes",
         "activated_at",
@@ -1326,11 +2432,11 @@ class VPNClientAdmin(ImportExportModelAdmin):
         "last_reminder_sent_at",
         "created_at",
     )
-    list_filter = ("store", "status", "inbound", "created_at")
+    list_filter = ("store", "status", "inbound", "deleted_at", "remote_deleted_at", "created_at")
     search_fields = ("username", "xui_email", "uuid", "order__order_tracking_code")
     date_hierarchy = "created_at"
     list_select_related = ("store", "order", "plan", "inbound", "inbound__panel")
-    readonly_fields = ("public_id", "created_at", "updated_at")
+    readonly_fields = ("public_id", "deleted_at", "remote_deleted_at", "created_at", "updated_at")
 
     def get_queryset(self, request):
         return super().get_queryset(request).annotate(admin_last_reminder_sent_at=Max("reminder_logs__sent_at"))
@@ -1338,6 +2444,61 @@ class VPNClientAdmin(ImportExportModelAdmin):
     @admin.display(description=_("Last reminder"), ordering="admin_last_reminder_sent_at")
     def last_reminder_sent_at(self, obj):
         return getattr(obj, "admin_last_reminder_sent_at", None) or "-"
+
+
+@admin.register(VPNClientActionLog)
+class VPNClientActionLogAdmin(ImportExportModelAdmin):
+    list_display = (
+        "id",
+        "vpn_client",
+        "customer",
+        "actor_type",
+        "actor_telegram_id",
+        "action",
+        "status",
+        "panel",
+        "inbound",
+        "xui_identifier_masked",
+        "created_at",
+        "completed_at",
+    )
+    list_filter = ("actor_type", "action", "status", "panel", "inbound", "created_at")
+    search_fields = (
+        "vpn_client__username",
+        "vpn_client__xui_email",
+        "vpn_client__uuid",
+        "customer__display_name",
+        "customer__username",
+        "customer__phone_number",
+        "actor_telegram_id",
+        "xui_identifier_masked",
+        "error_message",
+    )
+    date_hierarchy = "created_at"
+    list_select_related = ("vpn_client", "customer", "panel", "inbound")
+    readonly_fields = (
+        "vpn_client",
+        "customer",
+        "actor_type",
+        "actor_telegram_id",
+        "action",
+        "panel",
+        "inbound",
+        "xui_identifier_masked",
+        "old_total_bytes",
+        "new_total_bytes",
+        "old_expiry_time",
+        "new_expiry_time",
+        "status",
+        "error_message",
+        "metadata",
+        "created_at",
+        "updated_at",
+        "completed_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
 
 
 @admin.register(FreeTrialRequest)
@@ -1466,6 +2627,9 @@ class CustomerAdmin(ImportExportModelAdmin):
         "default_discount_percent",
         "referral_code",
         "referred_by",
+        "telegram_connection_status",
+        "telegram_bot_users_total",
+        "latest_web_telegram_token_status",
         "orders_total",
         "invited_total",
         "successful_referrals_total",
@@ -1493,6 +2657,9 @@ class CustomerAdmin(ImportExportModelAdmin):
         "first_ip",
         "last_ip",
         "user_agent_hash",
+        "telegram_connection_status",
+        "telegram_bot_users_total",
+        "latest_web_telegram_token_status",
         "created_at",
         "updated_at",
         "last_seen_at",
@@ -1532,6 +2699,19 @@ class CustomerAdmin(ImportExportModelAdmin):
                     filter=Q(referral_gb_rewards__status=ReferralRewardLedger.Status.REDEEMED),
                 ),
                 admin_last_reminder_sent_at=Max("vpn_reminder_logs__sent_at"),
+                admin_telegram_bot_users_count=Count(
+                    "bot_users",
+                    filter=Q(
+                        bot_users__is_active=True,
+                        bot_users__bot_config__provider=BotConfiguration.Provider.TELEGRAM,
+                    ),
+                    distinct=True,
+                ),
+                admin_latest_web_telegram_token_status=Subquery(
+                    WebTelegramLinkToken.objects.filter(customer=OuterRef("pk"))
+                    .order_by("-created_at")
+                    .values("status")[:1]
+                ),
             )
         )
 
@@ -1569,6 +2749,30 @@ class CustomerAdmin(ImportExportModelAdmin):
     @admin.display(description=_("Redeemed GB"))
     def redeemed_referral_gb_total(self, obj):
         return getattr(obj, "admin_redeemed_referral_gb", None) or Decimal("0")
+
+    @admin.display(description=_("Telegram linked"))
+    def telegram_connection_status(self, obj):
+        count = getattr(obj, "admin_telegram_bot_users_count", None)
+        if count is None:
+            count = obj.bot_users.filter(
+                is_active=True,
+                bot_config__provider=BotConfiguration.Provider.TELEGRAM,
+            ).count()
+        return _("Connected") if count else _("Not connected")
+
+    @admin.display(description=_("Telegram BotUsers"))
+    def telegram_bot_users_total(self, obj):
+        count = getattr(obj, "admin_telegram_bot_users_count", None)
+        if count is not None:
+            return count
+        return obj.bot_users.filter(
+            is_active=True,
+            bot_config__provider=BotConfiguration.Provider.TELEGRAM,
+        ).count()
+
+    @admin.display(description=_("Latest link token"))
+    def latest_web_telegram_token_status(self, obj):
+        return getattr(obj, "admin_latest_web_telegram_token_status", None) or "-"
 
 
 ANALYTICS_PERIOD_LABELS = {
@@ -1815,6 +3019,691 @@ class CustomerAnalyticsReportAdmin(admin.ModelAdmin):
                 ]
             )
         return response
+
+
+class LegacyWizWizImportJobForm(forms.ModelForm):
+    class Meta:
+        model = LegacyWizWizImportJob
+        fields = "__all__"
+
+    def clean_uploaded_file(self):
+        uploaded_file = self.cleaned_data.get("uploaded_file")
+        if not uploaded_file:
+            if self.instance and self.instance.pk:
+                return uploaded_file
+            raise ValidationError(_("Please upload a WizWiz SQL backup file."))
+        if getattr(uploaded_file, "size", 0) <= 0:
+            raise ValidationError(_("Uploaded file is empty."))
+        if Path(uploaded_file.name or "").suffix.lower() != ".sql":
+            raise ValidationError(_("Only .sql backup files are accepted."))
+        return uploaded_file
+
+
+class WizWizSimpleRestoreForm(forms.Form):
+    sql_file = forms.FileField(label=_("SQL backup file"))
+
+    def clean_sql_file(self):
+        uploaded_file = self.cleaned_data.get("sql_file")
+        if not uploaded_file:
+            raise ValidationError(_("Please upload a WizWiz SQL backup file."))
+        if getattr(uploaded_file, "size", 0) <= 0:
+            raise ValidationError(_("Uploaded file is empty."))
+        if Path(uploaded_file.name or "").suffix.lower() != ".sql":
+            raise ValidationError(_("Only .sql backup files are accepted."))
+        return uploaded_file
+
+
+class WizWizSimpleRestoreMessageForm(forms.Form):
+    text = forms.CharField(
+        label=_("پیام به کاربران import شده"),
+        widget=forms.Textarea(attrs={"rows": 7}),
+    )
+
+    def clean_text(self):
+        return validate_legacy_import_message_text(self.cleaned_data.get("text"))
+
+
+class LegacyWizWizImportMessageForm(forms.Form):
+    text = forms.CharField(
+        label=_("Message text"),
+        widget=forms.Textarea(attrs={"rows": 7}),
+        help_text=_("This message is sent only to BotUsers created/linked by this import job."),
+    )
+    confirm_large_send = forms.BooleanField(
+        label=_("I confirm sending to more than 1000 recipients"),
+        required=False,
+    )
+
+    def clean_text(self):
+        return validate_legacy_import_message_text(self.cleaned_data.get("text"))
+
+
+LEGACY_WIZWIZ_JOB_SUMMARY_FIELDS = (
+    "parsed_users_count",
+    "valid_users_count",
+    "invalid_rows_count",
+    "duplicate_in_file_count",
+    "existing_bot_users_count",
+    "existing_customers_count",
+    "would_create_bot_users_count",
+    "would_create_customers_count",
+    "admins_count",
+    "agents_count",
+    "wallet_positive_count",
+    "created_bot_users_count",
+    "created_customers_count",
+    "linked_existing_count",
+    "updated_existing_count",
+    "skipped_count",
+    "failed_count",
+)
+
+
+def _legacy_wizwiz_summary_items(job):
+    return (
+        (_("Parsed users"), job.parsed_users_count),
+        (_("Valid users"), job.valid_users_count),
+        (_("Invalid rows"), job.invalid_rows_count),
+        (_("Duplicate rows in file"), job.duplicate_in_file_count),
+        (_("Existing BotUsers"), job.existing_bot_users_count),
+        (_("Existing Customers"), job.existing_customers_count),
+        (_("Would create BotUsers"), job.would_create_bot_users_count),
+        (_("Would create Customers"), job.would_create_customers_count),
+        (_("Admins"), job.admins_count),
+        (_("Agents"), job.agents_count),
+        (_("Wallet positive"), job.wallet_positive_count),
+        (_("Created BotUsers"), job.created_bot_users_count),
+        (_("Created Customers"), job.created_customers_count),
+        (_("Linked existing"), job.linked_existing_count),
+        (_("Updated existing"), job.updated_existing_count),
+        (_("Skipped"), job.skipped_count),
+        (_("Failed"), job.failed_count),
+    )
+
+
+@admin.register(LegacyWizWizImportJob)
+class LegacyWizWizImportJobAdmin(ImportExportModelAdmin):
+    form = LegacyWizWizImportJobForm
+    change_form_template = "admin/store/legacywizwizimportjob/change_form.html"
+    list_display = (
+        "id",
+        "title",
+        "original_filename",
+        "status",
+        "parsed_users_count",
+        "valid_users_count",
+        "created_bot_users_count",
+        "created_customers_count",
+        "existing_bot_users_count",
+        "failed_count",
+        "created_at",
+        "analyzed_at",
+        "applied_at",
+    )
+    list_filter = ("status", "source", "created_at", "applied_at")
+    search_fields = ("title", "original_filename", "file_sha256", "metadata", "error_message")
+    date_hierarchy = "created_at"
+    autocomplete_fields = ("created_by",)
+    readonly_fields = (
+        "private_file_display",
+        "rows_link",
+        "status",
+        "file_sha256",
+        "file_size",
+        *LEGACY_WIZWIZ_JOB_SUMMARY_FIELDS,
+        "error_message",
+        "metadata",
+        "analyzed_at",
+        "applied_at",
+        "failed_at",
+        "created_at",
+        "updated_at",
+    )
+    actions = ("analyze_selected", "cancel_selected", "export_rows_csv")
+
+    def get_model_perms(self, request):
+        return {}
+
+    def has_module_permission(self, request):
+        return False
+
+    def has_view_permission(self, request, obj=None):
+        return False
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_fieldsets(self, request, obj=None):
+        file_field = "uploaded_file" if obj is None else "private_file_display"
+        return (
+            (
+                _("Upload"),
+                {
+                    "fields": (
+                        "source",
+                        "title",
+                        file_field,
+                        "original_filename",
+                        "file_size",
+                        "file_sha256",
+                        "created_by",
+                        "status",
+                        "mode",
+                    )
+                },
+            ),
+            (
+                _("Options"),
+                {
+                    "fields": (
+                        "skip_admins",
+                        "import_agents",
+                        "only_agents",
+                        "only_wallet_positive",
+                        "update_existing",
+                        "create_customers",
+                    )
+                },
+            ),
+            (_("Analyze summary"), {"fields": LEGACY_WIZWIZ_JOB_SUMMARY_FIELDS[:11]}),
+            (_("Apply summary"), {"fields": LEGACY_WIZWIZ_JOB_SUMMARY_FIELDS[11:]}),
+            (
+                _("Status"),
+                {
+                    "fields": (
+                        "rows_link",
+                        "error_message",
+                        "metadata",
+                        "created_at",
+                        "updated_at",
+                        "analyzed_at",
+                        "applied_at",
+                        "failed_at",
+                    )
+                },
+            ),
+        )
+
+    def save_model(self, request, obj, form, change):
+        incoming_file = form.cleaned_data.get("uploaded_file")
+        if incoming_file:
+            obj.original_filename = Path(incoming_file.name or "").name
+            obj.file_size = getattr(incoming_file, "size", 0) or 0
+        if not obj.created_by_id and request.user.is_authenticated:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
+        if obj.uploaded_file:
+            changed_fields = []
+            if not obj.original_filename:
+                obj.original_filename = Path(obj.uploaded_file.name or "").name
+                changed_fields.append("original_filename")
+            try:
+                file_size = Path(obj.uploaded_file.path).stat().st_size
+                file_sha256 = calculate_file_sha256(obj.uploaded_file.path)
+            except (OSError, NotImplementedError):
+                file_size = obj.file_size
+                file_sha256 = obj.file_sha256
+            if file_size != obj.file_size:
+                obj.file_size = file_size
+                changed_fields.append("file_size")
+            if file_sha256 and file_sha256 != obj.file_sha256:
+                obj.file_sha256 = file_sha256
+                changed_fields.append("file_sha256")
+            if changed_fields:
+                obj.save(update_fields=[*changed_fields, "updated_at"])
+            if obj.file_sha256:
+                duplicate = (
+                    LegacyWizWizImportJob.objects.filter(file_sha256=obj.file_sha256)
+                    .exclude(pk=obj.pk)
+                    .order_by("-created_at")
+                    .first()
+                )
+                if duplicate:
+                    messages.warning(
+                        request,
+                        _("A job with the same file SHA256 already exists: #%(id)s (%(status)s).")
+                        % {"id": duplicate.pk, "status": duplicate.get_status_display()},
+                    )
+
+    @admin.display(description=_("Private file"))
+    def private_file_display(self, obj):
+        if not obj or not obj.uploaded_file:
+            return "-"
+        return _("%(name)s (%(size)s bytes, stored privately)") % {
+            "name": obj.original_filename or Path(obj.uploaded_file.name).name,
+            "size": f"{obj.file_size:,}",
+        }
+
+    @admin.display(description=_("Rows"))
+    def rows_link(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        url = reverse("admin:store_legacywizwizimportrow_changelist")
+        query = urlencode({"job__id__exact": obj.pk})
+        return format_html('<a href="{}?{}">{}</a>', url, query, _("View preview/import rows"))
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "<path:object_id>/analyze/",
+                self.admin_site.admin_view(self.analyze_view),
+                name="store_legacywizwizimportjob_analyze",
+            ),
+            path(
+                "<path:object_id>/apply/",
+                self.admin_site.admin_view(self.apply_view),
+                name="store_legacywizwizimportjob_apply",
+            ),
+            path(
+                "<path:object_id>/export-csv/",
+                self.admin_site.admin_view(self.export_csv_view),
+                name="store_legacywizwizimportjob_export_csv",
+            ),
+            path(
+                "<path:object_id>/message/",
+                self.admin_site.admin_view(self.message_view),
+                name="store_legacywizwizimportjob_message",
+            ),
+        ]
+        return custom_urls + urls
+
+    def change_view(self, request, object_id, form_url="", extra_context=None):
+        extra_context = extra_context or {}
+        job = self.get_object(request, object_id)
+        extra_context.update(
+            {
+                "legacy_analyze_url": reverse("admin:store_legacywizwizimportjob_analyze", args=[object_id]),
+                "legacy_apply_url": reverse("admin:store_legacywizwizimportjob_apply", args=[object_id]),
+                "legacy_export_csv_url": reverse("admin:store_legacywizwizimportjob_export_csv", args=[object_id]),
+                "legacy_message_url": reverse("admin:store_legacywizwizimportjob_message", args=[object_id]),
+                "legacy_message_form": LegacyWizWizImportMessageForm(),
+            }
+        )
+        if job:
+            extra_context.update(
+                {
+                    "legacy_summary_items": _legacy_wizwiz_summary_items(job),
+                    "legacy_message_batches": job.message_batches.order_by("-created_at", "-pk")[:10],
+                }
+            )
+        return super().change_view(request, object_id, form_url, extra_context=extra_context)
+
+    def _get_job_for_action(self, request, object_id):
+        job = self.get_object(request, object_id)
+        if not job:
+            raise Http404
+        if not self.has_change_permission(request, job):
+            raise PermissionDenied
+        return job
+
+    def analyze_view(self, request, object_id):
+        job = self._get_job_for_action(request, object_id)
+        if request.method != "POST":
+            return HttpResponseRedirect(reverse("admin:store_legacywizwizimportjob_change", args=[job.pk]))
+        try:
+            summary = analyze_wizwiz_import_job(job)
+        except Exception as exc:
+            messages.error(request, _("Analyze failed: %(error)s") % {"error": exc})
+        else:
+            messages.success(
+                request,
+                _("Analyze complete: %(valid)s valid, %(invalid)s invalid, %(duplicates)s duplicate(s).")
+                % {
+                    "valid": summary["valid_users"],
+                    "invalid": summary["invalid_rows"],
+                    "duplicates": summary["duplicates"],
+                },
+            )
+        return HttpResponseRedirect(reverse("admin:store_legacywizwizimportjob_change", args=[job.pk]))
+
+    def apply_view(self, request, object_id):
+        job = self._get_job_for_action(request, object_id)
+        if request.method != "POST":
+            context = {
+                **self.admin_site.each_context(request),
+                "opts": self.model._meta,
+                "original": job,
+                "job": job,
+                "title": _("Confirm legacy WizWiz import apply"),
+            }
+            return TemplateResponse(request, "admin/store/legacywizwizimportjob/confirm_apply.html", context)
+        try:
+            summary = apply_wizwiz_import_job(job)
+        except Exception as exc:
+            messages.error(request, _("Apply failed: %(error)s") % {"error": exc})
+        else:
+            messages.success(
+                request,
+                _("Apply complete: %(created)s BotUser(s), %(customers)s Customer(s), %(failed)s failed row(s).")
+                % {
+                    "created": summary["created_bot_users"],
+                    "customers": summary["created_customers"],
+                    "failed": summary["failed"],
+                },
+            )
+        return HttpResponseRedirect(reverse("admin:store_legacywizwizimportjob_change", args=[job.pk]))
+
+    def export_csv_view(self, request, object_id):
+        job = self._get_job_for_action(request, object_id)
+        response = HttpResponse(content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="wizwiz-import-{job.pk}-rows.csv"'
+        export_wizwiz_import_rows_csv(job, response)
+        return response
+
+    def message_view(self, request, object_id):
+        job = self._get_job_for_action(request, object_id)
+        if request.method != "POST":
+            return HttpResponseRedirect(reverse("admin:store_legacywizwizimportjob_change", args=[job.pk]))
+        form = LegacyWizWizImportMessageForm(request.POST)
+        if not form.is_valid():
+            messages.error(request, _("Please fix the message form errors."))
+            return HttpResponseRedirect(reverse("admin:store_legacywizwizimportjob_change", args=[job.pk]))
+        try:
+            preview = preview_legacy_import_message_batch(job, form.cleaned_data["text"])
+            if request.POST.get("action") == "preview_message":
+                messages.info(
+                    request,
+                    _("Message preview: %(total)s row(s), %(sendable)s sendable, %(skipped)s skipped without chat id.")
+                    % {
+                        "total": preview["recipients_total"],
+                        "sendable": preview["sendable"],
+                        "skipped": preview["skipped_no_chat_id"],
+                    },
+                )
+                return HttpResponseRedirect(reverse("admin:store_legacywizwizimportjob_change", args=[job.pk]))
+            if preview["requires_large_send_confirmation"] and not form.cleaned_data.get("confirm_large_send"):
+                messages.error(request, _("Confirm large sends before sending to more than 1000 recipients."))
+                return HttpResponseRedirect(reverse("admin:store_legacywizwizimportjob_change", args=[job.pk]))
+            batch = create_legacy_import_message_batch(job, form.cleaned_data["text"], request.user)
+            counts = send_legacy_import_message_batch(batch)
+        except Exception as exc:
+            messages.error(request, _("Message send failed: %(error)s") % {"error": exc})
+        else:
+            messages.success(
+                request,
+                _(
+                    "Message batch processed: %(sent)s sent, %(failed)s failed, %(blocked)s blocked, %(skipped)s skipped."
+                )
+                % {
+                    "sent": counts["sent"],
+                    "failed": counts["failed"],
+                    "blocked": counts["blocked"],
+                    "skipped": counts["skipped_no_chat_id"],
+                },
+            )
+        return HttpResponseRedirect(reverse("admin:store_legacywizwizimportjob_change", args=[job.pk]))
+
+    @admin.action(description=_("Analyze selected WizWiz import jobs"))
+    def analyze_selected(self, request, queryset):
+        analyzed = 0
+        for job in queryset:
+            try:
+                analyze_wizwiz_import_job(job)
+            except Exception as exc:
+                messages.error(request, _("#%(id)s analyze failed: %(error)s") % {"id": job.pk, "error": exc})
+                continue
+            analyzed += 1
+        messages.success(request, _("%(count)s import job(s) analyzed.") % {"count": analyzed})
+
+    @admin.action(description=_("Cancel selected WizWiz import jobs"))
+    def cancel_selected(self, request, queryset):
+        updated = queryset.exclude(
+            status__in=(
+                LegacyWizWizImportJob.Status.APPLIED,
+                LegacyWizWizImportJob.Status.APPLYING,
+            )
+        ).update(status=LegacyWizWizImportJob.Status.CANCELLED, updated_at=timezone.now())
+        messages.success(request, _("%(count)s import job(s) cancelled.") % {"count": updated})
+
+    @admin.action(description=_("Export selected WizWiz import rows as CSV"))
+    def export_rows_csv(self, request, queryset):
+        response = HttpResponse(content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = 'attachment; filename="wizwiz-import-rows.csv"'
+        writer = csv.writer(response)
+        writer.writerow(
+            [
+                "job_id",
+                "telegram_user_id_masked",
+                "old_username",
+                "status",
+                "reason",
+                "bot_user_id",
+                "customer_id",
+                "old_wallet",
+                "old_is_agent",
+                "old_is_admin",
+                "created_at",
+            ]
+        )
+        rows = LegacyWizWizImportRow.objects.filter(job__in=queryset).select_related("job", "bot_user", "customer")
+        for row in rows.order_by("job_id", "created_at", "pk"):
+            writer.writerow(
+                [
+                    row.job_id,
+                    row.telegram_user_id_masked,
+                    row.old_username,
+                    row.status,
+                    row.reason,
+                    row.bot_user_id or "",
+                    row.customer_id or "",
+                    row.old_wallet if row.old_wallet is not None else "",
+                    row.old_is_agent,
+                    row.old_is_admin,
+                    timezone.localtime(row.created_at).isoformat() if row.created_at else "",
+                ]
+            )
+        return response
+
+
+@admin.register(LegacyWizWizImportRow)
+class LegacyWizWizImportRowAdmin(ImportExportModelAdmin):
+    list_display = (
+        "job",
+        "telegram_user_id_masked",
+        "old_username",
+        "status",
+        "reason",
+        "bot_user",
+        "customer",
+        "old_wallet",
+        "old_is_agent",
+        "old_is_admin",
+        "created_at",
+    )
+    list_filter = ("status", "old_is_agent", "old_is_admin", "job", "created_at")
+    search_fields = (
+        "telegram_user_id",
+        "telegram_user_id_masked",
+        "old_username",
+        "reason",
+        "customer__display_name",
+        "customer__username",
+        "bot_user__provider_user_id",
+    )
+    readonly_fields = (
+        "job",
+        "source",
+        "legacy_pk",
+        "telegram_user_id_masked",
+        "old_name_masked",
+        "old_username",
+        "old_phone_masked",
+        "old_wallet",
+        "old_is_admin",
+        "old_is_agent",
+        "old_freetrial",
+        "old_refcode",
+        "old_refered_by",
+        "status",
+        "reason",
+        "bot_user",
+        "customer",
+        "metadata",
+        "created_at",
+        "updated_at",
+    )
+    fields = readonly_fields
+    autocomplete_fields = ("job", "bot_user", "customer")
+    date_hierarchy = "created_at"
+    list_select_related = ("job", "bot_user", "customer")
+
+    def get_model_perms(self, request):
+        return {}
+
+    def has_module_permission(self, request):
+        return False
+
+    def has_view_permission(self, request, obj=None):
+        return False
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class LegacyWizWizImportMessageRecipientInline(admin.TabularInline):
+    model = LegacyWizWizImportMessageRecipient
+    extra = 0
+    can_delete = False
+    fields = (
+        "row",
+        "telegram_user_id_masked",
+        "bot_user",
+        "customer",
+        "status",
+        "error_message",
+        "sent_at",
+        "created_at",
+    )
+    readonly_fields = fields
+    ordering = ("created_at", "pk")
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(LegacyWizWizImportMessageBatch)
+class LegacyWizWizImportMessageBatchAdmin(ImportExportModelAdmin):
+    list_display = (
+        "job",
+        "status",
+        "total_recipients",
+        "sent_count",
+        "failed_count",
+        "skipped_count",
+        "blocked_count",
+        "created_at",
+        "sent_at",
+    )
+    list_filter = ("status", "job", "created_at", "sent_at")
+    search_fields = ("job__title", "job__original_filename", "text", "metadata")
+    autocomplete_fields = ("job", "created_by")
+    readonly_fields = (
+        "job",
+        "text",
+        "status",
+        "created_by",
+        "total_recipients",
+        "sent_count",
+        "failed_count",
+        "skipped_count",
+        "blocked_count",
+        "metadata",
+        "sent_at",
+        "created_at",
+        "updated_at",
+    )
+    fields = readonly_fields
+    inlines = (LegacyWizWizImportMessageRecipientInline,)
+    date_hierarchy = "created_at"
+
+    def get_model_perms(self, request):
+        return {}
+
+    def has_module_permission(self, request):
+        return False
+
+    def has_view_permission(self, request, obj=None):
+        return False
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(LegacyWizWizImportMessageRecipient)
+class LegacyWizWizImportMessageRecipientAdmin(ImportExportModelAdmin):
+    list_display = (
+        "batch",
+        "row",
+        "status",
+        "bot_user",
+        "customer",
+        "telegram_user_id_masked",
+        "sent_at",
+        "created_at",
+    )
+    list_filter = ("status", "batch", "created_at", "sent_at")
+    search_fields = (
+        "telegram_user_id_masked",
+        "error_message",
+        "batch__job__title",
+        "customer__display_name",
+        "customer__username",
+        "bot_user__username",
+    )
+    autocomplete_fields = ("batch", "row", "bot_user", "customer")
+    readonly_fields = (
+        "batch",
+        "row",
+        "bot_user",
+        "customer",
+        "telegram_user_id_masked",
+        "status",
+        "error_message",
+        "sent_at",
+        "metadata",
+        "created_at",
+        "updated_at",
+    )
+    fields = readonly_fields
+    date_hierarchy = "created_at"
+    list_select_related = ("batch", "row", "bot_user", "customer")
+
+    def get_model_perms(self, request):
+        return {}
+
+    def has_module_permission(self, request):
+        return False
+
+    def has_view_permission(self, request, obj=None):
+        return False
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 class BroadcastRecipientInline(admin.TabularInline):
@@ -2385,5 +4274,34 @@ class VPNClientReminderLogAdmin(ImportExportModelAdmin):
         "error_message",
         "created_at",
         "updated_at",
+        "sent_at",
+    )
+
+
+@admin.register(DailyAdminReportLog)
+class DailyAdminReportLogAdmin(ImportExportModelAdmin):
+    list_display = (
+        "store",
+        "report_date",
+        "status",
+        "sent_to_count",
+        "sent_at",
+        "created_at",
+    )
+    list_filter = ("status", "store", "report_date", "created_at", "sent_at")
+    search_fields = ("store__name", "store__english_name", "message_text", "error_message")
+    date_hierarchy = "report_date"
+    list_select_related = ("store",)
+    readonly_fields = (
+        "store",
+        "report_date",
+        "period_start",
+        "period_end",
+        "status",
+        "sent_to_count",
+        "message_text",
+        "error_message",
+        "metadata",
+        "created_at",
         "sent_at",
     )

@@ -1,0 +1,9 @@
+[Unit]
+Description=Calculate VPN Store panel daily usage
+
+[Timer]
+OnCalendar=*-*-* 00:20:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

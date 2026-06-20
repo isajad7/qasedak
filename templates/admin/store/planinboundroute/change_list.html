@@ -1,0 +1,11 @@
+{% extends "admin/import_export/change_list_import_export.html" %}
+{% load i18n %}
+
+{% block object-tools-items %}
+    {% if bulk_route_assign_url %}
+        <a href="{{ bulk_route_assign_url }}" class="btn btn-info float-end">
+            {% trans "Bulk assign routes" %}
+        </a>
+    {% endif %}
+    {{ block.super }}
+{% endblock %}

@@ -35,13 +35,27 @@
     .plan-bulk-pricing .errorlist {
         margin: 0 0 0.4rem;
     }
+    .plan-route-tools {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: center;
+        justify-content: space-between;
+    }
 </style>
 {% endblock %}
 
 {% block content %}
 {% if bulk_price_per_gb_form %}
     <div class="module plan-bulk-pricing" dir="rtl">
-        <h2>اعمال قیمت هر گیگ روی همه پلن‌ها</h2>
+        <div class="plan-route-tools">
+            <h2>اعمال قیمت هر گیگ روی همه پلن‌ها</h2>
+            {% if bulk_route_assign_url %}
+                <a href="{{ bulk_route_assign_url }}" class="button">
+                    تنظیم گروهی routeها
+                </a>
+            {% endif %}
+        </div>
         <form method="post" onsubmit="return confirm('قیمت همه پلن‌ها بر اساس این عدد تغییر می‌کند. ادامه می‌دهی؟');">
             {% csrf_token %}
             {{ bulk_price_per_gb_form.non_field_errors }}

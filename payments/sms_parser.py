@@ -1,11 +1,11 @@
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import jdatetime
-from django.conf import settings
 from django.utils import timezone
+
+from store.configuration_services import get_payment_sms_timezone
 
 
 class SMSParseError(ValueError):
@@ -98,13 +98,7 @@ def _extract_deposit_amount(text):
 
 
 def _sms_timezone():
-    configured_timezone = getattr(settings, "PAYMENT_SMS_TIME_ZONE", None)
-    if configured_timezone:
-        try:
-            return ZoneInfo(configured_timezone)
-        except ZoneInfoNotFoundError:
-            pass
-    return timezone.get_default_timezone()
+    return get_payment_sms_timezone()
 
 
 def _extract_sms_datetime(text):

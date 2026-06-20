@@ -85,7 +85,7 @@ def is_user_member_of_required_channel(config, user_id, *, client=None, use_cach
             return bool(cached)
 
     if client is None:
-        from .bots import BotClient
+        from .telegram_bot.client import BotClient
 
         client = BotClient(config)
 
@@ -120,7 +120,7 @@ def ensure_telegram_membership(config, bot_user, *, client=None, chat_id=None, f
         return True
 
     if client is None:
-        from .bots import BotClient
+        from .telegram_bot.client import BotClient
 
         client = BotClient(config)
 

@@ -1,14 +1,36 @@
 from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.management import get_commands
 from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Q
+from django.utils import timezone
 
 from store.bot_targets import customer_has_telegram_target, get_vpn_client_telegram_targets
-from store.models import BotConfiguration, FreeTrialRequest, Inbound, Panel, Plan, Store
+from store.configuration_services import (
+    get_payment_sms_timezone_name_source,
+    get_smsforwarder_webhook_token_status,
+    get_telegram_bot_username_source,
+)
+from store.models import (
+    BotConfiguration,
+    DailyAdminReportLog,
+    FreeTrialRequest,
+    Inbound,
+    LegacyWizWizImportJob,
+    LegacyWizWizImportRow,
+    Panel,
+    PanelHealthCheckLog,
+    PanelUsageSnapshot,
+    Plan,
+    PlanInboundRoute,
+    RevenueOfferLog,
+    Store,
+)
 from store.renewal_reminder_services import get_active_clients_for_reminders, normalize_reminder_days
 
 
@@ -64,7 +86,13 @@ class Command(BaseCommand):
         self.check_bot_configurations()
         self.check_panels()
         self.check_inbounds()
+        self.check_plan_inbound_routes()
+        self.check_panel_monitoring()
+        self.check_daily_admin_reports()
+        self.check_revenue_engine()
+        self.check_panel_usage_tracking()
         self.check_sms_webhook()
+        self.check_legacy_wizwiz_imports()
         self.check_static_media_settings()
 
         counts = {level: 0 for level in (self.LEVEL_OK, self.LEVEL_WARNING, self.LEVEL_ERROR)}
@@ -159,6 +187,8 @@ class Command(BaseCommand):
             else:
                 self.ok(subject, "Payment card owner is configured.")
 
+            self.check_payment_sms_timezone(store, subject)
+
             public_plans = Plan.objects.filter(store=store, is_active=True, is_public=True, is_custom_volume=False)
             if public_plans.exists() or getattr(store, "custom_volume_price_per_gb", 0):
                 self.ok(subject, "At least one public plan or custom-volume offer is available.")
@@ -169,6 +199,15 @@ class Command(BaseCommand):
                 self.error(subject, "Operator-based sales is enabled but no active operator exists.")
             self.check_free_trial(store, subject)
             self.check_renewal_reminders(store, subject)
+
+    def check_payment_sms_timezone(self, store, subject):
+        timezone_source = get_payment_sms_timezone_name_source(store=store)
+        if timezone_source.source == "store":
+            self.ok(subject, f"Payment SMS time zone is configured in admin: {timezone_source.value}.")
+        elif timezone_source.source == "settings":
+            self.warning(subject, f"Payment SMS time zone uses legacy settings fallback: {timezone_source.value}.")
+        else:
+            self.warning(subject, f"Payment SMS time zone uses default fallback: {timezone_source.value}.")
 
     def check_free_trial(self, store, subject):
         if not store.free_trial_enabled:
@@ -195,11 +234,24 @@ class Command(BaseCommand):
         elif not inbound.is_active:
             self.error(subject, "Free Trial inbound is inactive.")
             has_error = True
+        elif not getattr(inbound, "available_for_new_orders", True):
+            self.error(subject, "Free Trial inbound is not available for new orders.")
+            has_error = True
         elif panel and inbound.panel_id != panel.pk:
             self.error(subject, "Free Trial inbound does not belong to the selected panel.")
             has_error = True
         elif inbound.max_clients is not None and inbound.current_users >= inbound.max_clients:
             self.warning(subject, "Free Trial inbound capacity is full.")
+
+        if inbound and not getattr(inbound, "health_monitor_enabled", True):
+            self.warning(subject, "Free Trial inbound is excluded from panel health monitor.")
+        if self.live_xui and panel and inbound and panel.is_active and inbound.is_active:
+            remote_ok, message = self.check_live_inbound_exists(panel, inbound)
+            if remote_ok:
+                self.ok(subject, f"Free Trial inbound exists in X-UI: inbound_id={inbound.inbound_id}.")
+            else:
+                self.error(subject, f"Free Trial inbound is not readable from X-UI: {message}")
+                has_error = True
 
         try:
             traffic_gb = float(store.free_trial_traffic_gb or 0)
@@ -383,13 +435,22 @@ class Command(BaseCommand):
                 self.error(subject, "Admin user IDs are missing.")
 
             if config.provider == BotConfiguration.Provider.TELEGRAM:
-                bot_username = (
-                    getattr(settings, "TELEGRAM_BOT_USERNAME", "")
-                    or getattr(settings, "BOT_USERNAME", "")
-                    or ""
-                ).strip()
-                if bot_username:
-                    self.ok(subject, f"Telegram bot username is configured: @{bot_username.lstrip('@')}.")
+                username_source = get_telegram_bot_username_source(bot_config=config)
+                if username_source.source == "bot_configuration":
+                    source_config = username_source.instance
+                    source_label = f"BotConfiguration #{source_config.pk}" if source_config else "BotConfiguration"
+                    self.ok(
+                        subject,
+                        f"Telegram bot username is configured in {source_label}: @{username_source.value}.",
+                    )
+                elif username_source.source == "settings":
+                    self.warning(
+                        subject,
+                        (
+                            "Telegram bot username uses legacy settings/env fallback; "
+                            "move it to BotConfiguration.telegram_bot_username."
+                        ),
+                    )
                 else:
                     self.warning(subject, "TELEGRAM_BOT_USERNAME is not configured; referral links may be empty.")
 
@@ -400,7 +461,7 @@ class Command(BaseCommand):
 
     def check_live_bot(self, config, subject):
         try:
-            from store.bots import BotClient
+            from store.telegram_bot.client import BotClient
 
             payload = BotClient(config).get_me()
         except Exception as exc:
@@ -418,7 +479,7 @@ class Command(BaseCommand):
 
         chat_id = self.telegram_chat_id or admin_ids[0]
         try:
-            from store.bots import BotClient
+            from store.telegram_bot.client import BotClient
 
             BotClient(config).send_message("Integration check test message.", chat_id=chat_id)
         except Exception as exc:
@@ -477,6 +538,28 @@ class Command(BaseCommand):
         else:
             self.error(subject, "X-UI login failed.")
 
+    def sanitize_panel_error(self, exc, panel):
+        text = str(exc or "")
+        for secret in (
+            getattr(panel, "password", ""),
+            getattr(panel, "username", ""),
+            getattr(panel, "url", ""),
+            getattr(panel, "proxy_url", ""),
+        ):
+            secret = str(secret or "").strip()
+            if secret:
+                text = text.replace(secret, "<redacted>")
+        return text or exc.__class__.__name__
+
+    def check_live_inbound_exists(self, panel, inbound):
+        try:
+            from store.xui_api import XUIService
+
+            XUIService(panel).get_inbound(inbound.inbound_id, use_cache=False)
+        except Exception as exc:
+            return False, self.sanitize_panel_error(exc, panel)
+        return True, ""
+
     def check_inbounds(self):
         inbounds = list(Inbound.objects.filter(is_active=True).select_related("panel").order_by("pk"))
         if not inbounds:
@@ -484,8 +567,20 @@ class Command(BaseCommand):
             return
 
         self.ok("Inbound", f"{len(inbounds)} active inbound(s) found.")
+        legacy_inbounds = [
+            inbound
+            for inbound in inbounds
+            if not inbound.available_for_new_orders and not inbound.health_monitor_enabled
+        ]
+        if legacy_inbounds:
+            self.ok("Inbound", f"{len(legacy_inbounds)} legacy inbound(s) ignored from health monitor and new orders.")
+
+        locally_available_for_sales = 0
+        live_available_for_sales = 0
         for inbound in inbounds:
             subject = f"Inbound #{inbound.pk} panel={inbound.panel_id} inbound_id={inbound.inbound_id}"
+            panel_is_usable = False
+            has_capacity = inbound.max_clients is None or inbound.current_users < inbound.max_clients
             if not inbound.panel_id:
                 self.error(subject, "Inbound is not linked to a panel.")
                 continue
@@ -493,15 +588,455 @@ class Command(BaseCommand):
                 self.error(subject, "Inbound is linked to an inactive panel.")
             else:
                 self.ok(subject, "Inbound is linked to an active panel.")
-            if inbound.max_clients is not None and inbound.current_users >= inbound.max_clients:
+                panel_is_usable = True
+            if inbound.available_for_new_orders:
+                if panel_is_usable and has_capacity:
+                    locally_available_for_sales += 1
+            else:
+                self.ok(subject, "Inbound is excluded from new orders.")
+            if inbound.health_monitor_enabled:
+                self.ok(subject, "Inbound is included in panel health monitor.")
+            elif inbound.available_for_new_orders:
+                self.warning(subject, "Inbound is available for new orders but excluded from panel health monitor.")
+            else:
+                self.ok(subject, "Legacy inbound is excluded from panel health monitor.")
+            if not has_capacity:
                 self.warning(subject, "Inbound capacity is full.")
+            if self.live_xui and panel_is_usable:
+                remote_ok, message = self.check_live_inbound_exists(inbound.panel, inbound)
+                if remote_ok:
+                    self.ok(subject, "Inbound exists in X-UI.")
+                    if inbound.available_for_new_orders and has_capacity:
+                        live_available_for_sales += 1
+                    continue
+                if inbound.available_for_new_orders:
+                    self.error(subject, f"Inbound is available for new orders but missing/unreadable in X-UI: {message}")
+                elif inbound.health_monitor_enabled:
+                    self.warning(subject, f"Inbound is monitored but missing/unreadable in X-UI: {message}")
+                else:
+                    self.ok(subject, "Legacy inbound is missing/unreadable in X-UI and ignored from health monitor.")
+
+        if locally_available_for_sales:
+            self.ok("Inbound", f"{locally_available_for_sales} inbound(s) are locally available for new orders.")
+        else:
+            self.error("Inbound", "No active inbound is available for new orders.")
+        if self.live_xui:
+            if live_available_for_sales:
+                self.ok("Inbound", f"{live_available_for_sales} inbound(s) available for new orders exist in X-UI.")
+            else:
+                self.error("Inbound", "No inbound available for new orders could be verified in X-UI.")
+
+    def route_queryset_for_store(self, store):
+        return PlanInboundRoute.objects.filter(
+            Q(store=store) | Q(store__isnull=True),
+            Q(inbound__panel__store=store) | Q(inbound__panel__store__isnull=True),
+        )
+
+    def active_plans_for_store(self, store):
+        return Plan.objects.filter(
+            Q(store=store) | Q(store__isnull=True),
+            is_active=True,
+        ).order_by("sort_order", "price", "pk")
+
+    def route_is_valid_for_store(self, route, store, *, require_active_plan=True):
+        inbound = route.inbound
+        panel = getattr(inbound, "panel", None)
+        if not route.is_active:
+            return False, "Route is inactive."
+        if require_active_plan and not route.plan.is_active:
+            return False, "Route plan is inactive."
+        if not inbound.is_active:
+            return False, "Route inbound is inactive."
+        if not inbound.available_for_new_orders:
+            return False, "Route inbound is legacy/not available for new orders."
+        if not panel:
+            return False, "Route inbound is missing panel."
+        if not panel.is_active:
+            return False, "Route panel is inactive."
+        if panel.store_id and panel.store_id != store.pk:
+            return False, "Route inbound belongs to a different store."
+        if route.store_id and route.store_id != store.pk:
+            return False, "Route belongs to a different store."
+        if route.operator_id:
+            if not route.operator.is_active:
+                return False, "Route operator is inactive."
+            if not route.plan.operators.filter(pk=route.operator_id).exists():
+                return False, "Route operator is not enabled on the plan."
+        if inbound.max_clients is not None and inbound.current_users >= inbound.max_clients:
+            return False, "Route inbound capacity is full."
+        return True, ""
+
+    def plan_has_valid_general_route(self, plan, store):
+        for route in self.route_queryset_for_store(store).filter(plan=plan, operator__isnull=True, is_active=True).select_related(
+            "store",
+            "plan",
+            "operator",
+            "inbound",
+            "inbound__panel",
+        ):
+            valid, _message = self.route_is_valid_for_store(route, store)
+            if valid:
+                return True
+        return False
+
+    def plan_has_valid_operator_route(self, plan, operator, store):
+        for route in self.route_queryset_for_store(store).filter(plan=plan, operator=operator, is_active=True).select_related(
+            "store",
+            "plan",
+            "operator",
+            "inbound",
+            "inbound__panel",
+        ):
+            valid, _message = self.route_is_valid_for_store(route, store)
+            if valid:
+                return True
+        return False
+
+    def active_plan_operators(self, plan, store):
+        return plan.operators.filter(
+            Q(store=store) | Q(store__isnull=True),
+            is_active=True,
+        ).order_by("sort_order", "name", "pk")
+
+    def check_plan_inbound_routes(self):
+        stores = list(Store.objects.filter(is_active=True).order_by("pk"))
+        if not stores:
+            return
+
+        for store in stores:
+            subject = f"Plan inbound routing #{store.pk} {store.name}"
+            if not getattr(store, "plan_inbound_routing_enabled", True):
+                self.ok(subject, "Plan inbound routing is disabled; global inbound selection is used.")
+                continue
+
+            plans = list(self.active_plans_for_store(store))
+            active_routes = list(
+                self.route_queryset_for_store(store)
+                .filter(is_active=True)
+                .select_related("store", "plan", "operator", "inbound", "inbound__panel")
+                .order_by("plan_id", "operator_id", "priority", "pk")
+            )
+            invalid_routes = []
+            for route in active_routes:
+                valid, message = self.route_is_valid_for_store(route, store, require_active_plan=False)
+                if not valid:
+                    invalid_routes.append((route, message))
+                    self.error(
+                        f"{subject} route #{route.pk}",
+                        (
+                            f"Invalid active route plan={route.plan_id} operator={route.operator_id or '-'} "
+                            f"inbound={route.inbound_id}: {message}"
+                        ),
+                    )
+
+            missing_routes = []
+            routed_plan_ids = set()
+            for plan in plans:
+                has_general = self.plan_has_valid_general_route(plan, store)
+                if has_general:
+                    routed_plan_ids.add(plan.pk)
+
+                if store.sales_mode == Store.SalesMode.OPERATOR_BASED:
+                    operators = list(self.active_plan_operators(plan, store))
+                    if not operators and not has_general:
+                        missing_routes.append(f"plan #{plan.pk} {plan.name}")
+                        continue
+                    for operator in operators:
+                        if has_general or self.plan_has_valid_operator_route(plan, operator, store):
+                            routed_plan_ids.add(plan.pk)
+                            continue
+                        missing_routes.append(f"plan #{plan.pk} {plan.name} / operator #{operator.pk} {operator.name}")
+                elif not has_general:
+                    missing_routes.append(f"plan #{plan.pk} {plan.name}")
+
+            fallback_enabled = bool(getattr(store, "allow_global_inbound_fallback", True))
+            if missing_routes and fallback_enabled:
+                self.warning(
+                    subject,
+                    (
+                        f"{len(missing_routes)} active plan/operator route(s) are missing explicit routes "
+                        "and will use global fallback. Examples: "
+                        + "; ".join(missing_routes[:5])
+                    ),
+                )
+            elif missing_routes:
+                self.error(
+                    subject,
+                    (
+                        f"{len(missing_routes)} active plan/operator route(s) are missing explicit routes "
+                        "and fallback is disabled. Examples: "
+                        + "; ".join(missing_routes[:5])
+                    ),
+                )
+            else:
+                self.ok(subject, "All active plans/operators have explicit routes.")
+
+            self.ok(
+                subject,
+                (
+                    f"route_summary active_plans={len(plans)} "
+                    f"routed_plans={len(routed_plan_ids)} "
+                    f"missing_route_plans={len(missing_routes)} "
+                    f"active_routes={len(active_routes)} "
+                    f"invalid_routes={len(invalid_routes)}"
+                ),
+            )
+
+    def check_panel_monitoring(self):
+        commands = get_commands()
+        if "check_panel_health" in commands:
+            self.ok("Panel monitor", "check_panel_health command is available.")
+        else:
+            self.error("Panel monitor", "check_panel_health command is missing.")
+
+        stores = list(Store.objects.filter(is_active=True, panel_monitor_enabled=True).order_by("pk"))
+        if not stores:
+            self.ok("Panel monitor", "Panel monitor is disabled for all active stores.")
+            return
+
+        for store in stores:
+            subject = f"Panel monitor #{store.pk} {store.name}"
+            active_panels = Panel.objects.filter(store=store, is_active=True)
+            active_panel_count = active_panels.count()
+            if active_panel_count:
+                self.ok(subject, f"{active_panel_count} active panel(s) will be monitored.")
+            else:
+                self.warning(subject, "Panel monitor is enabled but no active panel exists for this store.")
+
+            latest_check = (
+                PanelHealthCheckLog.objects.filter(panel__store=store)
+                .select_related("panel")
+                .order_by("-checked_at")
+                .first()
+            )
+            if not latest_check:
+                self.warning(subject, "No panel health check has been recorded yet.")
+                continue
+
+            self.ok(
+                subject,
+                (
+                    f"Latest health check: panel={latest_check.panel.name} "
+                    f"status={latest_check.status} at {latest_check.checked_at.isoformat()}."
+                ),
+            )
+            cooldown_minutes = max(int(store.panel_monitor_alert_cooldown_minutes or 30), 1)
+            recent_cutoff = timezone.now() - timedelta(minutes=max(cooldown_minutes * 2, 60))
+            if latest_check.checked_at < recent_cutoff:
+                self.warning(subject, "No recent panel health check was found; verify the timer/cron schedule.")
+            else:
+                self.ok(subject, "A recent panel health check exists.")
+
+    def check_daily_admin_reports(self):
+        commands = get_commands()
+        if "send_daily_admin_report" in commands:
+            self.ok("Daily admin report", "send_daily_admin_report command is available.")
+        else:
+            self.error("Daily admin report", "send_daily_admin_report command is missing.")
+
+        stores = list(Store.objects.filter(is_active=True, daily_admin_report_enabled=True).order_by("pk"))
+        if not stores:
+            self.ok("Daily admin report", "Daily admin reports are disabled for all active stores.")
+            return
+
+        for store in stores:
+            subject = f"Daily admin report #{store.pk} {store.name}"
+            configs = (
+                BotConfiguration.objects.filter(
+                    provider=BotConfiguration.Provider.TELEGRAM,
+                    is_active=True,
+                )
+                .filter(Q(store=store) | Q(store__isnull=True))
+                .exclude(bot_token="")
+                .order_by("pk")
+            )
+            admin_ids = []
+            for config in configs:
+                for admin_id in config.get_admin_user_ids():
+                    if admin_id not in admin_ids:
+                        admin_ids.append(admin_id)
+            if admin_ids:
+                self.ok(subject, f"{len(admin_ids)} Telegram admin id(s) are available for daily reports.")
+            else:
+                self.warning(subject, "Daily report is enabled but no Telegram admin IDs are available.")
+
+            latest_report = DailyAdminReportLog.objects.filter(store=store).order_by("-report_date", "-created_at").first()
+            if not latest_report:
+                self.warning(subject, "No daily admin report has been sent yet.")
+                continue
+            self.ok(
+                subject,
+                (
+                    f"Latest daily report: date={latest_report.report_date.isoformat()} "
+                    f"status={latest_report.status} sent_to={latest_report.sent_to_count}."
+                ),
+            )
+
+    def check_revenue_engine(self):
+        commands = get_commands()
+        if "run_revenue_scan" in commands:
+            self.ok("Revenue Engine", "run_revenue_scan command is available.")
+        else:
+            self.error("Revenue Engine", "run_revenue_scan command is missing.")
+        if "revenue_report" in commands:
+            self.ok("Revenue Engine", "revenue_report command is available.")
+        else:
+            self.warning("Revenue Engine", "revenue_report command is missing.")
+
+        stores = list(Store.objects.filter(is_active=True).order_by("pk"))
+        if not stores:
+            return
+        recent_cutoff = timezone.now() - timedelta(days=7)
+        for store in stores:
+            subject = f"Revenue Engine #{store.pk} {store.name}"
+            try:
+                store.full_clean()
+            except ValidationError as exc:
+                self.error(subject, f"Revenue settings invalid: {exc.message_dict}")
+            else:
+                self.ok(subject, "Revenue Engine settings look valid.")
+
+            if not getattr(store, "revenue_engine_enabled", True):
+                self.warning(subject, "Revenue Engine is disabled.")
+                continue
+            if getattr(store, "revenue_engine_dry_run", False):
+                self.warning(subject, "Revenue Engine dry_run is enabled; no offers will be sent.")
+
+            latest_log = RevenueOfferLog.objects.filter(Q(store=store) | Q(store__isnull=True)).order_by("-created_at").first()
+            if latest_log:
+                self.ok(
+                    subject,
+                    f"Latest RevenueOfferLog: status={latest_log.status} engine={latest_log.engine_type} at {latest_log.created_at.isoformat()}.",
+                )
+            else:
+                self.warning(subject, "No RevenueOfferLog exists yet.")
+
+            recent_exists = RevenueOfferLog.objects.filter(
+                Q(store=store) | Q(store__isnull=True),
+                created_at__gte=recent_cutoff,
+            ).exists()
+            if not recent_exists:
+                self.warning(subject, "No revenue offer log exists in the last 7 days while the engine is enabled.")
+
+            max_per_day = int(getattr(store, "revenue_max_total_offers_per_day", 0) or 0)
+            cooldown = int(getattr(store, "revenue_offer_cooldown_hours", 0) or 0)
+            if max_per_day > 5000 and cooldown < 6:
+                self.warning(subject, "Revenue offer limits look aggressive: high daily cap with low cooldown.")
+            else:
+                self.ok(subject, "Revenue offer rate limits look conservative.")
+
+    def check_panel_usage_tracking(self):
+        commands = get_commands()
+        if "collect_panel_usage_snapshots" in commands:
+            self.ok("Panel usage", "collect_panel_usage_snapshots command is available.")
+        else:
+            self.error("Panel usage", "collect_panel_usage_snapshots command is missing.")
+        if "calculate_panel_daily_usage" in commands:
+            self.ok("Panel usage", "calculate_panel_daily_usage command is available.")
+        else:
+            self.error("Panel usage", "calculate_panel_daily_usage command is missing.")
+
+        stores = list(Store.objects.filter(is_active=True, panel_usage_tracking_enabled=True).order_by("pk"))
+        if not stores:
+            self.ok("Panel usage", "Panel usage tracking is disabled for all active stores.")
+            return
+
+        stale_cutoff = timezone.now() - timedelta(hours=3)
+        for store in stores:
+            subject = f"Panel usage #{store.pk} {store.name}"
+            active_panel_count = Panel.objects.filter(store=store, is_active=True).count()
+            if active_panel_count:
+                self.ok(subject, f"{active_panel_count} active panel(s) will be snapshotted.")
+            else:
+                self.warning(subject, "Panel usage tracking is enabled but no active panel exists for this store.")
+
+            retention_days = int(store.panel_usage_snapshot_retention_days or 0)
+            if retention_days > 0:
+                self.ok(subject, f"Snapshot retention is {retention_days} day(s).")
+            else:
+                self.error(subject, "panel_usage_snapshot_retention_days must be positive.")
+
+            latest_snapshot = (
+                PanelUsageSnapshot.objects.filter(panel__store=store)
+                .select_related("panel")
+                .order_by("-captured_at")
+                .first()
+            )
+            if not latest_snapshot:
+                self.warning(subject, "هنوز snapshot مصرف پنل ثبت نشده است.")
+            else:
+                self.ok(
+                    subject,
+                    (
+                        f"Latest usage snapshot: panel={latest_snapshot.panel.name} "
+                        f"status={latest_snapshot.status} at {latest_snapshot.captured_at.isoformat()}."
+                    ),
+                )
+                if latest_snapshot.captured_at < stale_cutoff:
+                    self.warning(subject, "Latest panel usage snapshot is older than 3 hours; verify the timer/cron schedule.")
+                else:
+                    self.ok(subject, "A recent panel usage snapshot exists.")
+
+            if store.daily_admin_report_enabled and store.panel_usage_report_enabled:
+                self.ok(subject, "Panel usage is enabled in the daily admin report.")
+            elif store.daily_admin_report_enabled:
+                self.warning(subject, "Daily admin report is enabled but panel usage report is disabled.")
+            else:
+                self.ok(subject, "Daily admin report is disabled; panel usage snapshots can still be collected.")
 
     def check_sms_webhook(self):
-        token = (getattr(settings, "SMSFORWARDER_WEBHOOK_TOKEN", "") or "").strip()
-        if token:
-            self.ok("SMS webhook", "SMSFORWARDER_WEBHOOK_TOKEN is configured.")
+        token_status = get_smsforwarder_webhook_token_status()
+        if token_status.has_db_token:
+            store = token_status.store
+            hint = store.smsforwarder_webhook_token_hint or "----"
+            self.ok("SMS webhook", f"SMSForwarder webhook token is configured in Store #{store.pk}; hint ends in {hint}.")
+        elif token_status.has_legacy_settings_token:
+            self.warning(
+                "SMS webhook",
+                "SMSFORWARDER_WEBHOOK_TOKEN uses legacy settings/env fallback; move it to Store admin.",
+            )
         else:
-            self.error("SMS webhook", "SMSFORWARDER_WEBHOOK_TOKEN is missing; webhook returns 503.")
+            self.error(
+                "SMS webhook",
+                "SMSFORWARDER_WEBHOOK_TOKEN is missing in DB/admin and legacy settings; webhook returns 503.",
+            )
+
+    def check_legacy_wizwiz_imports(self):
+        latest_job = LegacyWizWizImportJob.objects.order_by("-created_at").first()
+        if not latest_job:
+            return
+
+        subject = "Legacy WizWiz import"
+        self.ok(
+            subject,
+            (
+                f"Latest job #{latest_job.pk} status={latest_job.status} "
+                f"valid={latest_job.valid_users_count} applied_at="
+                f"{latest_job.applied_at.isoformat() if latest_job.applied_at else '-'}."
+            ),
+        )
+
+        failed_jobs = LegacyWizWizImportJob.objects.filter(status=LegacyWizWizImportJob.Status.FAILED).count()
+        if failed_jobs:
+            self.warning(subject, f"{failed_jobs} failed legacy WizWiz import job(s) need review.")
+
+        imported_customers = (
+            LegacyWizWizImportRow.objects.filter(
+                source="wizwiz",
+                job__status=LegacyWizWizImportJob.Status.APPLIED,
+                status__in=(
+                    LegacyWizWizImportRow.Status.CREATED,
+                    LegacyWizWizImportRow.Status.LINKED,
+                    LegacyWizWizImportRow.Status.EXISTING,
+                    LegacyWizWizImportRow.Status.UPDATED,
+                ),
+                customer__isnull=False,
+            )
+            .values("customer_id")
+            .distinct()
+            .count()
+        )
+        self.ok(subject, f"{imported_customers} imported legacy customer(s) are available for the WizWiz audience.")
 
     def check_static_media_settings(self):
         static_root = getattr(settings, "STATIC_ROOT", "")

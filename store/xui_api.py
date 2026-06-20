@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import logging
 import random
@@ -355,6 +356,22 @@ def parse_xui_datetime(value):
     return timezone.datetime.fromtimestamp(timestamp, tz=timezone.get_current_timezone())
 
 
+def xui_datetime_to_millis(value):
+    if value is None:
+        return None
+    if value == 0 or value == "0":
+        return 0
+    if hasattr(value, "timestamp"):
+        return int(value.timestamp() * 1000)
+    try:
+        timestamp = int(value)
+    except (TypeError, ValueError) as exc:
+        raise XUIError("Expiry time must be a datetime or timestamp.") from exc
+    if timestamp and timestamp < 10_000_000_000:
+        timestamp *= 1000
+    return timestamp
+
+
 CLIENT_IDENTIFIER_FIELDS = (
     "id",
     "email",
@@ -499,6 +516,134 @@ def mask_xui_value(value):
     return f"{value[:6]}...{value[-4:]}"
 
 
+def sanitize_xui_operational_text(value, *, panel=None, max_length=500):
+    text = str(value or "")
+    for secret in (
+        getattr(panel, "password", "") if panel else "",
+        getattr(panel, "username", "") if panel else "",
+        getattr(panel, "url", "") if panel else "",
+        getattr(panel, "proxy_url", "") if panel else "",
+    ):
+        secret = str(secret or "").strip()
+        if secret:
+            text = text.replace(secret, "<redacted>")
+    text = re.sub(r"https?://[^\s<>()]+", "<url-redacted>", text, flags=re.IGNORECASE)
+    if len(text) > max_length:
+        text = f"{text[:max_length - 1]}..."
+    return text
+
+
+def hash_xui_identifier(value):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    salt = getattr(settings, "SECRET_KEY", "") or ""
+    return hashlib.sha256(f"{salt}:{value}".encode("utf-8")).hexdigest()
+
+
+def _usage_source_and_values(client, stats):
+    client = client or {}
+    stats = stats or {}
+    usage_source = stats if has_usage_stats(stats) else client if has_usage_stats(client) else {}
+    stats_available = bool(usage_source)
+    upload = download = used = None
+    if stats_available:
+        upload = xui_int(first_xui_value(usage_source.get("up"), usage_source.get("upload")), 0)
+        download = xui_int(first_xui_value(usage_source.get("down"), usage_source.get("download")), 0)
+        used = xui_int_or_none(
+            first_xui_value(
+                usage_source.get("used"),
+                usage_source.get("usedTraffic"),
+                usage_source.get("used_traffic"),
+            )
+        )
+        if used is None:
+            used = upload + download
+    return usage_source, stats_available, upload, download, used
+
+
+def _client_identifier_for_usage(client, stats):
+    for data in (client or {}, stats or {}):
+        for field_name in ("id", "uuid", "password", "subId", "sub_id", "email"):
+            value = str(data.get(field_name) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _client_online_from_sources(client, stats, online_clients, online_available):
+    explicit = first_xui_value(
+        (stats or {}).get("online"),
+        (stats or {}).get("isOnline"),
+        (client or {}).get("online"),
+        (client or {}).get("isOnline"),
+    )
+    if explicit is not None:
+        return xui_bool(explicit)
+    if online_available:
+        online_values = {str(value).strip() for value in (online_clients or set()) if str(value).strip()}
+        candidates = set(lookup_values(client or {}))
+        candidates.update(lookup_values(stats or {}))
+        return any(candidate in online_values for candidate in candidates)
+    return None
+
+
+def normalize_xui_usage_client(*, inbound, inbound_data, client, stats, online_clients=None, online_available=False):
+    client = client or {}
+    stats = stats or {}
+    identifier = _client_identifier_for_usage(client, stats)
+    identifier_hash = hash_xui_identifier(identifier)
+    if not identifier_hash:
+        return None
+
+    usage_source, stats_available, upload, download, used = _usage_source_and_values(client, stats)
+    total = xui_int_or_none(
+        first_xui_value(
+            stats.get("total"),
+            stats.get("totalGB"),
+            client.get("totalGB"),
+            client.get("total"),
+            (inbound_data or {}).get("totalGB"),
+            (inbound_data or {}).get("total"),
+        )
+    )
+    expiry_time = parse_xui_datetime(first_xui_value(stats.get("expiryTime"), client.get("expiryTime")))
+    enabled_value = first_xui_value(client.get("enable"), client.get("enabled"), stats.get("enable"), stats.get("enabled"))
+    last_online_at = parse_xui_datetime(
+        first_xui_value(
+            stats.get("lastOnline"),
+            stats.get("lastOnlineTime"),
+            stats.get("last_online_at"),
+            client.get("lastOnline"),
+            client.get("lastOnlineTime"),
+        )
+    )
+    email = str(first_xui_value(client.get("email"), stats.get("email")) or "").strip()
+    source = "clientStats" if usage_source is stats else "client" if usage_source is client else ""
+    return {
+        "inbound_id": getattr(inbound, "pk", None),
+        "remote_inbound_id": getattr(inbound, "inbound_id", None),
+        "identifier_hash": identifier_hash,
+        "identifier_masked": mask_xui_value(identifier),
+        "email_masked": mask_xui_value(email),
+        "upload_bytes": upload if upload is not None else 0,
+        "download_bytes": download if download is not None else 0,
+        "used_bytes": used if used is not None else 0,
+        "total_bytes": total,
+        "expiry_time": expiry_time,
+        "enabled": xui_bool(enabled_value) if enabled_value is not None else None,
+        "online": _client_online_from_sources(client, stats, online_clients, online_available),
+        "source": source,
+        "stats_available": stats_available,
+        "metadata": {
+            "matched_usage_source": source,
+            "has_usage_stats": stats_available,
+            "last_online_at": last_online_at.isoformat() if last_online_at else "",
+            "remote_inbound_id": getattr(inbound, "inbound_id", None),
+        },
+    }
+
+
 def related_client_stats(client_stats, client=None, *, identifier=""):
     client = client or {}
     identifier = str(identifier or "").strip()
@@ -590,11 +735,18 @@ class XUIClientStats:
 
 
 class XUIService:
-    def __init__(self, panel):
+    def __init__(self, panel, *, timeout_seconds=None):
         self.panel = panel
         self.base_url = panel.url.rstrip("/")
         self.session = configure_xui_session(requests.Session(), panel=panel)
         self._logged_in = False
+        if timeout_seconds is None:
+            self.timeout_seconds = PANEL_TIMEOUT_SECONDS
+            self.login_timeout = PANEL_LOGIN_TIMEOUT_SECONDS
+        else:
+            self.timeout_seconds = max(int(timeout_seconds or PANEL_TIMEOUT_SECONDS), 1)
+            connect_timeout = min(5, self.timeout_seconds)
+            self.login_timeout = (connect_timeout, self.timeout_seconds)
 
     def login(self):
         if self._logged_in:
@@ -605,7 +757,7 @@ class XUIService:
                 response = self.session.post(
                     f"{self.base_url}/login",
                     data={"username": self.panel.username, "password": self.panel.password},
-                    timeout=PANEL_LOGIN_TIMEOUT_SECONDS,
+                    timeout=self.login_timeout,
                 )
                 break
             except requests.RequestException as exc:
@@ -634,7 +786,7 @@ class XUIService:
 
     def request_json(self, method, path, **kwargs):
         if "timeout" not in kwargs:
-            kwargs["timeout"] = PANEL_TIMEOUT_SECONDS
+            kwargs["timeout"] = self.timeout_seconds
         response = self.session.request(method, f"{self.base_url}{path}", **kwargs)
         if response.status_code != 200:
             raise XUIError(f"Panel request failed with HTTP {response.status_code}.")
@@ -852,11 +1004,13 @@ class XUIService:
         cache.set(cache_key, traffic, CLIENT_STATS_CACHE_SECONDS)
         return traffic
 
-    def get_online_clients(self):
+    def get_online_clients(self, *, suppress_errors=True):
         try:
             data = self.authenticated_json("POST", "/panel/api/inbounds/onlines")
         except Exception:
-            return set()
+            if suppress_errors:
+                return set()
+            raise
 
         obj = data.get("obj") or data.get("online") or []
         if isinstance(obj, str):
@@ -965,6 +1119,218 @@ class XUIService:
             "inbound_id": inbound.inbound_id,
             "matched_field": matched_field,
             "config_link_updated": True,
+        }
+
+    def _find_client_in_inbound(self, inbound, identifier):
+        resolve_inbound_panel(inbound, self.panel, require_active=False)
+        identifier = str(identifier or "").strip()
+        if not identifier:
+            raise XUIError("Client identifier is required.")
+        inbound_data = self.get_inbound(inbound.inbound_id, use_cache=False)
+        target_client, target_stats, matched_field, clients, client_stats = find_xui_client_and_stats(
+            inbound_data,
+            identifier,
+        )
+        if not target_client and not target_stats:
+            raise XUIError("Client identifier was not found on this inbound.")
+        return {
+            "inbound_data": inbound_data,
+            "client": target_client or {},
+            "client_stats": target_stats or {},
+            "matched_field": matched_field,
+            "clients": clients,
+            "all_client_stats": client_stats,
+        }
+
+    def _client_api_identifier(self, client_data, identifier):
+        for key in ("id", "uuid", "password"):
+            value = str((client_data or {}).get(key) or "").strip()
+            if value:
+                return value
+        return str(identifier or "").strip()
+
+    def _clear_client_caches(self, inbound, client_data=None, email=""):
+        cache.delete(f"xui:inbound:{self.panel.pk}:{inbound.inbound_id}")
+        for value in {email, (client_data or {}).get("email")}:
+            value = str(value or "").strip()
+            if value:
+                cache.delete(f"xui:client-traffic:{self.panel.pk}:{value}")
+
+    def _try_delete_client_stats(self, inbound, email):
+        email = str(email or "").strip()
+        if not email:
+            return False
+        try:
+            response = self.authenticated_json(
+                "POST",
+                f"/panel/api/inbounds/{inbound.inbound_id}/delClientTraffic/{quote(email)}",
+                headers={"Accept": "application/json"},
+            )
+        except Exception as exc:
+            logger.info(
+                "Best-effort X-UI client traffic deletion skipped panel=%s inbound=%s email=%s error=%s",
+                self.panel.pk,
+                inbound.inbound_id,
+                mask_xui_value(email),
+                exc,
+            )
+            return False
+        return bool(response.get("success"))
+
+    def delete_client_from_inbound(self, inbound, identifier):
+        found = self._find_client_in_inbound(inbound, identifier)
+        target_client = dict(found.get("client") or {})
+        target_stats = dict(found.get("client_stats") or {})
+        email = str(target_client.get("email") or target_stats.get("email") or "").strip()
+        api_identifier = self._client_api_identifier(target_client, identifier)
+        if not api_identifier:
+            raise XUIError("Client identifier was not available for deletion.")
+
+        response = self.authenticated_json(
+            "POST",
+            f"/panel/api/inbounds/{inbound.inbound_id}/delClient/{quote(api_identifier, safe='')}",
+            headers={"Accept": "application/json"},
+        )
+        if not response.get("success"):
+            message = str(response.get("msg") or "")
+            if "not found" not in message.lower() and "不存在" not in message:
+                raise XUIError(message or "Panel rejected client deletion.")
+
+        stats_deleted = self._try_delete_client_stats(inbound, email)
+        self._clear_client_caches(inbound, target_client, email=email)
+
+        inbound_data = self.get_inbound(inbound.inbound_id, use_cache=False)
+        try:
+            remaining_client, remaining_stats, _matched, _clients, _stats = find_xui_client_and_stats(
+                inbound_data,
+                identifier,
+            )
+        except Exception as exc:
+            raise XUIError("Could not verify client deletion on panel.") from exc
+        if remaining_client:
+            raise XUIError("Panel deletion could not be verified.")
+
+        return {
+            "deleted": True,
+            "stats_deleted": stats_deleted,
+            "stats_remaining": bool(remaining_stats),
+            "panel": self.panel,
+            "inbound": inbound,
+            "inbound_id": inbound.inbound_id,
+            "identifier": identifier,
+            "email": email,
+            "matched_field": found.get("matched_field") or "",
+            "old_total_bytes": xui_int(
+                first_xui_value(
+                    target_client.get("totalGB"),
+                    target_client.get("total"),
+                    target_stats.get("total"),
+                    target_stats.get("totalGB"),
+                ),
+                0,
+            ),
+            "old_expiry_time": parse_xui_datetime(
+                first_xui_value(target_client.get("expiryTime"), target_stats.get("expiryTime"))
+            ),
+            "raw": {
+                "client": target_client,
+                "client_stats": target_stats,
+            },
+        }
+
+    def update_client_traffic_and_expiry(self, inbound, identifier, *, total_bytes=None, expiry_time=None, enable=None):
+        found = self._find_client_in_inbound(inbound, identifier)
+        target_client = dict(found.get("client") or {})
+        target_stats = dict(found.get("client_stats") or {})
+        if not target_client:
+            raise XUIError("Client settings were not found on the panel.")
+
+        api_identifier = self._client_api_identifier(target_client, identifier)
+        if not api_identifier:
+            raise XUIError("Client identifier was not available for update.")
+
+        old_total = xui_int(
+            first_xui_value(
+                target_client.get("totalGB"),
+                target_client.get("total"),
+                target_stats.get("total"),
+                target_stats.get("totalGB"),
+            ),
+            0,
+        )
+        old_expiry = parse_xui_datetime(first_xui_value(target_client.get("expiryTime"), target_stats.get("expiryTime")))
+
+        if total_bytes is not None:
+            total_bytes = int(total_bytes)
+            if total_bytes < 0:
+                raise XUIError("Traffic limit cannot be negative.")
+            target_client["totalGB"] = total_bytes
+        expiry_millis = xui_datetime_to_millis(expiry_time) if expiry_time is not None else None
+        if expiry_millis is not None:
+            target_client["expiryTime"] = expiry_millis
+        if enable is not None:
+            target_client["enable"] = bool(enable)
+
+        response = self.authenticated_json(
+            "POST",
+            f"/panel/api/inbounds/updateClient/{quote(api_identifier, safe='')}",
+            data={
+                "id": inbound.inbound_id,
+                "settings": json.dumps({"clients": [target_client]}),
+            },
+        )
+        if not response.get("success"):
+            raise XUIError(response.get("msg") or "Panel rejected client update.")
+
+        self._clear_client_caches(inbound, target_client)
+        verified = self._find_client_in_inbound(inbound, identifier)
+        verified_client = verified.get("client") or {}
+        verified_stats = verified.get("client_stats") or {}
+        verified_total = xui_int(
+            first_xui_value(
+                verified_client.get("totalGB"),
+                verified_client.get("total"),
+                verified_stats.get("total"),
+                verified_stats.get("totalGB"),
+            ),
+            0,
+        )
+        verified_expiry = parse_xui_datetime(
+            first_xui_value(verified_client.get("expiryTime"), verified_stats.get("expiryTime"))
+        )
+        verified_enable_value = first_xui_value(verified_client.get("enable"), verified_stats.get("enable"))
+        verified_enable = xui_bool(verified_enable_value) if verified_enable_value is not None else None
+
+        if total_bytes is not None and verified_total != total_bytes:
+            raise XUIError("Panel traffic update could not be verified.")
+        if expiry_millis is not None:
+            expected_expiry = parse_xui_datetime(expiry_millis)
+            if bool(expected_expiry) != bool(verified_expiry):
+                raise XUIError("Panel expiry update could not be verified.")
+            if expected_expiry and verified_expiry:
+                delta = abs((verified_expiry - expected_expiry).total_seconds())
+                if delta > 2:
+                    raise XUIError("Panel expiry update could not be verified.")
+        if enable is not None and verified_enable is not None and verified_enable != bool(enable):
+            raise XUIError("Panel enabled-state update could not be verified.")
+
+        return {
+            "updated": True,
+            "panel": self.panel,
+            "inbound": inbound,
+            "inbound_id": inbound.inbound_id,
+            "identifier": identifier,
+            "matched_field": verified.get("matched_field") or found.get("matched_field") or "",
+            "old_total_bytes": old_total,
+            "new_total_bytes": verified_total,
+            "old_expiry_time": old_expiry,
+            "new_expiry_time": verified_expiry,
+            "enabled": verified_enable,
+            "email": str(verified_client.get("email") or verified_stats.get("email") or target_client.get("email") or "").strip(),
+            "raw": {
+                "client": verified_client,
+                "client_stats": verified_stats,
+            },
         }
 
     def get_client_config_details(self, vpn_client):
@@ -1369,8 +1735,254 @@ def get_usage_history(vpn_client, limit=30):
     ]
 
 
+def get_inbound_client_stats(panel, inbound):
+    service = XUIService(panel)
+    service.login()
+    inbound_data = service.get_inbound(inbound.inbound_id, use_cache=False)
+    client_stats = parse_xui_client_stats(inbound_data)
+    settings_data = parse_xui_json_object(inbound_data.get("settings"))
+    clients = settings_data.get("clients") or []
+    if not isinstance(clients, list):
+        clients = []
+    return {
+        "panel": panel,
+        "inbound": inbound,
+        "inbound_data": inbound_data,
+        "clients": clients,
+        "client_stats": client_stats,
+    }
+
+
+def get_panel_inbounds_with_stats(panel):
+    from .models import Inbound
+
+    service = XUIService(panel)
+    service.login()
+    rows = []
+    for inbound in Inbound.objects.filter(panel=panel, is_active=True).order_by("inbound_id"):
+        inbound_data = service.get_inbound(inbound.inbound_id, use_cache=False)
+        settings_data = parse_xui_json_object(inbound_data.get("settings"))
+        clients = settings_data.get("clients") or []
+        if not isinstance(clients, list):
+            clients = []
+        rows.append(
+            {
+                "inbound": inbound,
+                "inbound_data": inbound_data,
+                "clients": clients,
+                "client_stats": parse_xui_client_stats(inbound_data),
+            }
+        )
+    return rows
+
+
+def collect_panel_usage_stats(panel):
+    from .models import Inbound
+
+    captured_at = timezone.now()
+    store = getattr(panel, "store", None)
+    if not getattr(panel, "is_active", False):
+        return {
+            "panel": panel,
+            "status": "skipped",
+            "captured_at": captured_at,
+            "total_upload_bytes": 0,
+            "total_download_bytes": 0,
+            "total_used_bytes": 0,
+            "clients": [],
+            "clients_count": 0,
+            "online_clients_count": 0,
+            "checked_inbounds_count": 0,
+            "active_inbounds_count": 0,
+            "error_message": "Panel is inactive.",
+            "metadata": {"reason": "panel_inactive"},
+        }
+    if store is not None and not getattr(store, "panel_usage_tracking_enabled", True):
+        return {
+            "panel": panel,
+            "status": "skipped",
+            "captured_at": captured_at,
+            "total_upload_bytes": 0,
+            "total_download_bytes": 0,
+            "total_used_bytes": 0,
+            "clients": [],
+            "clients_count": 0,
+            "online_clients_count": 0,
+            "checked_inbounds_count": 0,
+            "active_inbounds_count": 0,
+            "error_message": "Panel usage tracking is disabled for this store.",
+            "metadata": {"reason": "tracking_disabled"},
+        }
+
+    service = XUIService(panel)
+    try:
+        service.login()
+    except Exception as exc:
+        error_message = sanitize_xui_operational_text(exc, panel=panel)
+        return {
+            "panel": panel,
+            "status": "failed",
+            "captured_at": captured_at,
+            "total_upload_bytes": 0,
+            "total_download_bytes": 0,
+            "total_used_bytes": 0,
+            "clients": [],
+            "clients_count": 0,
+            "online_clients_count": 0,
+            "checked_inbounds_count": 0,
+            "active_inbounds_count": 0,
+            "error_message": error_message,
+            "metadata": {"error": exc.__class__.__name__},
+        }
+
+    try:
+        online_clients = service.get_online_clients(suppress_errors=False)
+        online_available = True
+    except Exception as exc:
+        online_clients = set()
+        online_available = False
+        online_error = sanitize_xui_operational_text(exc, panel=panel)
+    else:
+        online_error = ""
+
+    active_inbounds = list(Inbound.objects.filter(panel=panel, is_active=True).order_by("inbound_id"))
+    clients = []
+    inbound_errors = []
+    missing_stats = 0
+    checked_inbounds = 0
+    total_upload = 0
+    total_download = 0
+    total_used = 0
+    seen_per_panel = set()
+
+    for inbound in active_inbounds:
+        try:
+            inbound_data = service.get_inbound(inbound.inbound_id, use_cache=False)
+        except Exception as exc:
+            inbound_errors.append(
+                {
+                    "inbound_id": inbound.inbound_id,
+                    "inbound_pk": inbound.pk,
+                    "error": sanitize_xui_operational_text(exc, panel=panel),
+                }
+            )
+            continue
+
+        checked_inbounds += 1
+        settings_data = parse_xui_json_object(inbound_data.get("settings"))
+        panel_clients = settings_data.get("clients") or []
+        if not isinstance(panel_clients, list):
+            panel_clients = []
+        client_stats = parse_xui_client_stats(inbound_data)
+        matched_stat_ids = set()
+
+        for client in panel_clients:
+            if not isinstance(client, dict):
+                continue
+            stats = related_client_stats(client_stats, client)
+            if stats:
+                matched_stat_ids.add(id(stats))
+            normalized = normalize_xui_usage_client(
+                inbound=inbound,
+                inbound_data=inbound_data,
+                client=client,
+                stats=stats,
+                online_clients=online_clients,
+                online_available=online_available,
+            )
+            if not normalized:
+                missing_stats += 1
+                continue
+            clients.append(normalized)
+            seen_per_panel.add(normalized["identifier_hash"])
+            if normalized["stats_available"]:
+                total_upload += int(normalized["upload_bytes"] or 0)
+                total_download += int(normalized["download_bytes"] or 0)
+                total_used += int(normalized["used_bytes"] or 0)
+            else:
+                missing_stats += 1
+
+        for stats in client_stats:
+            if not isinstance(stats, dict) or id(stats) in matched_stat_ids:
+                continue
+            normalized = normalize_xui_usage_client(
+                inbound=inbound,
+                inbound_data=inbound_data,
+                client={},
+                stats=stats,
+                online_clients=online_clients,
+                online_available=online_available,
+            )
+            if not normalized:
+                missing_stats += 1
+                continue
+            if normalized["identifier_hash"] in seen_per_panel:
+                continue
+            clients.append(normalized)
+            seen_per_panel.add(normalized["identifier_hash"])
+            if normalized["stats_available"]:
+                total_upload += int(normalized["upload_bytes"] or 0)
+                total_download += int(normalized["download_bytes"] or 0)
+                total_used += int(normalized["used_bytes"] or 0)
+            else:
+                missing_stats += 1
+
+    status = "ok"
+    error_message = ""
+    if inbound_errors or missing_stats:
+        status = "partial"
+        if inbound_errors:
+            error_message = "One or more inbounds could not be read."
+        elif missing_stats:
+            error_message = "Some client traffic stats were missing."
+
+    return {
+        "panel": panel,
+        "status": status,
+        "captured_at": captured_at,
+        "total_upload_bytes": total_upload,
+        "total_download_bytes": total_download,
+        "total_used_bytes": total_used,
+        "clients": clients,
+        "clients_count": len(seen_per_panel),
+        "online_clients_count": len({item["identifier_hash"] for item in clients if item.get("online") is True}),
+        "checked_inbounds_count": checked_inbounds,
+        "active_inbounds_count": len(active_inbounds),
+        "error_message": error_message,
+        "metadata": {
+            "inbound_errors": inbound_errors[:20],
+            "inbound_error_count": len(inbound_errors),
+            "missing_client_stats_count": missing_stats,
+            "online_api_available": online_available,
+            "online_api_error": online_error,
+        },
+    }
+
+
 def find_client_by_identifier(panel, identifier):
     return XUIService(panel).find_client_by_identifier(identifier)
+
+
+def delete_client_from_inbound(panel, inbound, identifier):
+    return XUIService(panel).delete_client_from_inbound(inbound, identifier)
+
+
+def update_client_traffic_and_expiry(panel, inbound, identifier, total_bytes=None, expiry_time=None, enable=None):
+    return XUIService(panel).update_client_traffic_and_expiry(
+        inbound,
+        identifier,
+        total_bytes=total_bytes,
+        expiry_time=expiry_time,
+        enable=enable,
+    )
+
+
+def update_client_traffic(panel, inbound, identifier, total_bytes):
+    return update_client_traffic_and_expiry(panel, inbound, identifier, total_bytes=total_bytes)
+
+
+def update_client_expiry(panel, inbound, identifier, expiry_time):
+    return update_client_traffic_and_expiry(panel, inbound, identifier, expiry_time=expiry_time)
 
 
 def build_config_link_for_identifier(panel, inbound_id, identifier):
@@ -1379,6 +1991,14 @@ def build_config_link_for_identifier(panel, inbound_id, identifier):
 
 def sync_vpn_client_stats(vpn_client, *, force=False, create_snapshot=True):
     from .models import VPNClient, VPNClientUsageSnapshot
+
+    if getattr(vpn_client, "is_deleted", False):
+        return XUIClientStats(
+            uuid=str(vpn_client.uuid or ""),
+            email=vpn_client.xui_email or vpn_client.username,
+            panel_available=False,
+            error="VPN client has been deleted locally.",
+        ).to_dict()
 
     if not vpn_client.inbound_id or not vpn_client.inbound.panel_id:
         return XUIClientStats(

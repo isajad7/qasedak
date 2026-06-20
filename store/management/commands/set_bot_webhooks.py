@@ -3,8 +3,8 @@ from django.core.management.base import BaseCommand, CommandError
 from django.urls import reverse
 
 from store.bot_proxy import bot_request_kwargs
-from store.bots import BotClient
 from store.models import BotConfiguration
+from store.telegram_bot.client import BotClient
 
 
 class Command(BaseCommand):

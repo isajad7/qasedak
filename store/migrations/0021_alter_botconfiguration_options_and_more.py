@@ -1000,7 +1000,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='store',
             name='english_name',
-            field=models.CharField(default='AzadNet', max_length=100, verbose_name='English name'),
+            field=models.CharField(default='VPN Store', max_length=100, verbose_name='English name'),
         ),
         migrations.AlterField(
             model_name='store',
@@ -1020,7 +1020,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='store',
             name='name',
-            field=models.CharField(default='AzadNet', max_length=100, verbose_name='name'),
+            field=models.CharField(default='VPN Store', max_length=100, verbose_name='name'),
         ),
         migrations.AlterField(
             model_name='store',

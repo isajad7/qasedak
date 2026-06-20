@@ -62,6 +62,10 @@ from .referral_services import (
     get_referral_summary,
     redeem_referral_rewards,
 )
+from .telegram_link_services import (
+    generate_web_telegram_link,
+    get_customer_telegram_link_status,
+)
 from .xui_api import sync_vpn_client_stats
 
 
@@ -528,8 +532,6 @@ def home(request):
                 )
         else:
             plan = get_object_or_404(plans, id=selected_plan_id)
-        inbound = get_available_inbound(store)
-
         try:
             payment_time = parse_payment_time(payment_time_value)
         except ValidationError as exc:
@@ -553,31 +555,10 @@ def home(request):
                 ),
             )
 
-        if not inbound:
-            return render(
-                request,
-                "home.html",
-                build_home_context(
-                    store=store,
-                    plans=plans,
-                    operators=operators,
-                    selected_operator=selected_operator,
-                    selected_plan_id=selected_plan_id,
-                    checkout_error="فعلا ظرفیت جدیدی آزاد نیست. چند دقیقه دیگر دوباره امتحان کن یا به پشتیبانی پیام بده.",
-                    payment_time=payment_time_value,
-                    payment_receipt_text=payment_receipt_text_value,
-                    discount_code=discount_code_value,
-                    quantity=quantity_value,
-                    custom_volume_gb=custom_volume_value,
-                    referral_code=referral_code_value or referral_code,
-                    scroll_to="checkout",
-                ),
-            )
-
         order, create_error = create_order_from_checkout(
             request,
             store=store,
-            inbound=inbound,
+            inbound=None,
             payment_time=payment_time,
             plan=plan,
             operator=selected_operator,
@@ -863,7 +844,7 @@ def support_send_message(request):
         conversation.save(update_fields=["contact_value", "status", "last_customer_message_at", "closed_at", "updated_at"])
 
     try:
-        from .bots import notify_support_message
+        from .telegram_bot.notifications import notify_support_message
 
         notified_count = notify_support_message(conversation, support_message)
     except Exception as exc:
@@ -887,6 +868,7 @@ def dashboard(request):
     if not customer_has_orders(customer):
         return first_time_redirect()
 
+    store = get_current_store()
     orders = [
         order
         for order in visible_customer_orders(customer)
@@ -979,8 +961,12 @@ def dashboard(request):
     rewards = (
         customer.rewards.select_related("discount_code", "plan", "referral").order_by("-earned_at")
     )
-    referral_summary = get_referral_summary(customer, request=request, store=get_current_store())
+    referral_summary = get_referral_summary(customer, request=request, store=store)
     referral_active_configs = list(get_active_referral_configs(customer))
+    telegram_link_status = get_customer_telegram_link_status(customer, store=store)
+    telegram_link = None
+    if not telegram_link_status.is_linked:
+        telegram_link = generate_web_telegram_link(customer, source="dashboard", store=store)
     return render(
         request,
         "dashboard.html",
@@ -1000,6 +986,8 @@ def dashboard(request):
             "referral_link": build_referral_link(request, customer),
             "referral_summary": referral_summary,
             "referral_active_configs": referral_active_configs,
+            "telegram_link_status": telegram_link_status,
+            "telegram_link": telegram_link,
         },
     )
 
@@ -1012,9 +1000,18 @@ def order_detail(request, order_id):
     if not order:
         raise Http404("Order not found.")
     order = get_object_or_404(
-        Order.objects.select_related("plan", "operator", "store").prefetch_related("vpn_clients"),
+        Order.objects.select_related("customer", "plan", "operator", "store").prefetch_related("vpn_clients"),
         pk=order.pk,
     )
+    telegram_link_status = get_customer_telegram_link_status(order.customer, store=order.store)
+    telegram_link = None
+    if order.customer_id and not telegram_link_status.is_linked:
+        telegram_link = generate_web_telegram_link(
+            order.customer,
+            source="after_checkout" if request.GET.get("created") == "1" else "order_detail",
+            store=order.store,
+            metadata={"order_id": str(order.public_id)},
+        )
     response = render(
         request,
         "order_detail.html",
@@ -1022,6 +1019,8 @@ def order_detail(request, order_id):
             "order": order,
             "access_clients": order.get_vpn_clients(),
             "show_checkout_notice": request.GET.get("created") == "1",
+            "telegram_link_status": telegram_link_status,
+            "telegram_link": telegram_link,
         },
     )
     set_tracking_cookie(response, order.order_tracking_code)

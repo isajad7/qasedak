@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from store.bots import send_due_sales_reports
+from store.telegram_bot.notifications import send_due_sales_reports
 
 
 class Command(BaseCommand):

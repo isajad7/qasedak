@@ -3,6 +3,7 @@ from decimal import Decimal
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from django.contrib.auth.hashers import check_password
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -16,7 +17,7 @@ from .sms_parser import SMSParseError, normalize_number, parse_payment_sms
 
 SAMPLE_SMS = """بلو
 واریز پول
-سجاد عزیز، 4,830,000 ریال به حساب شما نشست.
+مشتری عزیز، 4,830,000 ریال به حساب شما نشست.
 موجودی: 109,609,358 ریال
 ۱۸:۵۶
 ۱۴۰۵.۰۲.۱۴"""
@@ -48,6 +49,20 @@ class PaymentSMSParserTests(TestCase):
         self.assertEqual(local_datetime.day, 4)
         self.assertEqual(local_datetime.hour, 18)
         self.assertEqual(local_datetime.minute, 56)
+
+    @override_settings(PAYMENT_SMS_TIME_ZONE="UTC")
+    def test_parse_prefers_store_payment_sms_time_zone(self):
+        Store.objects.create(
+            name="VPN Store",
+            english_name="VPN Store",
+            card_number="0000000000000000",
+            card_owner="VPN Store",
+            payment_sms_time_zone="Asia/Tehran",
+        )
+
+        parsed = parse_payment_sms(SAMPLE_SMS)
+
+        self.assertEqual(getattr(parsed.sms_datetime.tzinfo, "key", ""), "Asia/Tehran")
 
     def test_parse_supports_arabic_digits_and_unformatted_amounts(self):
         text = """بلو
@@ -92,10 +107,10 @@ class PaymentSMSParserTests(TestCase):
 class PaymentMatchingTests(TestCase):
     def setUp(self):
         self.store = Store.objects.create(
-            name="AzadNet",
-            english_name="AzadNet",
-            card_number="1234567890123456",
-            card_owner="Azad Net",
+            name="VPN Store",
+            english_name="VPN Store",
+            card_number="0000000000000000",
+            card_owner="VPN Store",
             bank_name="Test Bank",
         )
         self.plan = Plan.objects.create(
@@ -378,3 +393,39 @@ class SMSForwarderWebhookTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(IncomingPaymentSMS.objects.count(), 1)
+
+    @override_settings(SMSFORWARDER_WEBHOOK_TOKEN="")
+    def test_webhook_accepts_admin_configured_hashed_token(self):
+        store = Store.objects.create(
+            name="VPN Store",
+            english_name="VPN Store",
+            card_number="0000000000000000",
+            card_owner="VPN Store",
+        )
+        store.set_smsforwarder_webhook_token("admin-secret-token")
+        store.save()
+        store.refresh_from_db()
+
+        self.assertNotEqual(store.smsforwarder_webhook_token_hash, "admin-secret-token")
+        self.assertTrue(check_password("admin-secret-token", store.smsforwarder_webhook_token_hash))
+        self.assertEqual(store.smsforwarder_webhook_token_hint, "oken")
+
+        response = self.client.post(
+            reverse("smsforwarder_webhook"),
+            data={"text": SAMPLE_SMS},
+            HTTP_X_WEBHOOK_TOKEN="admin-secret-token",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(IncomingPaymentSMS.objects.count(), 1)
+
+    @override_settings(SMSFORWARDER_WEBHOOK_TOKEN="")
+    def test_webhook_rejects_when_no_token_is_configured(self):
+        response = self.client.post(
+            reverse("smsforwarder_webhook"),
+            data={"text": SAMPLE_SMS},
+            HTTP_X_WEBHOOK_TOKEN="anything",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(IncomingPaymentSMS.objects.count(), 0)

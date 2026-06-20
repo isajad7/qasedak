@@ -1,0 +1,14 @@
+BOT_DIGIT_TRANSLATION = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+COPY_TEXT_MAX_LENGTH = 256
+CONFIG_COPY_HELP_TEXT = "برای کپی، از دکمه‌های زیر استفاده کنید."
+CONFIG_COPY_CALLBACK_PREFIX = "user:copy_config:"
+CONFIG_COPY_CACHE_SECONDS = 30 * 60
+CONFIG_MANAGEMENT_CACHE_SECONDS = 20 * 60
+USER_CLIENT_DELETE_CALLBACK_PREFIX = "user:client_delete:"
+USER_CLIENT_DELETE_CONFIRM_CALLBACK_PREFIX = "user:client_delete_confirm:"
+TELEGRAM_MESSAGE_SAFE_LIMIT = 3900
+
+PAYMENT_NAME_CALLBACK = "user:payment_name:start"
+PAYMENT_RECEIPT_ONLY_CALLBACK = "user:payment_receipt_only"
+PAYMENT_NAME_LABEL = "تعیین نام کانفیگ"
+PAYMENT_RECEIPT_LABEL = "ارسال رسید"

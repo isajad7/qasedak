@@ -1,10 +1,13 @@
 import random
+import re
 import string
 import uuid
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from pathlib import PurePath
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from django.contrib.auth.hashers import make_password
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator, URLValidator
@@ -33,12 +36,20 @@ def generate_short_code(prefix="", length=8):
     return f"{prefix}{suffix}"
 
 
+def normalize_telegram_bot_username(value):
+    return str(value or "").strip().lstrip("@")
+
+
 def default_reminder_days_before_expiry():
     return [3, 1, 0]
 
 
 def default_reminder_days_after_expiry():
     return [1, 3]
+
+
+def default_web_telegram_link_token_expiry():
+    return timezone.now() + timedelta(days=7)
 
 
 card_last4_validator = RegexValidator(
@@ -198,8 +209,13 @@ class Store(TimeStampedModel):
         TUNNEL = "tunnel", _("Tunnel")
         OPERATOR_BASED = "operator_based", _("Operator based")
 
-    name = models.CharField(_("name"), max_length=100, default="AzadNet")
-    english_name = models.CharField(_("English name"), max_length=100, default="AzadNet")
+    class PanelUsageActiveUserMethod(models.TextChoices):
+        TRAFFIC_DELTA = "traffic_delta", _("Traffic delta")
+        ONLINE_API = "online_api", _("Online API")
+        MIXED = "mixed", _("Mixed")
+
+    name = models.CharField(_("name"), max_length=100, default="VPN Store")
+    english_name = models.CharField(_("English name"), max_length=100, default="VPN Store")
     slug = models.SlugField(_("slug"), max_length=80, unique=True, null=True, blank=True)
     domain = models.CharField(_("domain"), max_length=255, blank=True, null=True)
     is_active = models.BooleanField(_("is active"), default=True, db_index=True)
@@ -210,6 +226,16 @@ class Store(TimeStampedModel):
         default=SalesMode.TUNNEL,
         db_index=True,
         help_text=_("Tunnel shows plans directly; operator based asks customers to choose an operator first."),
+    )
+    plan_inbound_routing_enabled = models.BooleanField(
+        _("plan inbound routing enabled"),
+        default=True,
+        help_text=_("اگر فعال باشد، فروش هر پلن از routeهای explicit همان پلن/اپراتور به inbound انجام می‌شود."),
+    )
+    allow_global_inbound_fallback = models.BooleanField(
+        _("allow global inbound fallback"),
+        default=True,
+        help_text=_("اگر route explicit برای پلن پیدا نشد، اجازه استفاده از الگوریتم عمومی انتخاب inbound را می‌دهد."),
     )
 
     hero_title = models.CharField(_("hero title"), max_length=200, default="Fast and secure VPN access")
@@ -239,6 +265,27 @@ class Store(TimeStampedModel):
         _("receipt image only payment"),
         default=False,
         help_text=_("When enabled, checkout only asks for a receipt image for this card."),
+    )
+    smsforwarder_webhook_token_hash = models.CharField(
+        _("SMSForwarder webhook token hash"),
+        max_length=255,
+        blank=True,
+        editable=False,
+        help_text=_("Hashed SMSForwarder webhook token. Set or rotate it from the admin write-only token field."),
+    )
+    smsforwarder_webhook_token_hint = models.CharField(
+        _("SMSForwarder webhook token hint"),
+        max_length=16,
+        blank=True,
+        editable=False,
+        help_text=_("Last characters of the configured webhook token, used only as an admin hint."),
+    )
+    payment_sms_time_zone = models.CharField(
+        _("payment SMS time zone"),
+        max_length=64,
+        default="Asia/Tehran",
+        blank=True,
+        help_text=_("Time zone used when parsing bank SMS dates. Leave blank to use the legacy settings fallback."),
     )
     custom_volume_price_per_gb = models.DecimalField(
         _("custom volume price per GB"),
@@ -332,6 +379,73 @@ class Store(TimeStampedModel):
         validators=[MinValueValidator(1)],
         help_text=_("Maximum customers resolved for a single broadcast campaign."),
     )
+    revenue_engine_enabled = models.BooleanField(
+        _("revenue engine enabled"),
+        default=True,
+        help_text=_("Master kill switch for all revenue engine messages."),
+    )
+    revenue_engine_dry_run = models.BooleanField(
+        _("revenue engine dry run"),
+        default=True,
+        help_text=_("When enabled, revenue offers are logged but not sent."),
+    )
+    revenue_engine_quiet_hours_enabled = models.BooleanField(
+        _("revenue engine quiet hours enabled"),
+        default=False,
+    )
+    revenue_engine_quiet_hours_start = models.TimeField(
+        _("revenue engine quiet hours start"),
+        null=True,
+        blank=True,
+    )
+    revenue_engine_quiet_hours_end = models.TimeField(
+        _("revenue engine quiet hours end"),
+        null=True,
+        blank=True,
+    )
+    revenue_engine_timezone = models.CharField(
+        _("revenue engine time zone"),
+        max_length=64,
+        default="Asia/Tehran",
+        blank=True,
+    )
+    renewal_engine_enabled = models.BooleanField(_("renewal engine enabled"), default=True)
+    upsell_engine_enabled = models.BooleanField(_("upsell engine enabled"), default=True)
+    retention_engine_enabled = models.BooleanField(_("retention engine enabled"), default=True)
+    ai_revenue_optimizer_enabled = models.BooleanField(_("AI revenue optimizer enabled"), default=True)
+    revenue_optimization_enabled = models.BooleanField(_("revenue optimization enabled"), default=True)
+    revenue_max_offers_per_user_per_day = models.PositiveIntegerField(
+        _("revenue max offers per user per day"),
+        default=1,
+        validators=[MinValueValidator(1)],
+    )
+    revenue_max_offers_per_user_per_week = models.PositiveIntegerField(
+        _("revenue max offers per user per week"),
+        default=3,
+        validators=[MinValueValidator(1)],
+    )
+    revenue_max_total_offers_per_day = models.PositiveIntegerField(
+        _("revenue max total offers per day"),
+        default=500,
+        validators=[MinValueValidator(1)],
+    )
+    revenue_min_ai_confidence = models.DecimalField(
+        _("revenue minimum AI confidence"),
+        max_digits=4,
+        decimal_places=2,
+        default=Decimal("0.50"),
+        validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("1"))],
+    )
+    revenue_offer_cooldown_hours = models.PositiveIntegerField(
+        _("revenue offer cooldown hours"),
+        default=24,
+        validators=[MinValueValidator(1)],
+    )
+    retention_offer_cooldown_hours = models.PositiveIntegerField(
+        _("retention offer cooldown hours"),
+        default=72,
+        validators=[MinValueValidator(1)],
+    )
     renewal_reminders_enabled = models.BooleanField(
         _("renewal reminders enabled"),
         default=True,
@@ -376,6 +490,83 @@ class Store(TimeStampedModel):
         default=Decimal("2.000"),
         validators=[MinValueValidator(Decimal("0.001"))],
         help_text=_("Send a reminder when remaining traffic GB is at or below this value."),
+    )
+    panel_monitor_enabled = models.BooleanField(
+        _("panel monitor enabled"),
+        default=True,
+        help_text=_("Run operational health checks for active X-UI/Sanaei panels."),
+    )
+    panel_monitor_alerts_enabled = models.BooleanField(
+        _("panel monitor alerts enabled"),
+        default=True,
+        help_text=_("Send Telegram admin alerts when panel health changes or cooldown reminders are due."),
+    )
+    panel_monitor_check_timeout_seconds = models.PositiveIntegerField(
+        _("panel monitor check timeout seconds"),
+        default=15,
+        validators=[MinValueValidator(1)],
+    )
+    panel_monitor_alert_cooldown_minutes = models.PositiveIntegerField(
+        _("panel monitor alert cooldown minutes"),
+        default=30,
+        validators=[MinValueValidator(1)],
+    )
+    panel_monitor_max_log_age_days = models.PositiveIntegerField(
+        _("panel monitor max log age days"),
+        default=30,
+        validators=[MinValueValidator(1)],
+        help_text=_("Panel health check logs older than this value can be removed by the cleanup command."),
+    )
+    daily_admin_report_enabled = models.BooleanField(
+        _("daily admin report enabled"),
+        default=True,
+        help_text=_("Send the daily Telegram admin operations report for this store."),
+    )
+    daily_admin_report_time = models.TimeField(
+        _("daily admin report time"),
+        default=time(9, 0),
+        help_text=_("Intended local send time. Scheduling is handled by cron/systemd."),
+    )
+    daily_admin_report_timezone = models.CharField(
+        _("daily admin report timezone"),
+        max_length=64,
+        default="Asia/Tehran",
+        blank=True,
+        help_text=_("IANA timezone used to calculate the daily report period."),
+    )
+    daily_admin_report_include_panel_health = models.BooleanField(
+        _("daily admin report include panel health"),
+        default=True,
+    )
+    daily_admin_report_include_financials = models.BooleanField(
+        _("daily admin report include financials"),
+        default=True,
+    )
+    daily_admin_report_include_errors = models.BooleanField(
+        _("daily admin report include errors"),
+        default=True,
+    )
+    panel_usage_tracking_enabled = models.BooleanField(
+        _("panel usage tracking enabled"),
+        default=True,
+        help_text=_("Collect periodic X-UI/Sanaei usage snapshots for active panels."),
+    )
+    panel_usage_report_enabled = models.BooleanField(
+        _("panel usage report enabled"),
+        default=True,
+        help_text=_("Include panel usage deltas and active users in the daily admin report."),
+    )
+    panel_usage_snapshot_retention_days = models.PositiveIntegerField(
+        _("panel usage snapshot retention days"),
+        default=45,
+        validators=[MinValueValidator(1)],
+    )
+    panel_usage_active_user_method = models.CharField(
+        _("panel usage active user method"),
+        max_length=20,
+        choices=PanelUsageActiveUserMethod.choices,
+        default=PanelUsageActiveUserMethod.MIXED,
+        help_text=_("How daily active panel users are counted from snapshots."),
     )
     reminder_cooldown_hours = models.PositiveIntegerField(
         _("reminder cooldown hours"),
@@ -450,6 +641,16 @@ class Store(TimeStampedModel):
             errors["low_traffic_percent_threshold"] = _("Low traffic percent threshold must be between 1 and 100.")
         if self.low_traffic_gb_threshold is not None and self.low_traffic_gb_threshold <= 0:
             errors["low_traffic_gb_threshold"] = _("Low traffic GB threshold must be positive.")
+        if self.panel_monitor_check_timeout_seconds is not None and self.panel_monitor_check_timeout_seconds <= 0:
+            errors["panel_monitor_check_timeout_seconds"] = _("Panel monitor timeout must be positive.")
+        if self.panel_monitor_alert_cooldown_minutes is not None and self.panel_monitor_alert_cooldown_minutes <= 0:
+            errors["panel_monitor_alert_cooldown_minutes"] = _("Panel monitor alert cooldown must be positive.")
+        if self.panel_monitor_max_log_age_days is not None and self.panel_monitor_max_log_age_days <= 0:
+            errors["panel_monitor_max_log_age_days"] = _("Panel monitor log age must be positive.")
+        if self.panel_usage_snapshot_retention_days is not None and self.panel_usage_snapshot_retention_days <= 0:
+            errors["panel_usage_snapshot_retention_days"] = _("Panel usage snapshot retention must be positive.")
+        if self.panel_usage_active_user_method not in self.PanelUsageActiveUserMethod.values:
+            errors["panel_usage_active_user_method"] = _("Enter a valid active user method.")
         if self.reminder_cooldown_hours is not None and self.reminder_cooldown_hours <= 0:
             errors["reminder_cooldown_hours"] = _("Reminder cooldown must be positive.")
         if self.reminder_max_per_client_per_day is not None and self.reminder_max_per_client_per_day <= 0:
@@ -461,6 +662,43 @@ class Store(TimeStampedModel):
             errors["free_trial_duration_hours"] = _("Free trial duration must be positive.")
         if self.free_trial_cooldown_days is not None and self.free_trial_cooldown_days <= 0:
             errors["free_trial_cooldown_days"] = _("Free trial cooldown must be positive.")
+        payment_sms_time_zone = str(self.payment_sms_time_zone or "").strip()
+        self.payment_sms_time_zone = payment_sms_time_zone
+        if payment_sms_time_zone:
+            try:
+                ZoneInfo(payment_sms_time_zone)
+            except ZoneInfoNotFoundError:
+                errors["payment_sms_time_zone"] = _("Enter a valid IANA time zone, for example Asia/Tehran.")
+        daily_report_timezone = str(self.daily_admin_report_timezone or "").strip() or "Asia/Tehran"
+        self.daily_admin_report_timezone = daily_report_timezone
+        try:
+            ZoneInfo(daily_report_timezone)
+        except ZoneInfoNotFoundError:
+            errors["daily_admin_report_timezone"] = _("Enter a valid IANA time zone, for example Asia/Tehran.")
+        revenue_timezone = str(self.revenue_engine_timezone or "").strip() or "Asia/Tehran"
+        self.revenue_engine_timezone = revenue_timezone
+        try:
+            ZoneInfo(revenue_timezone)
+        except ZoneInfoNotFoundError:
+            errors["revenue_engine_timezone"] = _("Enter a valid IANA time zone, for example Asia/Tehran.")
+        if self.revenue_engine_quiet_hours_enabled and (
+            not self.revenue_engine_quiet_hours_start or not self.revenue_engine_quiet_hours_end
+        ):
+            errors["revenue_engine_quiet_hours_enabled"] = _("Quiet hours require both start and end times.")
+        if self.revenue_max_offers_per_user_per_day is not None and self.revenue_max_offers_per_user_per_day <= 0:
+            errors["revenue_max_offers_per_user_per_day"] = _("Daily revenue offer limit must be positive.")
+        if self.revenue_max_offers_per_user_per_week is not None and self.revenue_max_offers_per_user_per_week <= 0:
+            errors["revenue_max_offers_per_user_per_week"] = _("Weekly revenue offer limit must be positive.")
+        if self.revenue_max_total_offers_per_day is not None and self.revenue_max_total_offers_per_day <= 0:
+            errors["revenue_max_total_offers_per_day"] = _("Total daily revenue offer limit must be positive.")
+        if self.revenue_offer_cooldown_hours is not None and self.revenue_offer_cooldown_hours <= 0:
+            errors["revenue_offer_cooldown_hours"] = _("Revenue offer cooldown must be positive.")
+        if self.retention_offer_cooldown_hours is not None and self.retention_offer_cooldown_hours <= 0:
+            errors["retention_offer_cooldown_hours"] = _("Retention offer cooldown must be positive.")
+        if self.revenue_min_ai_confidence is not None and not (
+            Decimal("0") <= self.revenue_min_ai_confidence <= Decimal("1")
+        ):
+            errors["revenue_min_ai_confidence"] = _("Revenue AI confidence must be between 0 and 1.")
 
         if not self.free_trial_enabled:
             if errors:
@@ -480,6 +718,8 @@ class Store(TimeStampedModel):
             errors["free_trial_inbound"] = _("Free trial inbound is required when free trial is enabled.")
         elif not inbound.is_active:
             errors["free_trial_inbound"] = _("Free trial inbound must be active.")
+        elif not inbound.available_for_new_orders:
+            errors["free_trial_inbound"] = _("Free trial inbound must be available for new orders.")
         elif panel and inbound.panel_id != panel.pk:
             errors["free_trial_inbound"] = _("Free trial inbound must belong to the selected panel.")
 
@@ -491,6 +731,14 @@ class Store(TimeStampedModel):
         if not self.telegram_support:
             return None
         return f"https://t.me/{self.telegram_support.lstrip('@')}"
+
+    def set_smsforwarder_webhook_token(self, raw_token):
+        token = str(raw_token or "").strip()
+        if not token:
+            return False
+        self.smsforwarder_webhook_token_hash = make_password(token)
+        self.smsforwarder_webhook_token_hint = token[-4:]
+        return True
 
     @property
     def bale_support_handle(self):
@@ -567,6 +815,12 @@ class BotConfiguration(TimeStampedModel):
         default=Provider.BALE,
         db_index=True,
     )
+    telegram_bot_username = models.CharField(
+        _("Telegram bot username"),
+        max_length=64,
+        blank=True,
+        help_text=_("نام کاربری ربات بدون @، برای ساخت لینک دعوت و start parameter استفاده می‌شود."),
+    )
     bot_token = models.CharField(_("bot token"), max_length=255, help_text=_("Bot token from Bale or Telegram."))
     admin_user_id = models.CharField(
         _("admin user ID"),
@@ -636,6 +890,25 @@ class BotConfiguration(TimeStampedModel):
 
     def __str__(self):
         return f"{self.get_provider_display()} - {self.name}"
+
+    def clean(self):
+        super().clean()
+        username = normalize_telegram_bot_username(self.telegram_bot_username)
+        self.telegram_bot_username = username
+        if not username:
+            return
+
+        errors = {}
+        if len(username) < 5 or len(username) > 32:
+            errors["telegram_bot_username"] = _("Telegram username must be between 5 and 32 characters.")
+        if not re.fullmatch(r"[A-Za-z0-9_]+", username):
+            errors["telegram_bot_username"] = _("Telegram username may contain only letters, numbers, and underscore.")
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.telegram_bot_username = normalize_telegram_bot_username(self.telegram_bot_username)
+        super().save(*args, **kwargs)
 
     def get_admin_user_ids(self):
         raw_ids = [self.admin_user_id or ""]
@@ -731,6 +1004,71 @@ class BotUser(TimeStampedModel):
         self.state_data = {}
         if save:
             self.save(update_fields=["state", "state_data", "updated_at"])
+
+
+class WebTelegramLinkToken(TimeStampedModel):
+    class Status(models.TextChoices):
+        ACTIVE = "active", _("Active")
+        USED = "used", _("Used")
+        EXPIRED = "expired", _("Expired")
+        REVOKED = "revoked", _("Revoked")
+
+    class Source(models.TextChoices):
+        DASHBOARD = "dashboard", _("Dashboard")
+        ORDER_DETAIL = "order_detail", _("Order detail")
+        AFTER_CHECKOUT = "after_checkout", _("After checkout")
+        ADMIN = "admin", _("Admin")
+
+    customer = models.ForeignKey(
+        "Customer",
+        verbose_name=_("customer"),
+        on_delete=models.CASCADE,
+        related_name="web_telegram_link_tokens",
+    )
+    token_hash = models.CharField(_("token hash"), max_length=64, unique=True, db_index=True)
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    bot_user = models.ForeignKey(
+        BotUser,
+        verbose_name=_("bot user"),
+        on_delete=models.SET_NULL,
+        related_name="web_link_tokens",
+        null=True,
+        blank=True,
+    )
+    expires_at = models.DateTimeField(
+        _("expires at"),
+        default=default_web_telegram_link_token_expiry,
+        db_index=True,
+    )
+    used_at = models.DateTimeField(_("used at"), null=True, blank=True)
+    revoked_at = models.DateTimeField(_("revoked at"), null=True, blank=True)
+    source = models.CharField(
+        _("source"),
+        max_length=30,
+        choices=Source.choices,
+        default=Source.DASHBOARD,
+        db_index=True,
+    )
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("web telegram link token")
+        verbose_name_plural = _("web telegram link tokens")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["customer", "status", "expires_at"]),
+            models.Index(fields=["status", "expires_at"]),
+            models.Index(fields=["created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.customer_id}:{self.status}:{self.source}"
 
 
 class SupportConversation(TimeStampedModel):
@@ -1015,6 +1353,119 @@ class BotEventLog(TimeStampedModel):
 
     def __str__(self):
         return f"{self.get_event_type_display()} - {self.get_status_display()}"
+
+
+class RevenueOfferLog(models.Model):
+    class EngineType(models.TextChoices):
+        RENEWAL = "renewal", _("Renewal")
+        UPSELL = "upsell", _("Upsell")
+        RETENTION = "retention", _("Retention")
+        SILENT_ACTIVE = "silent_active", _("Silent active")
+        AI_OPTIMIZER = "ai_optimizer", _("AI optimizer")
+
+    class DecisionSource(models.TextChoices):
+        RULE = "rule", _("Rule")
+        OPTIMIZATION = "optimization", _("Optimization")
+        AI = "ai", _("AI")
+        FALLBACK = "fallback", _("Fallback")
+
+    class Status(models.TextChoices):
+        DRY_RUN = "dry_run", _("Dry run")
+        SENT = "sent", _("Sent")
+        SKIPPED = "skipped", _("Skipped")
+        SUPPRESSED = "suppressed", _("Suppressed")
+        FAILED = "failed", _("Failed")
+        CONVERTED = "converted", _("Converted")
+
+    store = models.ForeignKey(
+        Store,
+        verbose_name=_("store"),
+        on_delete=models.SET_NULL,
+        related_name="revenue_offer_logs",
+        null=True,
+        blank=True,
+    )
+    customer = models.ForeignKey(
+        "Customer",
+        verbose_name=_("customer"),
+        on_delete=models.SET_NULL,
+        related_name="revenue_offer_logs",
+        null=True,
+        blank=True,
+    )
+    bot_user = models.ForeignKey(
+        BotUser,
+        verbose_name=_("bot user"),
+        on_delete=models.SET_NULL,
+        related_name="revenue_offer_logs",
+        null=True,
+        blank=True,
+    )
+    vpn_client = models.ForeignKey(
+        "VPNClient",
+        verbose_name=_("VPN client"),
+        on_delete=models.SET_NULL,
+        related_name="revenue_offer_logs",
+        null=True,
+        blank=True,
+    )
+    engine_type = models.CharField(
+        _("engine type"),
+        max_length=30,
+        choices=EngineType.choices,
+        db_index=True,
+    )
+    event_type = models.CharField(_("event type"), max_length=80, db_index=True)
+    offer_type = models.CharField(_("offer type"), max_length=80, db_index=True)
+    variant = models.CharField(_("variant"), max_length=40, blank=True)
+    decision_source = models.CharField(
+        _("decision source"),
+        max_length=30,
+        choices=DecisionSource.choices,
+        default=DecisionSource.RULE,
+        db_index=True,
+    )
+    status = models.CharField(
+        _("status"),
+        max_length=30,
+        choices=Status.choices,
+        default=Status.SKIPPED,
+        db_index=True,
+    )
+    skip_reason = models.CharField(_("skip reason"), max_length=120, blank=True)
+    error_message = models.TextField(_("error message"), blank=True)
+    ai_confidence = models.DecimalField(
+        _("AI confidence"),
+        max_digits=5,
+        decimal_places=4,
+        null=True,
+        blank=True,
+    )
+    predicted_purchase_probability = models.DecimalField(
+        _("predicted purchase probability"),
+        max_digits=5,
+        decimal_places=4,
+        null=True,
+        blank=True,
+    )
+    sent_at = models.DateTimeField(_("sent at"), null=True, blank=True)
+    converted_at = models.DateTimeField(_("converted at"), null=True, blank=True)
+    created_at = models.DateTimeField(_("created at"), default=timezone.now, db_index=True, editable=False)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("revenue offer log")
+        verbose_name_plural = _("revenue offer logs")
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["customer", "created_at"]),
+            models.Index(fields=["engine_type", "created_at"]),
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["event_type", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.engine_type}:{self.offer_type}:{self.status}"
 
 
 class Plan(TimeStampedModel):
@@ -1319,6 +1770,7 @@ class BroadcastMessage(TimeStampedModel):
         ACTIVE_CUSTOMERS = "active_customers", _("Active customers")
         CUSTOMERS_WITH_ACTIVE_CONFIG = "customers_with_active_config", _("Customers with active config")
         CUSTOMERS_WITHOUT_ORDER = "customers_without_order", _("Customers without order")
+        LEGACY_WIZWIZ_IMPORTED = "legacy_wizwiz_imported", _("کاربران قدیمی WizWiz")
         LOYAL = "loyal", _("Loyal")
         GOOD = "good", _("Good")
         TOP_BUYER = "top_buyer", _("Top buyer")
@@ -1452,6 +1904,297 @@ class BroadcastRecipient(TimeStampedModel):
 
     def __str__(self):
         return f"{self.campaign_id}:{self.customer_id}:{self.channel}"
+
+
+class LegacyWizWizImportJob(TimeStampedModel):
+    class Status(models.TextChoices):
+        UPLOADED = "uploaded", _("Uploaded")
+        ANALYZING = "analyzing", _("Analyzing")
+        ANALYZED = "analyzed", _("Analyzed")
+        APPLYING = "applying", _("Applying")
+        APPLIED = "applied", _("Applied")
+        FAILED = "failed", _("Failed")
+        CANCELLED = "cancelled", _("Cancelled")
+
+    class Mode(models.TextChoices):
+        USERS_ONLY = "users_only", _("Users only")
+
+    source = models.CharField(_("source"), max_length=40, default="wizwiz", db_index=True)
+    title = models.CharField(_("title"), max_length=180, blank=True)
+    uploaded_file = models.FileField(
+        _("uploaded file"),
+        upload_to="private/legacy_imports/wizwiz/",
+    )
+    original_filename = models.CharField(_("original filename"), max_length=255, blank=True)
+    file_size = models.PositiveBigIntegerField(_("file size"), default=0)
+    file_sha256 = models.CharField(_("file SHA256"), max_length=64, db_index=True, blank=True)
+
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.UPLOADED,
+        db_index=True,
+    )
+    mode = models.CharField(
+        _("mode"),
+        max_length=20,
+        choices=Mode.choices,
+        default=Mode.USERS_ONLY,
+        db_index=True,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name=_("created by"),
+        on_delete=models.SET_NULL,
+        related_name="legacy_wizwiz_import_jobs",
+        null=True,
+        blank=True,
+    )
+    analyzed_at = models.DateTimeField(_("analyzed at"), blank=True, null=True)
+    applied_at = models.DateTimeField(_("applied at"), blank=True, null=True)
+    failed_at = models.DateTimeField(_("failed at"), blank=True, null=True)
+
+    parsed_users_count = models.PositiveIntegerField(_("parsed users count"), default=0)
+    valid_users_count = models.PositiveIntegerField(_("valid users count"), default=0)
+    invalid_rows_count = models.PositiveIntegerField(_("invalid rows count"), default=0)
+    duplicate_in_file_count = models.PositiveIntegerField(_("duplicate in file count"), default=0)
+    existing_bot_users_count = models.PositiveIntegerField(_("existing bot users count"), default=0)
+    existing_customers_count = models.PositiveIntegerField(_("existing customers count"), default=0)
+    would_create_bot_users_count = models.PositiveIntegerField(_("would create bot users count"), default=0)
+    would_create_customers_count = models.PositiveIntegerField(_("would create customers count"), default=0)
+    admins_count = models.PositiveIntegerField(_("admins count"), default=0)
+    agents_count = models.PositiveIntegerField(_("agents count"), default=0)
+    wallet_positive_count = models.PositiveIntegerField(_("wallet positive count"), default=0)
+
+    created_bot_users_count = models.PositiveIntegerField(_("created bot users count"), default=0)
+    created_customers_count = models.PositiveIntegerField(_("created customers count"), default=0)
+    linked_existing_count = models.PositiveIntegerField(_("linked existing count"), default=0)
+    updated_existing_count = models.PositiveIntegerField(_("updated existing count"), default=0)
+    skipped_count = models.PositiveIntegerField(_("skipped count"), default=0)
+    failed_count = models.PositiveIntegerField(_("failed count"), default=0)
+
+    skip_admins = models.BooleanField(_("skip admins"), default=True)
+    import_agents = models.BooleanField(_("import agents"), default=True)
+    only_agents = models.BooleanField(_("only agents"), default=False)
+    only_wallet_positive = models.BooleanField(_("only wallet positive"), default=False)
+    update_existing = models.BooleanField(_("update existing"), default=False)
+    create_customers = models.BooleanField(_("create customers"), default=True)
+
+    error_message = models.TextField(_("error message"), blank=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("legacy WizWiz import job")
+        verbose_name_plural = _("legacy WizWiz import jobs")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["source", "status", "created_at"]),
+            models.Index(fields=["file_sha256"]),
+        ]
+
+    def __str__(self):
+        label = self.title or self.original_filename or f"Job {self.pk}"
+        return f"{label} ({self.get_status_display()})"
+
+
+class LegacyWizWizImportRow(TimeStampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", _("Pending")
+        WOULD_CREATE = "would_create", _("Would create")
+        WOULD_LINK_EXISTING = "would_link_existing", _("Would link existing")
+        EXISTING = "existing", _("Existing")
+        CREATED = "created", _("Created")
+        LINKED = "linked", _("Linked")
+        UPDATED = "updated", _("Updated")
+        SKIPPED = "skipped", _("Skipped")
+        INVALID = "invalid", _("Invalid")
+        FAILED = "failed", _("Failed")
+
+    job = models.ForeignKey(
+        LegacyWizWizImportJob,
+        verbose_name=_("job"),
+        on_delete=models.CASCADE,
+        related_name="rows",
+    )
+    source = models.CharField(_("source"), max_length=40, default="wizwiz", db_index=True)
+    legacy_pk = models.CharField(_("legacy PK"), max_length=80, blank=True)
+    telegram_user_id = models.CharField(_("Telegram user ID"), max_length=80, db_index=True)
+    telegram_user_id_masked = models.CharField(_("masked Telegram user ID"), max_length=80, blank=True)
+    old_name_masked = models.CharField(_("old masked name"), max_length=160, blank=True)
+    old_username = models.CharField(_("old username"), max_length=120, blank=True)
+    old_phone_masked = models.CharField(_("old masked phone"), max_length=80, blank=True)
+    old_wallet = models.IntegerField(_("old wallet"), null=True, blank=True)
+    old_is_admin = models.BooleanField(_("old is admin"), default=False)
+    old_is_agent = models.BooleanField(_("old is agent"), default=False)
+    old_freetrial = models.CharField(_("old free trial"), max_length=120, blank=True)
+    old_refcode = models.CharField(_("old refcode"), max_length=120, blank=True)
+    old_refered_by = models.CharField(_("old referred by"), max_length=120, blank=True)
+    status = models.CharField(
+        _("status"),
+        max_length=30,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    reason = models.CharField(_("reason"), max_length=255, blank=True)
+    bot_user = models.ForeignKey(
+        BotUser,
+        verbose_name=_("bot user"),
+        on_delete=models.SET_NULL,
+        related_name="legacy_wizwiz_import_rows",
+        null=True,
+        blank=True,
+    )
+    customer = models.ForeignKey(
+        Customer,
+        verbose_name=_("customer"),
+        on_delete=models.SET_NULL,
+        related_name="legacy_wizwiz_import_rows",
+        null=True,
+        blank=True,
+    )
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("legacy WizWiz import row")
+        verbose_name_plural = _("legacy WizWiz import rows")
+        ordering = ["job_id", "created_at", "id"]
+        indexes = [
+            models.Index(fields=["job", "status"]),
+            models.Index(fields=["source", "status"]),
+            models.Index(fields=["telegram_user_id"]),
+            models.Index(fields=["customer", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job", "telegram_user_id"],
+                name="unique_legacy_wizwiz_row_per_job_user",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.job_id}:{self.telegram_user_id_masked or self.telegram_user_id}:{self.status}"
+
+
+class LegacyWizWizImportMessageBatch(TimeStampedModel):
+    class Status(models.TextChoices):
+        DRAFT = "draft", _("Draft")
+        SENDING = "sending", _("Sending")
+        SENT = "sent", _("Sent")
+        PARTIAL = "partial", _("Partial")
+        FAILED = "failed", _("Failed")
+        CANCELLED = "cancelled", _("Cancelled")
+
+    job = models.ForeignKey(
+        LegacyWizWizImportJob,
+        verbose_name=_("job"),
+        on_delete=models.CASCADE,
+        related_name="message_batches",
+    )
+    text = models.TextField(_("message text"))
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.DRAFT,
+        db_index=True,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name=_("created by"),
+        on_delete=models.SET_NULL,
+        related_name="legacy_wizwiz_import_message_batches",
+        null=True,
+        blank=True,
+    )
+    sent_at = models.DateTimeField(_("sent at"), blank=True, null=True)
+    total_recipients = models.PositiveIntegerField(_("total recipients"), default=0)
+    sent_count = models.PositiveIntegerField(_("sent count"), default=0)
+    failed_count = models.PositiveIntegerField(_("failed count"), default=0)
+    skipped_count = models.PositiveIntegerField(_("skipped count"), default=0)
+    blocked_count = models.PositiveIntegerField(_("blocked count"), default=0)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("legacy WizWiz import message batch")
+        verbose_name_plural = _("legacy WizWiz import message batches")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["job", "status"]),
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.job_id}:{self.status}:{self.total_recipients}"
+
+
+class LegacyWizWizImportMessageRecipient(TimeStampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", _("Pending")
+        SENT = "sent", _("Sent")
+        FAILED = "failed", _("Failed")
+        SKIPPED = "skipped", _("Skipped")
+        BLOCKED = "blocked", _("Blocked")
+
+    batch = models.ForeignKey(
+        LegacyWizWizImportMessageBatch,
+        verbose_name=_("batch"),
+        on_delete=models.CASCADE,
+        related_name="recipients",
+    )
+    row = models.ForeignKey(
+        LegacyWizWizImportRow,
+        verbose_name=_("import row"),
+        on_delete=models.CASCADE,
+        related_name="message_recipients",
+    )
+    bot_user = models.ForeignKey(
+        BotUser,
+        verbose_name=_("bot user"),
+        on_delete=models.SET_NULL,
+        related_name="legacy_wizwiz_import_message_recipients",
+        null=True,
+        blank=True,
+    )
+    customer = models.ForeignKey(
+        Customer,
+        verbose_name=_("customer"),
+        on_delete=models.SET_NULL,
+        related_name="legacy_wizwiz_import_message_recipients",
+        null=True,
+        blank=True,
+    )
+    telegram_user_id_masked = models.CharField(_("masked Telegram user ID"), max_length=80, blank=True)
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    error_message = models.TextField(_("error message"), blank=True)
+    sent_at = models.DateTimeField(_("sent at"), blank=True, null=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("legacy WizWiz import message recipient")
+        verbose_name_plural = _("legacy WizWiz import message recipients")
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["batch", "status"]),
+            models.Index(fields=["row", "status"]),
+            models.Index(fields=["customer", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["batch", "row"],
+                name="unique_legacy_wizwiz_message_recipient_per_row",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.batch_id}:{self.telegram_user_id_masked}:{self.status}"
 
 
 class Referral(TimeStampedModel):
@@ -1709,7 +2452,7 @@ class Panel(TimeStampedModel):
         blank=True,
         null=True,
         validators=[URLValidator(schemes=["http", "https"])],
-        help_text=_("Optional HTTP proxy URL for this panel, e.g. http://user:pass@proxy-host:port."),
+        help_text=_("Optional HTTP proxy URL for this panel, e.g. http://proxy-host:port."),
     )
     is_active = models.BooleanField(_("is active"), default=True, db_index=True)
     last_sync_at = models.DateTimeField(_("last sync at"), blank=True, null=True)
@@ -1755,6 +2498,23 @@ class Inbound(TimeStampedModel):
     port = models.CharField(_("port"), max_length=10)
     config_params = models.CharField(_("configuration parameters"), max_length=500)
     is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    available_for_new_orders = models.BooleanField(
+        _("available for new orders"),
+        default=True,
+        db_index=True,
+        help_text=_("اگر غیرفعال باشد، این inbound برای فروش جدید، تست رایگان یا ساخت کانفیگ جدید انتخاب نمی‌شود."),
+    )
+    health_monitor_enabled = models.BooleanField(
+        _("health monitor enabled"),
+        default=True,
+        db_index=True,
+        help_text=_("اگر غیرفعال باشد، سلامت پنل این inbound را بررسی نمی‌کند؛ مناسب inboundهای legacy."),
+    )
+    legacy_note = models.TextField(
+        _("legacy note"),
+        blank=True,
+        help_text=_("توضیح ادمین برای inboundهای قدیمی که برای سفارش‌ها/کلاینت‌های قبلی نگه داشته شده‌اند."),
+    )
 
     current_users = models.PositiveIntegerField(_("current users"), default=0)
     max_clients = models.PositiveIntegerField(_("maximum clients"), blank=True, null=True)
@@ -1787,6 +2547,8 @@ class Inbound(TimeStampedModel):
         ordering = ["panel__name", "inbound_id"]
         indexes = [
             models.Index(fields=["panel", "is_active"]),
+            models.Index(fields=["panel", "is_active", "available_for_new_orders"]),
+            models.Index(fields=["panel", "is_active", "health_monitor_enabled"]),
             models.Index(fields=["protocol", "network_type", "security"]),
         ]
         constraints = [
@@ -1800,6 +2562,10 @@ class Inbound(TimeStampedModel):
         label = self.remark or f"Inbound {self.inbound_id}"
         panel_name = getattr(getattr(self, "panel", None), "name", None) or _("بدون پنل")
         return f"{panel_name} - {label}"
+
+    @property
+    def xui_inbound_id(self):
+        return self.inbound_id
 
     def clean(self):
         super().clean()
@@ -1827,6 +2593,410 @@ class Inbound(TimeStampedModel):
     @property
     def has_capacity(self):
         return self.max_clients is None or self.current_users < self.max_clients
+
+
+class PlanInboundRoute(TimeStampedModel):
+    store = models.ForeignKey(
+        Store,
+        verbose_name=_("store"),
+        on_delete=models.CASCADE,
+        related_name="plan_inbound_routes",
+        null=True,
+        blank=True,
+        help_text=_("برای پلن‌های مشترک بین فروشگاه‌ها می‌توان route را به یک فروشگاه خاص محدود کرد."),
+    )
+    plan = models.ForeignKey(
+        Plan,
+        verbose_name=_("plan"),
+        on_delete=models.CASCADE,
+        related_name="inbound_routes",
+        help_text=_("پلنی که فروش آن باید از inbound مشخص انجام شود."),
+    )
+    operator = models.ForeignKey(
+        Operator,
+        verbose_name=_("operator"),
+        on_delete=models.CASCADE,
+        related_name="plan_inbound_routes",
+        null=True,
+        blank=True,
+        help_text=_("اگر خالی باشد route عمومی پلن است؛ اگر مقدار داشته باشد فقط برای همان اپراتور استفاده می‌شود."),
+    )
+    inbound = models.ForeignKey(
+        Inbound,
+        verbose_name=_("inbound"),
+        on_delete=models.PROTECT,
+        related_name="plan_routes",
+        help_text=_("Inbound مقصد برای ساخت کانفیگ‌های جدید این پلن."),
+    )
+    is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    priority = models.PositiveIntegerField(
+        _("priority"),
+        default=100,
+        db_index=True,
+        help_text=_("عدد کمتر یعنی اولویت بالاتر."),
+    )
+    weight = models.PositiveIntegerField(
+        _("weight"),
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text=_("برای تعادل فروش آینده نگه داشته شده است."),
+    )
+    note = models.TextField(_("note"), blank=True)
+
+    class Meta:
+        verbose_name = _("plan inbound route")
+        verbose_name_plural = _("plan inbound routes")
+        ordering = ["plan", "operator", "priority", "id"]
+        indexes = [
+            models.Index(fields=["store", "is_active", "priority"]),
+            models.Index(fields=["plan", "operator", "is_active", "priority"]),
+            models.Index(fields=["inbound", "is_active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["plan", "operator", "inbound"],
+                condition=models.Q(operator__isnull=False),
+                name="unique_plan_operator_inbound_route",
+            ),
+            models.UniqueConstraint(
+                fields=["plan", "inbound"],
+                condition=models.Q(operator__isnull=True),
+                name="unique_plan_default_inbound_route",
+            ),
+        ]
+
+    def __str__(self):
+        operator = self.operator.name if self.operator_id else _("عمومی")
+        return f"{self.plan} / {operator} -> {self.inbound}"
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        plan = None
+        operator = None
+        inbound = None
+        store = None
+        panel = None
+
+        try:
+            plan = self.plan
+        except (Plan.DoesNotExist, AttributeError):
+            plan = None
+        try:
+            operator = self.operator
+        except (Operator.DoesNotExist, AttributeError):
+            operator = None
+        try:
+            inbound = self.inbound
+        except (Inbound.DoesNotExist, AttributeError):
+            inbound = None
+        try:
+            store = self.store
+        except (Store.DoesNotExist, AttributeError):
+            store = None
+
+        if inbound:
+            try:
+                panel = inbound.panel
+            except (Panel.DoesNotExist, AttributeError):
+                panel = None
+
+        if store and plan and plan.store_id and plan.store_id != store.pk:
+            errors["store"] = _("فروشگاه route باید با فروشگاه پلن یکی باشد.")
+        if store and operator and operator.store_id and operator.store_id != store.pk:
+            errors["operator"] = _("اپراتور انتخاب‌شده به فروشگاه route تعلق ندارد.")
+        if store and panel and panel.store_id and panel.store_id != store.pk:
+            errors["inbound"] = _("Inbound انتخاب‌شده به فروشگاه route تعلق ندارد.")
+        if plan and panel and plan.store_id and panel.store_id and panel.store_id != plan.store_id:
+            errors["inbound"] = _("Inbound انتخاب‌شده به فروشگاه پلن تعلق ندارد.")
+
+        if not self.is_active:
+            if errors:
+                raise ValidationError(errors)
+            return
+
+        if not inbound:
+            errors["inbound"] = _("برای route فعال باید inbound انتخاب شود.")
+        else:
+            if not inbound.is_active:
+                errors["inbound"] = _("Inbound route فعال باید فعال باشد.")
+            elif not inbound.available_for_new_orders:
+                errors["inbound"] = _("Inbound legacy یا خارج از فروش جدید نمی‌تواند route فعال داشته باشد.")
+            elif not panel:
+                errors["inbound"] = _("Inbound route فعال باید به پنل معتبر وصل باشد.")
+            elif not panel.is_active:
+                errors["inbound"] = _("Inbound route فعال نمی‌تواند به پنل غیرفعال وصل باشد.")
+
+        if operator:
+            if not operator.is_active:
+                errors["operator"] = _("اپراتور route فعال باید فعال باشد.")
+            elif plan and plan.pk and not plan.operators.filter(pk=operator.pk).exists():
+                errors["operator"] = _("این اپراتور جزو اپراتورهای مجاز پلن نیست.")
+
+        if errors:
+            raise ValidationError(errors)
+
+
+class PanelHealthStatus(TimeStampedModel):
+    class Status(models.TextChoices):
+        UNKNOWN = "unknown", _("Unknown")
+        OK = "ok", _("OK")
+        WARNING = "warning", _("Warning")
+        ERROR = "error", _("Error")
+        DISABLED = "disabled", _("Disabled")
+
+    panel = models.OneToOneField(
+        Panel,
+        verbose_name=_("panel"),
+        on_delete=models.CASCADE,
+        related_name="health_status",
+    )
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.UNKNOWN,
+        db_index=True,
+    )
+    last_checked_at = models.DateTimeField(_("last checked at"), blank=True, null=True, db_index=True)
+    last_ok_at = models.DateTimeField(_("last OK at"), blank=True, null=True)
+    last_error_at = models.DateTimeField(_("last error at"), blank=True, null=True)
+    last_alert_sent_at = models.DateTimeField(_("last alert sent at"), blank=True, null=True)
+    last_recovery_alert_sent_at = models.DateTimeField(_("last recovery alert sent at"), blank=True, null=True)
+    consecutive_failures = models.PositiveIntegerField(_("consecutive failures"), default=0)
+    consecutive_successes = models.PositiveIntegerField(_("consecutive successes"), default=0)
+    response_time_ms = models.PositiveIntegerField(_("response time ms"), null=True, blank=True)
+    error_code = models.CharField(_("error code"), max_length=80, blank=True)
+    error_message = models.TextField(_("error message"), blank=True)
+    summary = models.TextField(_("summary"), blank=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("panel health status")
+        verbose_name_plural = _("panel health statuses")
+        ordering = ["panel__name"]
+        indexes = [
+            models.Index(fields=["status", "last_checked_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.panel} - {self.get_status_display()}"
+
+
+class PanelHealthCheckLog(models.Model):
+    panel = models.ForeignKey(
+        Panel,
+        verbose_name=_("panel"),
+        on_delete=models.CASCADE,
+        related_name="health_check_logs",
+    )
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=PanelHealthStatus.Status.choices,
+        db_index=True,
+    )
+    checked_at = models.DateTimeField(_("checked at"), default=timezone.now, db_index=True)
+    response_time_ms = models.PositiveIntegerField(_("response time ms"), null=True, blank=True)
+    login_ok = models.BooleanField(_("login OK"), null=True, blank=True)
+    inbounds_checked = models.PositiveIntegerField(_("inbounds checked"), default=0)
+    inbounds_ok = models.PositiveIntegerField(_("inbounds OK"), default=0)
+    inbounds_warning = models.PositiveIntegerField(_("inbounds warning"), default=0)
+    inbounds_error = models.PositiveIntegerField(_("inbounds error"), default=0)
+    error_code = models.CharField(_("error code"), max_length=80, blank=True)
+    error_message = models.TextField(_("error message"), blank=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+    alert_sent = models.BooleanField(_("alert sent"), default=False)
+
+    class Meta:
+        verbose_name = _("panel health check log")
+        verbose_name_plural = _("panel health check logs")
+        ordering = ["-checked_at"]
+        indexes = [
+            models.Index(fields=["panel", "checked_at"]),
+            models.Index(fields=["status", "checked_at"]),
+            models.Index(fields=["alert_sent", "checked_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.panel} - {self.get_status_display()} @ {self.checked_at:%Y-%m-%d %H:%M}"
+
+
+class DailyAdminReportLog(models.Model):
+    class Status(models.TextChoices):
+        SENT = "sent", _("Sent")
+        SKIPPED = "skipped", _("Skipped")
+        FAILED = "failed", _("Failed")
+
+    store = models.ForeignKey(
+        Store,
+        verbose_name=_("store"),
+        on_delete=models.CASCADE,
+        related_name="daily_admin_report_logs",
+    )
+    report_date = models.DateField(_("report date"), db_index=True)
+    period_start = models.DateTimeField(_("period start"))
+    period_end = models.DateTimeField(_("period end"))
+    status = models.CharField(_("status"), max_length=20, choices=Status.choices, db_index=True)
+    sent_to_count = models.PositiveIntegerField(_("sent to count"), default=0)
+    message_text = models.TextField(_("message text"), blank=True)
+    error_message = models.TextField(_("error message"), blank=True)
+    created_at = models.DateTimeField(_("created at"), default=timezone.now, db_index=True)
+    sent_at = models.DateTimeField(_("sent at"), blank=True, null=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("daily admin report log")
+        verbose_name_plural = _("daily admin report logs")
+        ordering = ["-report_date", "-created_at"]
+        indexes = [
+            models.Index(fields=["store", "report_date"]),
+            models.Index(fields=["status", "created_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["store", "report_date"],
+                name="unique_daily_admin_report_per_store_date",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.store} - {self.report_date} - {self.get_status_display()}"
+
+
+class PanelUsageSnapshot(models.Model):
+    class Status(models.TextChoices):
+        OK = "ok", _("OK")
+        PARTIAL = "partial", _("Partial")
+        FAILED = "failed", _("Failed")
+        SKIPPED = "skipped", _("Skipped")
+
+    panel = models.ForeignKey(
+        Panel,
+        verbose_name=_("panel"),
+        on_delete=models.CASCADE,
+        related_name="usage_snapshots",
+    )
+    captured_at = models.DateTimeField(_("captured at"), db_index=True)
+    status = models.CharField(_("status"), max_length=20, choices=Status.choices, db_index=True)
+    total_upload_bytes = models.BigIntegerField(_("total upload bytes"), default=0)
+    total_download_bytes = models.BigIntegerField(_("total download bytes"), default=0)
+    total_used_bytes = models.BigIntegerField(_("total used bytes"), default=0)
+    clients_count = models.PositiveIntegerField(_("clients count"), default=0)
+    online_clients_count = models.PositiveIntegerField(_("online clients count"), default=0)
+    active_inbounds_count = models.PositiveIntegerField(_("active inbounds count"), default=0)
+    checked_inbounds_count = models.PositiveIntegerField(_("checked inbounds count"), default=0)
+    error_message = models.TextField(_("error message"), blank=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+    created_at = models.DateTimeField(_("created at"), default=timezone.now, db_index=True)
+
+    class Meta:
+        verbose_name = _("panel usage snapshot")
+        verbose_name_plural = _("panel usage snapshots")
+        ordering = ["-captured_at"]
+        indexes = [
+            models.Index(fields=["panel", "captured_at"]),
+            models.Index(fields=["status", "captured_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.panel} - {self.status} @ {self.captured_at:%Y-%m-%d %H:%M}"
+
+
+class PanelClientUsageSnapshot(models.Model):
+    panel = models.ForeignKey(
+        Panel,
+        verbose_name=_("panel"),
+        on_delete=models.CASCADE,
+        related_name="client_usage_snapshots",
+    )
+    inbound = models.ForeignKey(
+        Inbound,
+        verbose_name=_("inbound"),
+        on_delete=models.SET_NULL,
+        related_name="client_usage_snapshots",
+        null=True,
+        blank=True,
+    )
+    captured_at = models.DateTimeField(_("captured at"), db_index=True)
+    client_identifier_hash = models.CharField(_("client identifier hash"), max_length=128, db_index=True)
+    client_identifier_masked = models.CharField(_("client identifier masked"), max_length=128, blank=True)
+    email_masked = models.CharField(_("email masked"), max_length=128, blank=True)
+    upload_bytes = models.BigIntegerField(_("upload bytes"), default=0)
+    download_bytes = models.BigIntegerField(_("download bytes"), default=0)
+    used_bytes = models.BigIntegerField(_("used bytes"), default=0)
+    total_bytes = models.BigIntegerField(_("total bytes"), null=True, blank=True)
+    expiry_time = models.DateTimeField(_("expiry time"), null=True, blank=True)
+    enabled = models.BooleanField(_("enabled"), null=True, blank=True)
+    online = models.BooleanField(_("online"), null=True, blank=True)
+    source = models.CharField(_("source"), max_length=80, blank=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("panel client usage snapshot")
+        verbose_name_plural = _("panel client usage snapshots")
+        ordering = ["-captured_at"]
+        indexes = [
+            models.Index(fields=["panel", "captured_at"]),
+            models.Index(fields=["client_identifier_hash", "captured_at"]),
+            models.Index(fields=["inbound", "captured_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.panel} - {self.client_identifier_masked or self.client_identifier_hash[:12]} @ {self.captured_at:%Y-%m-%d %H:%M}"
+
+
+class PanelDailyUsage(models.Model):
+    class DataQuality(models.TextChoices):
+        COMPLETE = "complete", _("Complete")
+        PARTIAL = "partial", _("Partial")
+        INSUFFICIENT = "insufficient", _("Insufficient")
+        ESTIMATED = "estimated", _("Estimated")
+
+    panel = models.ForeignKey(
+        Panel,
+        verbose_name=_("panel"),
+        on_delete=models.CASCADE,
+        related_name="daily_usages",
+    )
+    usage_date = models.DateField(_("usage date"), db_index=True)
+    timezone = models.CharField(_("timezone"), max_length=64, default="Asia/Tehran")
+    upload_bytes = models.BigIntegerField(_("upload bytes"), default=0)
+    download_bytes = models.BigIntegerField(_("download bytes"), default=0)
+    used_bytes = models.BigIntegerField(_("used bytes"), default=0)
+    active_users_count = models.PositiveIntegerField(_("active users count"), default=0)
+    online_users_count = models.PositiveIntegerField(_("online users count"), default=0)
+    clients_count_start = models.PositiveIntegerField(_("clients count start"), default=0)
+    clients_count_end = models.PositiveIntegerField(_("clients count end"), default=0)
+    snapshot_start_at = models.DateTimeField(_("snapshot start at"), null=True, blank=True)
+    snapshot_end_at = models.DateTimeField(_("snapshot end at"), null=True, blank=True)
+    data_quality = models.CharField(
+        _("data quality"),
+        max_length=20,
+        choices=DataQuality.choices,
+        default=DataQuality.INSUFFICIENT,
+        db_index=True,
+    )
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+    calculated_at = models.DateTimeField(_("calculated at"), auto_now=True)
+
+    class Meta:
+        verbose_name = _("panel daily usage")
+        verbose_name_plural = _("panel daily usages")
+        ordering = ["-usage_date", "panel__name"]
+        indexes = [
+            models.Index(fields=["panel", "usage_date"]),
+            models.Index(fields=["data_quality", "usage_date"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["panel", "usage_date", "timezone"],
+                name="unique_panel_daily_usage_per_timezone",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.panel} - {self.usage_date} - {self.data_quality}"
 
 
 class Order(TimeStampedModel):
@@ -2186,6 +3356,7 @@ class VPNClient(TimeStampedModel):
         ACTIVE = "active", _("Active")
         SUSPENDED = "suspended", _("Suspended")
         EXPIRED = "expired", _("Expired")
+        DELETED = "deleted", _("Deleted")
         ERROR = "error", _("Error")
 
     public_id = models.UUIDField(_("public ID"), default=generate_public_id, editable=False, unique=True)
@@ -2245,6 +3416,18 @@ class VPNClient(TimeStampedModel):
     activated_at = models.DateTimeField(_("activated at"), blank=True, null=True)
     expires_at = models.DateTimeField(_("expires at"), blank=True, null=True)
     disabled_at = models.DateTimeField(_("disabled at"), blank=True, null=True)
+    deleted_at = models.DateTimeField(_("deleted at"), blank=True, null=True)
+    deleted_by_customer = models.ForeignKey(
+        Customer,
+        verbose_name=_("deleted by customer"),
+        on_delete=models.SET_NULL,
+        related_name="deleted_vpn_clients",
+        null=True,
+        blank=True,
+    )
+    deleted_by_admin_telegram_id = models.CharField(_("deleted by admin Telegram ID"), max_length=80, blank=True)
+    delete_reason = models.TextField(_("delete reason"), blank=True)
+    remote_deleted_at = models.DateTimeField(_("remote deleted at"), blank=True, null=True)
     last_online_at = models.DateTimeField(_("last online at"), blank=True, null=True)
     last_synced_at = models.DateTimeField(_("last synced at"), blank=True, null=True)
     xui_raw = models.JSONField(_("X-UI raw data"), default=dict, blank=True)
@@ -2256,6 +3439,7 @@ class VPNClient(TimeStampedModel):
         indexes = [
             models.Index(fields=["store", "status"]),
             models.Index(fields=["inbound", "status"]),
+            models.Index(fields=["deleted_at"]),
             models.Index(fields=["expires_at"]),
             models.Index(fields=["xui_email"]),
         ]
@@ -2275,6 +3459,25 @@ class VPNClient(TimeStampedModel):
     def mark_suspended(self):
         self.status = self.Status.SUSPENDED
         self.disabled_at = timezone.now()
+
+    def mark_deleted(self, *, customer=None, admin_telegram_id="", reason="", remote_deleted_at=None):
+        now = timezone.now()
+        self.status = self.Status.DELETED
+        self.deleted_at = self.deleted_at or now
+        self.disabled_at = self.disabled_at or now
+        self.remote_deleted_at = remote_deleted_at or self.remote_deleted_at or now
+        if customer:
+            self.deleted_by_customer = customer
+        if admin_telegram_id:
+            self.deleted_by_admin_telegram_id = str(admin_telegram_id)
+        if reason:
+            self.delete_reason = str(reason)
+        self.sub_link = ""
+        self.direct_link = ""
+
+    @property
+    def is_deleted(self):
+        return self.status == self.Status.DELETED or bool(self.deleted_at)
 
     @property
     def is_expired(self):
@@ -2297,6 +3500,93 @@ class VPNClient(TimeStampedModel):
             self.last_online_at = stats["last_online_at"]
         self.last_synced_at = timezone.now()
         self.xui_raw = stats.get("raw", {})
+
+
+class VPNClientActionLog(TimeStampedModel):
+    class ActorType(models.TextChoices):
+        USER = "user", _("User")
+        ADMIN = "admin", _("Admin")
+        SYSTEM = "system", _("System")
+
+    class Action(models.TextChoices):
+        USER_DELETE = "user_delete", _("User delete")
+        ADMIN_DELETE = "admin_delete", _("Admin delete")
+        ADMIN_UPDATE_TRAFFIC = "admin_update_traffic", _("Admin update traffic")
+        ADMIN_UPDATE_EXPIRY = "admin_update_expiry", _("Admin update expiry")
+        ADMIN_UPDATE_TRAFFIC_AND_EXPIRY = "admin_update_traffic_and_expiry", _("Admin update traffic and expiry")
+        ADMIN_REFRESH_LINK = "admin_refresh_link", _("Admin refresh link")
+
+    class Status(models.TextChoices):
+        PENDING = "pending", _("Pending")
+        SUCCESS = "success", _("Success")
+        FAILED = "failed", _("Failed")
+        SKIPPED = "skipped", _("Skipped")
+
+    vpn_client = models.ForeignKey(
+        VPNClient,
+        verbose_name=_("VPN client"),
+        on_delete=models.SET_NULL,
+        related_name="action_logs",
+        null=True,
+        blank=True,
+    )
+    customer = models.ForeignKey(
+        Customer,
+        verbose_name=_("customer"),
+        on_delete=models.SET_NULL,
+        related_name="vpn_client_action_logs",
+        null=True,
+        blank=True,
+    )
+    actor_type = models.CharField(_("actor type"), max_length=20, choices=ActorType.choices, db_index=True)
+    actor_telegram_id = models.CharField(_("actor Telegram ID"), max_length=80, blank=True, db_index=True)
+    action = models.CharField(_("action"), max_length=50, choices=Action.choices, db_index=True)
+    panel = models.ForeignKey(
+        Panel,
+        verbose_name=_("panel"),
+        on_delete=models.SET_NULL,
+        related_name="vpn_client_action_logs",
+        null=True,
+        blank=True,
+    )
+    inbound = models.ForeignKey(
+        Inbound,
+        verbose_name=_("inbound"),
+        on_delete=models.SET_NULL,
+        related_name="vpn_client_action_logs",
+        null=True,
+        blank=True,
+    )
+    xui_identifier_masked = models.CharField(_("masked X-UI identifier"), max_length=120, blank=True)
+    old_total_bytes = models.BigIntegerField(_("old total bytes"), null=True, blank=True)
+    new_total_bytes = models.BigIntegerField(_("new total bytes"), null=True, blank=True)
+    old_expiry_time = models.DateTimeField(_("old expiry time"), null=True, blank=True)
+    new_expiry_time = models.DateTimeField(_("new expiry time"), null=True, blank=True)
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    error_message = models.TextField(_("error message"), blank=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+    completed_at = models.DateTimeField(_("completed at"), null=True, blank=True)
+
+    class Meta:
+        verbose_name = _("VPN client action log")
+        verbose_name_plural = _("VPN client action logs")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["vpn_client", "created_at"]),
+            models.Index(fields=["customer", "created_at"]),
+            models.Index(fields=["action", "status", "created_at"]),
+            models.Index(fields=["actor_type", "actor_telegram_id"]),
+        ]
+
+    def __str__(self):
+        target = self.vpn_client_id or self.xui_identifier_masked or "-"
+        return f"{self.get_action_display()} {target} - {self.get_status_display()}"
 
 
 class VPNClientReminderLog(TimeStampedModel):

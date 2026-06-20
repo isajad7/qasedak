@@ -1,11 +1,14 @@
 import json
 import logging
 
-from django.conf import settings
 from django.http import JsonResponse
-from django.utils.crypto import constant_time_compare
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
+
+from store.configuration_services import (
+    is_smsforwarder_webhook_token_configured,
+    verify_smsforwarder_webhook_token,
+)
 
 from .models import IncomingPaymentSMS
 from .payment_matching import process_incoming_payment_sms
@@ -17,12 +20,11 @@ logger = logging.getLogger(__name__)
 @csrf_exempt
 @require_POST
 def smsforwarder_webhook(request):
-    expected_token = getattr(settings, "SMSFORWARDER_WEBHOOK_TOKEN", "")
-    if not expected_token:
+    if not is_smsforwarder_webhook_token_configured():
         return JsonResponse({"ok": False, "error": "SMS webhook token is not configured."}, status=503)
 
     provided_token = extract_webhook_token(request)
-    if not constant_time_compare(str(provided_token), str(expected_token)):
+    if not verify_smsforwarder_webhook_token(provided_token):
         return JsonResponse({"ok": False, "error": "Invalid webhook token."}, status=403)
 
     raw_text = extract_sms_text(request)

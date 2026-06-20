@@ -7,17 +7,16 @@ DEBUG = env_bool("DJANGO_DEBUG", False)
 
 ALLOWED_HOSTS = env_list(
     "DJANGO_ALLOWED_HOSTS",
-    [ "botsell.panelwpvideo.ir", "127.0.0.1"],
+    ["example.com", "127.0.0.1", "localhost"],
 )
 
 CSRF_TRUSTED_ORIGINS = env_list(
     "DJANGO_CSRF_TRUSTED_ORIGINS",
-    ["https://botsell.panelwpvideo.ir" , "http://botsell.panelwpvideo.ir"],
+    ["https://example.com"],
 )
 
-# Arvan CDN flexible SSL: client -> CDN is HTTPS, CDN -> origin is HTTP.
-# Trust the CDN/proxy header for Django's public request scheme, but do not
-# force HTTPS redirects on the origin because the origin itself has no SSL.
+# Trust a reverse proxy/CDN header for Django's public request scheme. Keep
+# redirects disabled until origin TLS is configured and tested.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = env_bool("DJANGO_USE_X_FORWARDED_HOST", True)
 SECURE_SSL_REDIRECT = env_bool("DJANGO_SECURE_SSL_REDIRECT", False)

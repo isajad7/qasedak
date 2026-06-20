@@ -16,7 +16,7 @@ class Migration(migrations.Migration):
             name="proxy_url",
             field=models.URLField(
                 blank=True,
-                help_text="Optional HTTP proxy URL for this panel, e.g. http://user:pass@proxy-host:port.",
+                help_text="Optional HTTP proxy URL for this panel, e.g. http://proxy-host:port.",
                 max_length=500,
                 null=True,
                 validators=[django.core.validators.URLValidator(schemes=["http", "https"])],

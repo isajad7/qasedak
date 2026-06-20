@@ -1,0 +1,121 @@
+{
+  "app": {
+    "install_dir": "/opt/vpn-store",
+    "domain": "example.com",
+    "enable_tls": false,
+    "timezone": "Asia/Tehran",
+    "language": "fa"
+  },
+  "admin": {
+    "username": "admin",
+    "email": "admin@example.com",
+    "password_env": "VPN_STORE_ADMIN_PASSWORD"
+  },
+  "database": {
+    "engine": "sqlite",
+    "sqlite_path": "/opt/vpn-store/data/db.sqlite3"
+  },
+  "store": {
+    "slug": "default-store",
+    "name": "VPN Store",
+    "english_name": "VPN Store",
+    "domain": "example.com",
+    "payment_mode": "manual_card",
+    "card_number": "0000000000000000",
+    "card_owner": "Configure Payment Owner",
+    "receipt_image_only_payment": false,
+    "bank_name": "",
+    "sheba_number": ""
+  },
+  "telegram": {
+    "enabled": true,
+    "bot_token": "REPLACE_WITH_TELEGRAM_BOT_TOKEN",
+    "bot_username": "your_bot_username",
+    "admin_ids": [
+      "123456789"
+    ],
+    "force_join_enabled": false,
+    "force_join_channel_id": "",
+    "force_join_channel_username": "",
+    "force_join_invite_link": "",
+    "proxy_enabled": false,
+    "proxy": {
+      "protocol": "http",
+      "host": "",
+      "port": "",
+      "username": "",
+      "password": ""
+    }
+  },
+  "xui": {
+    "configure_now": false,
+    "name": "Primary X-UI panel",
+    "panel_url": "https://panel.example.com",
+    "username": "xui-admin",
+    "password_env": "VPN_STORE_XUI_PASSWORD",
+    "proxy_url": "",
+    "inbounds": [
+      {
+        "key": "primary-vless",
+        "inbound_id": 1,
+        "remark": "Primary VLESS",
+        "protocol": "vless",
+        "server_ip": "vpn.example.com",
+        "port": "443",
+        "config_params": "type=tcp&security=none",
+        "network_type": "tcp",
+        "security": "none",
+        "available_for_new_orders": true,
+        "health_monitor_enabled": true
+      }
+    ]
+  },
+  "plans": [
+    {
+      "key": "starter-30d",
+      "name": "Starter 30D",
+      "traffic_gb": "30",
+      "duration_days": 30,
+      "price": 100000,
+      "currency": "TOMAN",
+      "device_limit": 2,
+      "is_public": true,
+      "sort_order": 10
+    },
+    {
+      "key": "plus-30d",
+      "name": "Plus 30D",
+      "traffic_gb": "80",
+      "duration_days": 30,
+      "price": 200000,
+      "currency": "TOMAN",
+      "device_limit": 3,
+      "is_public": true,
+      "sort_order": 20
+    }
+  ],
+  "plan_routes": [
+    {
+      "plan": "starter-30d",
+      "inbound": "primary-vless",
+      "priority": 100,
+      "weight": 1
+    },
+    {
+      "plan": "plus-30d",
+      "inbound": "primary-vless",
+      "priority": 100,
+      "weight": 1
+    }
+  ],
+  "revenue_engine": {
+    "enabled": true,
+    "dry_run": true,
+    "daily_per_user": 1,
+    "weekly_per_user": 3,
+    "total_daily_cap": 100,
+    "cooldown_hours": 24,
+    "retention_cooldown_hours": 72,
+    "min_ai_confidence": "0.50"
+  }
+}

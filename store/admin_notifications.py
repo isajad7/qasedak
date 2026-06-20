@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_admin_telegram_ids(store=None):
-    from .bots import active_bot_configs
+    from .telegram_bot.notifications import active_bot_configs
 
     admin_ids = []
     for config in active_bot_configs(store=store):
@@ -21,14 +21,62 @@ def get_admin_telegram_ids(store=None):
     return admin_ids
 
 
+def send_admin_message_to_telegram_admins(store=None, *, text, event_type=None):
+    from .models import BotConfiguration, BotEventLog
+    from .telegram_bot.client import BotClient, BotDeliveryError
+    from .telegram_bot.notifications import active_bot_configs
+    from .telegram_bot.order_finalizers import log_event
+
+    event_type = event_type or BotEventLog.EventType.ERROR
+    sent_count = 0
+    failed_count = 0
+    attempted_count = 0
+    configs = active_bot_configs(store=store).filter(provider=BotConfiguration.Provider.TELEGRAM)
+
+    for config in configs:
+        admin_ids = config.get_admin_user_ids()
+        if not admin_ids:
+            continue
+        client = BotClient(config)
+        for admin_id in admin_ids:
+            attempted_count += 1
+            try:
+                client.send_message(text, chat_id=admin_id)
+            except BotDeliveryError as exc:
+                failed_count += 1
+                log_event(
+                    config,
+                    event_type=event_type,
+                    status=BotEventLog.Status.FAILED,
+                    message=str(exc),
+                    raw_payload={"chat_id": admin_id},
+                )
+                logger.warning("Admin Telegram message failed config=%s chat_id=%s: %s", config.pk, admin_id, exc)
+                continue
+            sent_count += 1
+            log_event(
+                config,
+                event_type=event_type,
+                status=BotEventLog.Status.SENT,
+                message=text,
+                raw_payload={"chat_id": admin_id},
+            )
+
+    return {
+        "attempted": attempted_count,
+        "sent": sent_count,
+        "failed": failed_count,
+    }
+
+
 def build_admin_order_message(order):
-    from .bots import format_order_message
+    from .telegram_bot.admin_orders import format_order_message
 
     return format_order_message(order)
 
 
 def build_admin_order_keyboard(order):
-    from .bots import order_admin_keyboard
+    from .telegram_bot.admin_orders import order_admin_keyboard
 
     return order_admin_keyboard(order)
 
@@ -60,7 +108,7 @@ def _order_has_payment_evidence(order):
 
 
 def _notification_configs(order):
-    from .bots import active_bot_configs
+    from .telegram_bot.notifications import active_bot_configs
 
     return [config for config in active_bot_configs(order) if config.notify_new_orders]
 
@@ -104,7 +152,7 @@ def _send_order_notification(order, *, title):
                 exc,
             )
             try:
-                from .bots import log_event
+                from .telegram_bot.order_finalizers import log_event
 
                 log_event(
                     config,

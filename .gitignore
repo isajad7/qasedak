@@ -1,0 +1,71 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Runtime data
+db.sqlite3
+db.sqlite3.*
+*.sqlite3
+*.sqlite3-*
+data/
+media/
+static_root/
+logs/
+backups/
+gunicorn.sock
+*.sock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+dist/
+build/
+wheels/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Django/local tooling
+local_settings.py
+*.log
+celerybeat-schedule
+
+# Node / frontend build tooling
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.parcel-cache/
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local deploy scratch files
+/deploy-*.sh
+deploy-*.local.sh
+*.bak
+*.backup

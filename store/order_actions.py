@@ -128,7 +128,7 @@ def sync_order_primary_client_fields(order, client):
 
 
 def provision_missing_panel_client(order):
-    from .order_services import get_available_inbound, validate_inbound_for_order
+    from .order_services import select_inbound_for_plan, validate_inbound_for_order
     from .xui_api import create_inactive_client_details
 
     ensure_legacy_order_client(order)
@@ -151,7 +151,24 @@ def provision_missing_panel_client(order):
             )
             return OrderActionResult(False, exc.messages[0])
     else:
-        inbound = get_available_inbound(order.store, required_slots=missing_count)
+        try:
+            inbound = select_inbound_for_plan(
+                order.plan,
+                store=order.store,
+                operator=order.operator,
+                purpose="activation_deferred_provisioning",
+                quantity=missing_count,
+            )
+        except ValidationError as exc:
+            logger.warning(
+                "activate_order could not select route inbound order_id=%s tracking=%s plan_id=%s operator_id=%s: %s",
+                order.pk,
+                order.order_tracking_code,
+                order.plan_id,
+                order.operator_id,
+                exc.messages[0],
+            )
+            return OrderActionResult(False, exc.messages[0])
 
     if not inbound:
         return OrderActionResult(False, "فعلاً سرور VPN فعالی برای ساخت کانفیگ در دسترس نیست.")
@@ -319,7 +336,7 @@ def activate_order(order, *, user=None, notify=True):
         logger.exception("Could not create referral GB reward for order_id=%s", order.pk)
 
     if notify:
-        from .bots import notify_order_event
+        from .telegram_bot.notifications import notify_order_event
 
         notify_order_event(order, event_type="approved")
 
@@ -491,7 +508,7 @@ def reject_order(order, *, reason="", user=None, notify=True):
         decrement_inbound_users_for_targets(delete_targets)
 
     if notify:
-        from .bots import notify_order_event
+        from .telegram_bot.notifications import notify_order_event
 
         notify_order_event(order, event_type="rejected")
 

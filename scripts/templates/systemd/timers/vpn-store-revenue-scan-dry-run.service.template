@@ -1,0 +1,8 @@
+[Unit]
+Description=VPN Store Revenue Engine dry-run scan job
+
+[Service]
+Type=oneshot
+WorkingDirectory={{INSTALL_DIR}}
+EnvironmentFile={{INSTALL_DIR}}/.env
+ExecStart={{INSTALL_DIR}}/venv/bin/python manage.py run_revenue_scan --dry-run

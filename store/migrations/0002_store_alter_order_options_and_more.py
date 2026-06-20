@@ -16,12 +16,12 @@ class Migration(migrations.Migration):
             name='Store',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('name', models.CharField(default='آزادنت', max_length=100, verbose_name='نام فروشگاه')),
-                ('english_name', models.CharField(default='AzadNet', max_length=100, verbose_name='نام انگلیسی')),
+                ('name', models.CharField(default='فروشگاه VPN', max_length=100, verbose_name='نام فروشگاه')),
+                ('english_name', models.CharField(default='VPN Store', max_length=100, verbose_name='نام انگلیسی')),
                 ('card_number', models.CharField(help_text='بدون فاصله وارد کنید', max_length=16, verbose_name='شماره کارت برای واریز')),
                 ('card_owner', models.CharField(max_length=100, verbose_name='نام صاحب کارت')),
                 ('hero_title', models.CharField(default='اینترنت آزاد حق شماست', max_length=200, verbose_name='تیتر اصلی سایت')),
-                ('hero_text', models.TextField(default='با آزادنت بدون محدودیت به دنیای وب متصل شوید.', verbose_name='متن توضیحات سایت')),
+                ('hero_text', models.TextField(default='با فروشگاه VPN بدون محدودیت به دنیای وب متصل شوید.', verbose_name='متن توضیحات سایت')),
             ],
             options={
                 'verbose_name': 'تنظیمات فروشگاه',

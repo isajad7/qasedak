@@ -4,6 +4,7 @@ from html import escape
 from django.db import transaction
 from django.utils import timezone
 
+from store.configuration_services import get_payment_sms_timezone
 from store.models import BotEventLog, Order
 
 from .models import IncomingPaymentSMS
@@ -20,7 +21,7 @@ PENDING_ORDER_STATUSES = (
 
 def find_matching_orders(amount, sms_datetime):
     if timezone.is_naive(sms_datetime):
-        sms_datetime = timezone.make_aware(sms_datetime, timezone.get_default_timezone())
+        sms_datetime = timezone.make_aware(sms_datetime, get_payment_sms_timezone())
 
     total_field = _order_total_field()
     return (
@@ -146,7 +147,7 @@ def dismiss_incoming_payment_sms(payment_sms):
 
 
 def notify_admins_about_payment_match(payment_sms, orders):
-    from store.bots import active_bot_configs, send_to_config
+    from store.telegram_bot.notifications import active_bot_configs, send_to_config
 
     text = format_payment_match_message(payment_sms, orders)
     sent_count = 0
@@ -157,7 +158,8 @@ def notify_admins_about_payment_match(payment_sms, orders):
 
 
 def format_payment_match_message(payment_sms, orders):
-    sms_time = timezone.localtime(payment_sms.sms_datetime).strftime("%Y-%m-%d %H:%M:%S %Z")
+    sms_timezone = get_payment_sms_timezone()
+    sms_time = timezone.localtime(payment_sms.sms_datetime, sms_timezone).strftime("%Y-%m-%d %H:%M:%S %Z")
     lines = [
         "<b>Bank deposit SMS matched</b>",
         "",

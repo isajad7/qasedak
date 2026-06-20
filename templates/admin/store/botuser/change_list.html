@@ -1,0 +1,11 @@
+{% extends "admin/import_export/change_list_import_export.html" %}
+{% load i18n %}
+
+{% block object-tools-items %}
+  {% if can_import_wizwiz %}
+    <a href="{{ wizwiz_restore_url }}" class="btn btn-info float-end">
+      {% trans "WizWiz Restore" %}
+    </a>
+  {% endif %}
+  {{ block.super }}
+{% endblock %}

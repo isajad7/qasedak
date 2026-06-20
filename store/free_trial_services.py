@@ -3,6 +3,7 @@ import re
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
+from html import escape
 from types import SimpleNamespace
 
 from django.core.cache import cache
@@ -25,7 +26,7 @@ FREE_TRIAL_COOLDOWN_STATUSES = (
     FreeTrialRequest.Status.DELIVERED,
 )
 FREE_TRIAL_LOCK_SECONDS = 120
-CONFIG_LINK_LOG_RE = re.compile(r"\b(?:vless|vmess|trojan)://\S+", re.IGNORECASE)
+CONFIG_LINK_LOG_RE = re.compile(r"\b(?:(?:vless|vmess|trojan|ss)://\S+|https?://[^\s<>'\"]*/sub/[^\s<>'\"]*)", re.IGNORECASE)
 
 
 @dataclass
@@ -79,6 +80,8 @@ def validate_free_trial_settings(store=None, bot_config=None):
         errors.append("اینباند تست رایگان تنظیم نشده است.")
     elif not inbound.is_active:
         errors.append("اینباند تست رایگان غیرفعال است.")
+    elif not getattr(inbound, "available_for_new_orders", True):
+        errors.append("اینباند تست رایگان برای ساخت کانفیگ جدید مجاز نیست.")
     elif panel and inbound.panel_id != panel.pk:
         errors.append("اینباند تست رایگان باید متعلق به پنل انتخاب‌شده باشد.")
 
@@ -407,6 +410,7 @@ def format_free_trial_result(result):
         f"حجم: {persian_digits(_decimal_label(traffic_gb))} گیگابایت\n"
         f"مدت اعتبار: {persian_digits(duration_hours)} ساعت\n\n"
         "لینک کانفیگ:\n"
-        f"`{config_link}`\n\n"
+        f"<pre>{escape(config_link)}</pre>\n\n"
+        "برای کپی، روی متن کانفیگ بزنید یا نگه دارید.\n\n"
         "اگر خواستید سرویس اصلی تهیه کنید، از گزینه «خرید سرویس 🛒» استفاده کنید."
     )

@@ -1,0 +1,138 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+  .wizwiz-restore {
+    max-width: 760px;
+  }
+  .wizwiz-steps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+    margin: 0 0 1rem;
+    color: var(--body-quiet-color);
+  }
+  .wizwiz-steps span {
+    border: 1px solid var(--hairline-color);
+    border-radius: 6px;
+    padding: .35rem .6rem;
+    background: var(--darkened-bg);
+  }
+  .wizwiz-done {
+    border: 1px solid var(--hairline-color);
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 1rem 0;
+    background: var(--darkened-bg);
+  }
+  .wizwiz-done h2 {
+    margin-top: 0;
+  }
+  .wizwiz-result {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: .75rem;
+    margin: 1rem 0 0;
+  }
+  .wizwiz-result div {
+    border: 1px solid var(--hairline-color);
+    border-radius: 6px;
+    padding: .75rem;
+    background: var(--body-bg);
+  }
+  .wizwiz-result strong {
+    display: block;
+    font-size: 1.45rem;
+    margin-top: .25rem;
+  }
+  .wizwiz-restore textarea {
+    width: min(100%, 720px);
+  }
+</style>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+  &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+  &rsaquo; <a href="{% url 'admin:store_botuser_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+  &rsaquo; {% translate "WizWiz Restore" %}
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main" class="wizwiz-restore">
+  <h1>{% translate "WizWiz Restore" %}</h1>
+  <div class="wizwiz-steps">
+    <span>{% translate "Upload" %}</span>
+    <span>{% translate "Import" %}</span>
+    <span>{% translate "Done" %}</span>
+  </div>
+
+  <form method="post" enctype="multipart/form-data" novalidate>
+    {% csrf_token %}
+    <input type="hidden" name="action" value="start_import">
+    {{ import_form.non_field_errors }}
+    <fieldset class="module aligned">
+      <div class="form-row">
+        {{ import_form.sql_file.errors }}
+        {{ import_form.sql_file.label_tag }}
+        {{ import_form.sql_file }}
+      </div>
+    </fieldset>
+    <div class="submit-row">
+      <input type="submit" class="default" value="{% translate 'Start Import' %}">
+    </div>
+  </form>
+
+  {% if restore_result %}
+    <div class="wizwiz-done">
+      <h2>{% translate "Done" %}</h2>
+      <div class="wizwiz-result">
+        <div>
+          <span>{% translate "Users imported" %}</span>
+          <strong>{{ restore_result.users_imported }}</strong>
+        </div>
+        <div>
+          <span>{% translate "Users existing" %}</span>
+          <strong>{{ restore_result.users_existing }}</strong>
+        </div>
+        <div>
+          <span>{% translate "Users skipped" %}</span>
+          <strong>{{ restore_result.users_skipped }}</strong>
+        </div>
+        <div>
+          <span>{% translate "Users failed" %}</span>
+          <strong>{{ restore_result.users_failed }}</strong>
+        </div>
+      </div>
+    </div>
+
+    <div class="module">
+      <h2>{% translate "Send Message" %}</h2>
+      <form method="post" novalidate>
+        {% csrf_token %}
+        <input type="hidden" name="action" value="send_message">
+        {{ message_form.non_field_errors }}
+        <div class="form-row">
+          {{ message_form.text.errors }}
+          {{ message_form.text.label_tag }}
+          {{ message_form.text }}
+        </div>
+        <div class="submit-row">
+          <input type="submit" class="default" value="{% translate 'Send Message' %}">
+        </div>
+      </form>
+      {% if message_result %}
+        <p class="help">
+          {% blocktranslate with sent=message_result.sent failed=message_result.failed skipped=message_result.skipped blocked=message_result.blocked %}
+            Message result: {{ sent }} sent, {{ failed }} failed, {{ skipped }} skipped, {{ blocked }} blocked.
+          {% endblocktranslate %}
+        </p>
+      {% endif %}
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

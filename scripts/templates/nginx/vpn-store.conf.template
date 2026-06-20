@@ -1,0 +1,27 @@
+server {
+    listen 80;
+    server_name {{NGINX_SERVER_NAME}} {{EXTRA_DOMAINS}};
+
+    client_max_body_size 10m;
+
+    location /static/ {
+        alias {{INSTALL_DIR}}/static_root/;
+        access_log off;
+        expires 7d;
+    }
+
+    location /media/ {
+        alias {{INSTALL_DIR}}/media/;
+        expires 1h;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:{{GUNICORN_PORT}};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_redirect off;
+    }
+}
