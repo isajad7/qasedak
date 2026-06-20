@@ -12,6 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/instal
 
 The installer asks what it needs: install path, domain/TLS, admin user, database path, systemd/nginx, and doctor check.
 It also installs Python 3.12/venv if the server Python is older.
+If an old/partial install exists, it warns before doing anything destructive.
 
 Default install path is:
 
@@ -31,6 +32,12 @@ If you installed somewhere else:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/update_from_github.sh | sudo env QASEDAK_INSTALL_DIR=/your/path bash
+```
+
+## Delete
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/uninstall_from_github.sh | sudo bash
 ```
 
 ## After Install

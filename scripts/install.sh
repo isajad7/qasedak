@@ -32,6 +32,7 @@ ENABLE_SYSTEMD=0
 ENABLE_NGINX=0
 ENABLE_TLS=0
 RUN_LIVE_CHECKS=0
+CLEAN_EXISTING=0
 SERVICE_PREFIX="vpn-store"
 WEB_SERVICE_NAME="vpn-store-web"
 TELEGRAM_SERVICE_NAME="vpn-store-telegram"
@@ -41,6 +42,14 @@ SERVICE_USER="root"
 SERVICE_GROUP="root"
 SERVER_IP=""
 PYTHON_BIN=""
+KNOWN_TIMERS=(
+  renewal-reminders
+  panel-health
+  daily-admin-report
+  panel-usage-snapshots
+  panel-daily-usage
+  revenue-scan-dry-run
+)
 
 on_error() {
   local line="$1"
@@ -62,6 +71,7 @@ Options:
   --advanced         Ask optional Store, payment, Telegram, X-UI, inbound, and plan prompts.
   --config FILE      Use an existing install config JSON instead of interactive prompts.
   --live-checks      Explicitly run Telegram/X-UI live checks during bootstrap and doctor.
+  --clean-existing   Remove detected previous Qasedak install traces before installing.
   --with-systemd     Render, enable, and start systemd services.
   --without-systemd  Skip systemd services.
   --with-nginx       Render and enable nginx HTTP reverse-proxy config.
@@ -232,6 +242,9 @@ parse_args() {
         ;;
       --live-checks)
         RUN_LIVE_CHECKS=1
+        ;;
+      --clean-existing)
+        CLEAN_EXISTING=1
         ;;
       --with-systemd)
         SYSTEMD_MODE="with"
@@ -580,9 +593,103 @@ precheck_tls_dns() {
   fi
 }
 
+unit_exists() {
+  local unit="$1"
+  [[ -e "/etc/systemd/system/$unit" || -L "/etc/systemd/system/$unit" ]] && return 0
+  command -v systemctl >/dev/null 2>&1 || return 1
+  systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q .
+}
+
+nginx_file_paths() {
+  printf '%s\n' \
+    "/etc/nginx/sites-enabled/$NGINX_SITE_NAME.conf" \
+    "/etc/nginx/sites-available/$NGINX_SITE_NAME.conf"
+}
+
+systemd_units() {
+  local timer=""
+  printf '%s\n' "$WEB_SERVICE_NAME.service" "$TELEGRAM_SERVICE_NAME.service"
+  for timer in "${KNOWN_TIMERS[@]}"; do
+    printf 'vpn-store-%s.timer\n' "$timer"
+    printf 'vpn-store-%s.service\n' "$timer"
+  done
+}
+
+detect_existing_install_markers() {
+  local path=""
+  local unit=""
+  local paths=()
+  local units=()
+  if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
+    printf '%s\n' "$INSTALL_DIR"
+  fi
+  mapfile -t paths < <(nginx_file_paths)
+  for path in "${paths[@]}"; do
+    [[ -e "$path" || -L "$path" ]] && printf '%s\n' "$path"
+  done
+  mapfile -t units < <(systemd_units)
+  for unit in "${units[@]}"; do
+    unit_exists "$unit" && printf '/etc/systemd/system/%s\n' "$unit"
+  done
+  return 0
+}
+
+cleanup_existing_install() {
+  local uninstall_script="$REPO_DIR/scripts/uninstall.sh"
+  [[ -f "$uninstall_script" ]] || die "uninstall.sh not found: $uninstall_script"
+  local args=(
+    "$uninstall_script"
+    --install-dir "$INSTALL_DIR"
+    --yes
+    --web-service-name "$WEB_SERVICE_NAME"
+    --telegram-service-name "$TELEGRAM_SERVICE_NAME"
+    --nginx-site-name "$NGINX_SITE_NAME"
+  )
+  if (( DRY_RUN )); then
+    args+=(--dry-run)
+  fi
+  bash "${args[@]}"
+}
+
+handle_existing_install() {
+  local markers=()
+  mapfile -t markers < <(detect_existing_install_markers)
+  if [[ "${#markers[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  warn "Previous Qasedak install traces were detected."
+  printf 'Detected traces:\n'
+  printf '  %s\n' "${markers[@]}"
+  warn "A fresh install will not overwrite an existing/partial install silently."
+  if (( DRY_RUN )); then
+    log "DRY-RUN: a real install would ask to remove these traces or stop."
+    if (( CLEAN_EXISTING )); then
+      cleanup_existing_install
+    fi
+    return 0
+  fi
+
+  if (( YES && ! CLEAN_EXISTING )); then
+    die "Existing install detected. Run update.sh, run scripts/uninstall.sh first, or pass --clean-existing."
+  fi
+
+  if (( CLEAN_EXISTING )); then
+    if (( ! YES )); then
+      confirm "Delete the existing Qasedak install before continuing? This removes database/media/backups inside $INSTALL_DIR." "no" || die "Install cancelled."
+    fi
+    cleanup_existing_install
+    return 0
+  fi
+
+  confirm "Delete the existing Qasedak install before continuing? This removes database/media/backups inside $INSTALL_DIR." "no" || die "Install cancelled. Use the update command for an existing install."
+  cleanup_existing_install
+}
+
 collect_config() {
   if [[ -n "$CONFIG_PATH" ]]; then
     [[ -f "$CONFIG_PATH" ]] || die "Config file not found: $CONFIG_PATH"
+    handle_existing_install
     mapfile -t config_metadata < <(load_config_metadata "$CONFIG_PATH")
     APP_DOMAIN="${config_metadata[0]:-}"
     APP_ENABLE_TLS="${config_metadata[1]:-0}"
@@ -593,6 +700,7 @@ collect_config() {
   fi
 
   INSTALL_DIR="$(prompt_value "Install directory" "$INSTALL_DIR" "yes")"
+  handle_existing_install
   APP_DOMAIN="$(prompt_value "Public domain (optional)" "" "no")"
   APP_ENABLE_TLS="0"
   resolve_optional_layers

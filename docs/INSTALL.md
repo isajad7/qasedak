@@ -18,6 +18,7 @@ The installer asks for the needed basics:
 - non-live doctor check
 
 It also installs Python 3.12/venv if the server Python is older.
+If an old/partial install exists, it warns before doing anything destructive.
 
 Default install directory:
 
@@ -51,4 +52,10 @@ Live Telegram/X-UI checks are optional:
 
 ```bash
 sudo /opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --live-bot --live-xui --no-fail
+```
+
+## Delete
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/uninstall_from_github.sh | sudo bash
 ```
