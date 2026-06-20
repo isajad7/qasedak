@@ -165,13 +165,13 @@ prompt_secret_or_generate() {
   [[ -t 0 ]] || die "$label requires an interactive terminal or --yes."
 
   read -r -s -p "$label (leave empty to auto-generate): " value
-  printf '\n'
+  printf '\n' >&2
   if [[ -z "$value" ]]; then
     printf '%s' "__GENERATE__"
     return 0
   fi
   read -r -s -p "Confirm $label: " confirm_value
-  printf '\n'
+  printf '\n' >&2
   [[ "$value" == "$confirm_value" ]] || die "$label confirmation did not match."
   printf '%s' "$value"
 }
@@ -185,7 +185,7 @@ prompt_secret_required() {
   fi
   [[ -t 0 ]] || die "$label requires an interactive terminal."
   read -r -s -p "$label: " value
-  printf '\n'
+  printf '\n' >&2
   [[ -n "$value" ]] || die "$label is required."
   printf '%s' "$value"
 }
