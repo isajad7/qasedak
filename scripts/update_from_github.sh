@@ -34,6 +34,18 @@ ensure_git() {
   apt-get install -y git ca-certificates
 }
 
+run_child_script() {
+  local script_path="$1"
+  shift
+  if [[ -t 0 ]]; then
+    bash "$script_path" "$@"
+  elif [[ -r /dev/tty ]]; then
+    bash "$script_path" "$@" < /dev/tty
+  else
+    bash "$script_path" "$@"
+  fi
+}
+
 main() {
   ensure_root "$@"
   ensure_git
@@ -44,7 +56,7 @@ main() {
 
   log "Downloading latest Qasedak source..."
   git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$tmpdir/qasedak"
-  bash "$tmpdir/qasedak/scripts/update.sh" \
+  run_child_script "$tmpdir/qasedak/scripts/update.sh" \
     --install-dir "$INSTALL_DIR" \
     --source-dir "$tmpdir/qasedak" \
     --yes \
