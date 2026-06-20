@@ -70,6 +70,5 @@ sudo /opt/qasedak/scripts/backup.sh --install-dir /opt/qasedak --output-dir /opt
 
 ## Notes
 
-- Do not commit `.env`, `install.config.json`, database, media, backups, logs, or virtualenv files.
 - Telegram and X-UI live checks are opt-in.
 - Revenue Engine starts enabled but dry-run by default.
