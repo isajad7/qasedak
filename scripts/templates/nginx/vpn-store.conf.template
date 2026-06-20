@@ -1,5 +1,5 @@
 server {
-    listen 80;
+    listen {{NGINX_LISTEN}};
     server_name {{NGINX_SERVER_NAME}} {{EXTRA_DOMAINS}};
 
     client_max_body_size 10m;

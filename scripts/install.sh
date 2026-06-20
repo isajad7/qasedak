@@ -1280,8 +1280,11 @@ render_template() {
   local target="$2"
   local mode="${3:-0644}"
   local server_name="_"
+  local nginx_listen="80"
   if [[ -n "${APP_DOMAIN:-}" ]]; then
     server_name="$APP_DOMAIN"
+  else
+    nginx_listen="80 default_server"
   fi
 
   if (( DRY_RUN )); then
@@ -1302,10 +1305,26 @@ render_template() {
     -e "s|{{DOMAIN}}|$(sed_escape "${APP_DOMAIN:-}")|g" \
     -e "s|{{EXTRA_DOMAINS}}||g" \
     -e "s|{{NGINX_SERVER_NAME}}|$(sed_escape "$server_name")|g" \
+    -e "s|{{NGINX_LISTEN}}|$(sed_escape "$nginx_listen")|g" \
     "$template" > "$tmp"
   backup_existing_path "$target"
   run_cmd "${SUDO_CMD[@]}" install -m "$mode" "$tmp" "$target"
   rm -f "$tmp"
+}
+
+disable_nginx_default_site_for_ip_mode() {
+  if [[ -n "${APP_DOMAIN:-}" ]]; then
+    return 0
+  fi
+  local default_enabled="/etc/nginx/sites-enabled/default"
+  if (( DRY_RUN )); then
+    log "DRY-RUN: would disable nginx default site for IP-only install if present: $default_enabled"
+    return 0
+  fi
+  if [[ -e "$default_enabled" || -L "$default_enabled" ]]; then
+    log "Disabling nginx default site so the server IP opens Qasedak."
+    run_cmd "${SUDO_CMD[@]}" rm -f "$default_enabled"
+  fi
 }
 
 configure_systemd() {
@@ -1337,6 +1356,7 @@ configure_nginx() {
   available_path="/etc/nginx/sites-available/$NGINX_SITE_NAME.conf"
   enabled_path="/etc/nginx/sites-enabled/$NGINX_SITE_NAME.conf"
   render_template "$nginx_template" "$available_path" "0644"
+  disable_nginx_default_site_for_ip_mode
   if (( DRY_RUN )); then
     log "DRY-RUN: would symlink $available_path to $enabled_path."
   else
