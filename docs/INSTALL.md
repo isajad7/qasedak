@@ -3,7 +3,7 @@
 Use one command on a fresh Ubuntu/Debian server:
 
 ```bash
-sudo bash -c 'set -e; apt-get update; apt-get install -y git; tmp=$(mktemp -d); git clone https://github.com/isajad7/qasedak.git "$tmp/qasedak"; bash "$tmp/qasedak/scripts/install.sh"'
+curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/install_from_github.sh | sudo bash
 ```
 
 The installer asks for the needed basics:
@@ -30,13 +30,13 @@ After install, open Django Admin and complete [Post-Install Setup](POST_INSTALL_
 Only use this if you want Telegram/X-UI/Plan/Payment questions during install:
 
 ```bash
-sudo bash -c 'set -e; apt-get update; apt-get install -y git; tmp=$(mktemp -d); git clone https://github.com/isajad7/qasedak.git "$tmp/qasedak"; bash "$tmp/qasedak/scripts/install.sh" --advanced'
+curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/install_from_github.sh | sudo bash -s -- --advanced
 ```
 
 ## Existing Config
 
 ```bash
-sudo bash -c 'set -e; apt-get update; apt-get install -y git; tmp=$(mktemp -d); git clone https://github.com/isajad7/qasedak.git "$tmp/qasedak"; bash "$tmp/qasedak/scripts/install.sh" --config /root/install.config.json'
+curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/install_from_github.sh | sudo bash -s -- --config /root/install.config.json
 ```
 
 ## Doctor
