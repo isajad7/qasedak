@@ -1,6 +1,6 @@
 {
   "app": {
-    "install_dir": "/opt/vpn-store",
+    "install_dir": "/opt/qasedak",
     "domain": "example.com",
     "enable_tls": false,
     "timezone": "Asia/Tehran",
@@ -9,11 +9,11 @@
   "admin": {
     "username": "admin",
     "email": "admin@example.com",
-    "password_env": "VPN_STORE_ADMIN_PASSWORD"
+    "password_env": "QASEDAK_ADMIN_PASSWORD"
   },
   "database": {
     "engine": "sqlite",
-    "sqlite_path": "/opt/vpn-store/data/db.sqlite3"
+    "sqlite_path": "/opt/qasedak/data/db.sqlite3"
   },
   "store": {
     "slug": "default-store",
@@ -52,7 +52,7 @@
     "name": "Primary X-UI panel",
     "panel_url": "https://panel.example.com",
     "username": "xui-admin",
-    "password_env": "VPN_STORE_XUI_PASSWORD",
+    "password_env": "QASEDAK_XUI_PASSWORD",
     "proxy_url": "",
     "inbounds": [
       {

@@ -770,6 +770,29 @@ class IntegrationCheckCommandTests(TestCase):
         self.assertIn("SMSFORWARDER_WEBHOOK_TOKEN is missing", output)
 
     @override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="")
+    def test_fresh_minimal_install_reports_setup_warnings_not_errors(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        Store.objects.create(
+            name="Qasedak",
+            english_name="Qasedak",
+            card_number="0000000000000000",
+            card_owner="Configure Payment Owner",
+        )
+        stdout = StringIO()
+
+        call_command("check_integrations", "--no-fail", stdout=stdout)
+
+        output = stdout.getvalue()
+        self.assertIn("Setup incomplete: no active X-UI panel exists yet", output)
+        self.assertIn("Setup incomplete: no active inbound exists yet", output)
+        self.assertIn("Setup incomplete: no active Panel and no active Plan exist yet", output)
+        self.assertIn("SMSForwarder webhook token is not configured yet", output)
+        self.assertIn("ERROR=0", output)
+
+    @override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="")
     @patch("store.bots.requests.post", return_value=DummyBotResponse({"ok": True, "result": {"username": "vpn_store_bot"}}))
     def test_complete_configuration_passes(self, _post_mock):
         from io import StringIO
@@ -14089,6 +14112,40 @@ class BootstrapInstallCommandTests(TestCase):
             },
         }
 
+    def minimal_config(self):
+        return {
+            "app": {
+                "install_dir": "/opt/qasedak",
+                "domain": "",
+                "enable_tls": False,
+                "timezone": "Asia/Tehran",
+                "language": "fa",
+            },
+            "admin": {
+                "username": "qasedak-admin",
+                "email": "",
+                "password": self.admin_password,
+            },
+            "database": {
+                "engine": "sqlite",
+                "sqlite_path": "/opt/qasedak/data/db.sqlite3",
+            },
+            "store": {
+                "name": "Qasedak",
+                "english_name": "Qasedak",
+            },
+            "telegram": {
+                "enabled": False,
+            },
+            "xui": {
+                "configure_now": False,
+            },
+            "revenue_engine": {
+                "enabled": True,
+                "dry_run": True,
+            },
+        }
+
     def call_bootstrap(self, config, *args):
         out = StringIO()
         err = StringIO()
@@ -14137,6 +14194,28 @@ class BootstrapInstallCommandTests(TestCase):
         store = Store.objects.get(slug="bootstrap-store")
         self.assertTrue(store.revenue_engine_enabled)
         self.assertTrue(store.revenue_engine_dry_run)
+
+    def test_minimal_config_creates_admin_store_only_and_reports_setup_incomplete(self):
+        config = self.minimal_config()
+
+        out, err = self.call_bootstrap(config, "--yes")
+
+        User = get_user_model()
+        user = User.objects.get(username="qasedak-admin")
+        self.assertTrue(user.is_staff)
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.check_password(self.admin_password))
+        store = Store.objects.get(name="Qasedak")
+        self.assertTrue(store.revenue_engine_enabled)
+        self.assertTrue(store.revenue_engine_dry_run)
+        self.assertEqual(BotConfiguration.objects.count(), 0)
+        self.assertEqual(Panel.objects.count(), 0)
+        self.assertEqual(Inbound.objects.count(), 0)
+        self.assertEqual(Plan.objects.count(), 0)
+        self.assertEqual(PlanInboundRoute.objects.count(), 0)
+        self.assertIn("install_status=complete", out)
+        self.assertIn("business_setup=incomplete", out)
+        self.assertNotIn(self.admin_password, out + err)
 
     def test_rerun_is_idempotent(self):
         config = self.base_config(telegram=True, xui=True)

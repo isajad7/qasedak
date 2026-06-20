@@ -98,5 +98,15 @@ class Command(BaseCommand):
         for warning in warnings:
             self.stdout.write(self.style.WARNING(f"warning: {warning}"))
 
+        self.stdout.write(self.style.SUCCESS("install_status=complete"))
+        if summary.get("business_setup_incomplete"):
+            self.stdout.write(
+                self.style.WARNING(
+                    "business_setup=incomplete; open Django Admin to configure Telegram, Panel, Plans, and Payment."
+                )
+            )
+        else:
+            self.stdout.write(self.style.SUCCESS("business_setup=complete"))
+
         live = "yes" if summary.get("live_checks_run") else "no"
         self.stdout.write(f"live_checks_run={live}")

@@ -34,6 +34,10 @@ from store.models import (
 from store.renewal_reminder_services import get_active_clients_for_reminders, normalize_reminder_days
 
 
+SAFE_PLACEHOLDER_CARD_NUMBER = "0000000000000000"
+SAFE_PLACEHOLDER_CARD_OWNER = "Configure Payment Owner"
+
+
 @dataclass
 class CheckItem:
     level: str
@@ -174,16 +178,30 @@ class Command(BaseCommand):
         self.ok("Store", f"{len(stores)} active store(s) found.")
         for store in stores:
             subject = f"Store #{store.pk} {store.name}"
+            setup_incomplete = self.store_setup_incomplete(store)
             if not (store.name or "").strip():
                 self.error(subject, "Store name is missing.")
-            if not (store.card_number or "").strip():
-                self.error(subject, "Card number is missing.")
-            elif not str(store.card_number).isdigit() or len(str(store.card_number)) != 16:
+            card_number = str(store.card_number or "").strip()
+            if not card_number:
+                if setup_incomplete:
+                    self.warning(subject, "Card number is missing; complete payment setup in Django Admin.")
+                else:
+                    self.error(subject, "Card number is missing.")
+            elif not card_number.isdigit() or len(card_number) != 16:
                 self.warning(subject, "Card number should be exactly 16 digits.")
+            elif card_number == SAFE_PLACEHOLDER_CARD_NUMBER:
+                self.warning(subject, "Payment card number still uses the installer placeholder.")
             else:
                 self.ok(subject, "Payment card number is configured.")
-            if not (store.card_owner or "").strip():
-                self.error(subject, "Card owner is missing.")
+
+            card_owner = (store.card_owner or "").strip()
+            if not card_owner:
+                if setup_incomplete:
+                    self.warning(subject, "Card owner is missing; complete payment setup in Django Admin.")
+                else:
+                    self.error(subject, "Card owner is missing.")
+            elif card_owner == SAFE_PLACEHOLDER_CARD_OWNER:
+                self.warning(subject, "Payment card owner still uses the installer placeholder.")
             else:
                 self.ok(subject, "Payment card owner is configured.")
 
@@ -505,7 +523,12 @@ class Command(BaseCommand):
     def check_panels(self):
         panels = list(Panel.objects.filter(is_active=True).order_by("pk"))
         if not panels:
-            self.error("Panel", "No active X-UI panel exists.")
+            if self.global_setup_incomplete():
+                self.warning("Panel", "Setup incomplete: no active X-UI panel exists yet.")
+            elif self.has_any_active_sellable_plan():
+                self.error("Panel", "No active X-UI panel exists for active sellable plans.")
+            else:
+                self.warning("Panel", "No active X-UI panel exists.")
             return
 
         self.ok("Panel", f"{len(panels)} active X-UI panel(s) found.")
@@ -563,7 +586,12 @@ class Command(BaseCommand):
     def check_inbounds(self):
         inbounds = list(Inbound.objects.filter(is_active=True).select_related("panel").order_by("pk"))
         if not inbounds:
-            self.error("Inbound", "No active inbound exists.")
+            if self.global_setup_incomplete():
+                self.warning("Inbound", "Setup incomplete: no active inbound exists yet.")
+            elif self.has_any_active_sellable_plan():
+                self.error("Inbound", "No active inbound exists for active sellable plans.")
+            else:
+                self.warning("Inbound", "No active inbound exists.")
             return
 
         self.ok("Inbound", f"{len(inbounds)} active inbound(s) found.")
@@ -618,8 +646,10 @@ class Command(BaseCommand):
 
         if locally_available_for_sales:
             self.ok("Inbound", f"{locally_available_for_sales} inbound(s) are locally available for new orders.")
-        else:
+        elif self.has_any_active_sellable_plan():
             self.error("Inbound", "No active inbound is available for new orders.")
+        else:
+            self.warning("Inbound", "No active inbound is available for new orders.")
         if self.live_xui:
             if live_available_for_sales:
                 self.ok("Inbound", f"{live_available_for_sales} inbound(s) available for new orders exist in X-UI.")
@@ -716,6 +746,17 @@ class Command(BaseCommand):
                 .select_related("store", "plan", "operator", "inbound", "inbound__panel")
                 .order_by("plan_id", "operator_id", "priority", "pk")
             )
+            if not plans and self.store_setup_incomplete(store):
+                self.warning(subject, "Setup incomplete: no active Panel and no active Plan exist yet.")
+                self.ok(
+                    subject,
+                    (
+                        f"route_summary active_plans=0 routed_plans=0 "
+                        f"missing_route_plans=0 active_routes={len(active_routes)} invalid_routes=0"
+                    ),
+                )
+                continue
+
             invalid_routes = []
             for route in active_routes:
                 valid, message = self.route_is_valid_for_store(route, store, require_active_plan=False)
@@ -750,7 +791,16 @@ class Command(BaseCommand):
                     missing_routes.append(f"plan #{plan.pk} {plan.name}")
 
             fallback_enabled = bool(getattr(store, "allow_global_inbound_fallback", True))
-            if missing_routes and fallback_enabled:
+            if missing_routes and not self.store_has_available_sales_inbound(store):
+                self.error(
+                    subject,
+                    (
+                        f"{len(missing_routes)} active plan/operator route(s) are missing "
+                        "and no active sales inbound is available. Examples: "
+                        + "; ".join(missing_routes[:5])
+                    ),
+                )
+            elif missing_routes and fallback_enabled:
                 self.warning(
                     subject,
                     (
@@ -996,10 +1046,16 @@ class Command(BaseCommand):
                 "SMSFORWARDER_WEBHOOK_TOKEN uses legacy settings/env fallback; move it to Store admin.",
             )
         else:
-            self.error(
-                "SMS webhook",
-                "SMSFORWARDER_WEBHOOK_TOKEN is missing in DB/admin and legacy settings; webhook returns 503.",
-            )
+            if self.global_setup_incomplete():
+                self.warning(
+                    "SMS webhook",
+                    "SMSForwarder webhook token is not configured yet; complete payment setup in Django Admin.",
+                )
+            else:
+                self.error(
+                    "SMS webhook",
+                    "SMSFORWARDER_WEBHOOK_TOKEN is missing in DB/admin and legacy settings; webhook returns 503.",
+                )
 
     def check_legacy_wizwiz_imports(self):
         latest_job = LegacyWizWizImportJob.objects.order_by("-created_at").first()
@@ -1053,3 +1109,42 @@ class Command(BaseCommand):
     def valid_url(self, value):
         parsed = urlsplit(str(value or ""))
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    def has_any_active_sellable_plan(self):
+        return (
+            Plan.objects.filter(is_active=True, is_public=True, is_custom_volume=False).exists()
+            or Store.objects.filter(is_active=True, custom_volume_price_per_gb__gt=0).exists()
+        )
+
+    def store_has_active_sellable_plan(self, store):
+        if (
+            Plan.objects.filter(
+                Q(store=store) | Q(store__isnull=True),
+                is_active=True,
+                is_public=True,
+                is_custom_volume=False,
+            ).exists()
+        ):
+            return True
+        try:
+            custom_price = Decimal(str(getattr(store, "custom_volume_price_per_gb", 0) or 0))
+        except (InvalidOperation, TypeError, ValueError):
+            custom_price = Decimal("0")
+        return custom_price > 0
+
+    def store_has_active_panel(self, store):
+        return Panel.objects.filter(Q(store=store) | Q(store__isnull=True), is_active=True).exists()
+
+    def store_has_available_sales_inbound(self, store):
+        return Inbound.objects.filter(
+            Q(panel__store=store) | Q(panel__store__isnull=True),
+            panel__is_active=True,
+            is_active=True,
+            available_for_new_orders=True,
+        ).exists()
+
+    def store_setup_incomplete(self, store):
+        return not self.store_has_active_sellable_plan(store) and not self.store_has_active_panel(store)
+
+    def global_setup_incomplete(self):
+        return not self.has_any_active_sellable_plan() and not Panel.objects.filter(is_active=True).exists()

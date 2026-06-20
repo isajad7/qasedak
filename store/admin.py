@@ -19,7 +19,7 @@ from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils.http import urlencode
 from django.utils import timezone
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from django.utils.translation import gettext_lazy as _
 from import_export import fields, resources
 from import_export.admin import ImportExportModelAdmin
@@ -310,6 +310,7 @@ class StoreAdmin(ImportExportModelAdmin):
     prepopulated_fields = {"slug": ("english_name",)}
     autocomplete_fields = ("free_trial_panel", "free_trial_inbound")
     readonly_fields = (
+        "post_install_setup_checklist",
         "sms_webhook_token_status",
         "smsforwarder_webhook_token_hint",
         "sms_webhook_token_rotation_help",
@@ -318,13 +319,27 @@ class StoreAdmin(ImportExportModelAdmin):
     def get_fieldsets(self, request, obj=None):
         fieldsets = []
         revenue_fields = set(self.revenue_engine_fields)
+        setup_fields = {"post_install_setup_checklist"}
         for title, options in super().get_fieldsets(request, obj):
             fields = options.get("fields", ())
-            filtered_fields = tuple(field for field in fields if field not in revenue_fields)
+            filtered_fields = tuple(field for field in fields if field not in revenue_fields and field not in setup_fields)
             if filtered_fields:
                 next_options = dict(options)
                 next_options["fields"] = filtered_fields
                 fieldsets.append((title, next_options))
+        fieldsets.insert(
+            0,
+            (
+                _("Post-install setup checklist"),
+                {
+                    "fields": ("post_install_setup_checklist",),
+                    "description": _(
+                        "After a minimal install, complete Store identity, payment/card, Telegram, Panel, Plans, "
+                        "routes, doctor checks, test purchase, and Revenue Engine dry-run review."
+                    ),
+                },
+            ),
+        )
         fieldsets.append(
             (
                 _("Revenue Engine Controls"),
@@ -350,6 +365,17 @@ class StoreAdmin(ImportExportModelAdmin):
     @admin.display(description=_("SMS token rotation"))
     def sms_webhook_token_rotation_help(self, obj):
         return _("پس از تغییر توکن، همین مقدار را در اپ SMS Forwarder هم تنظیم کنید.")
+
+    @admin.display(description=_("Post-install setup checklist"))
+    def post_install_setup_checklist(self, obj):
+        items = (
+            "Review Store identity and support channels.",
+            "Configure payment/card and SMSForwarder webhook settings.",
+            "Create or enable Telegram BotConfiguration and optional proxy/force-join settings.",
+            "Create X-UI/Sanaei Panel, sync or create Inbound, then create Plan and PlanInboundRoute.",
+            "Run doctor/check_integrations, test a purchase, then review Revenue Engine dry-run logs.",
+        )
+        return format_html("<ol>{}</ol>", format_html_join("", "<li>{}</li>", ((item,) for item in items)))
 
     def save_model(self, request, obj, form, change):
         token_changed = bool(form.cleaned_data.get("new_smsforwarder_webhook_token"))

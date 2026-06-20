@@ -7,9 +7,13 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 DRY_RUN=0
 YES=0
+ADVANCED=0
 INSTALL_DIR=""
 CONFIG_PATH=""
-DEFAULT_INSTALL_DIR="/opt/vpn-store"
+DEFAULT_INSTALL_DIR="/opt/qasedak"
+ADMIN_PASSWORD_ENV_NAME="QASEDAK_ADMIN_PASSWORD"
+TELEGRAM_BOT_TOKEN_ENV_NAME="QASEDAK_TELEGRAM_BOT_TOKEN"
+XUI_PASSWORD_ENV_NAME="QASEDAK_XUI_PASSWORD"
 APT_PACKAGES=(
   python3
   python3-venv
@@ -30,6 +34,7 @@ TLS_MODE="auto"
 ENABLE_SYSTEMD=0
 ENABLE_NGINX=0
 ENABLE_TLS=0
+RUN_LIVE_CHECKS=0
 SERVICE_PREFIX="vpn-store"
 WEB_SERVICE_NAME="vpn-store-web"
 TELEGRAM_SERVICE_NAME="vpn-store-telegram"
@@ -49,13 +54,16 @@ trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/install.sh [--dry-run] [--yes] [--install-dir DIR] [--config install.config.json]
+  scripts/install.sh [--dry-run] [--yes] [--install-dir DIR] [--advanced]
+  scripts/install.sh [--dry-run] [--yes] [--install-dir DIR] --config install.config.json
 
 Options:
   --dry-run          Print planned actions only. No files, packages, DB, or network writes.
   --yes              Accept prompts and use safe defaults where prompting is needed.
-  --install-dir DIR  Install target directory. Default: /opt/vpn-store
+  --install-dir DIR  Install target directory. Default: /opt/qasedak
+  --advanced         Ask optional Store, payment, Telegram, X-UI, inbound, and plan prompts.
   --config FILE      Use an existing install config JSON instead of interactive prompts.
+  --live-checks      Explicitly run Telegram/X-UI live checks during bootstrap and doctor.
   --with-systemd     Render, enable, and start systemd services.
   --without-systemd  Skip systemd services.
   --with-nginx       Render and enable nginx HTTP reverse-proxy config.
@@ -211,6 +219,9 @@ parse_args() {
       --yes)
         YES=1
         ;;
+      --advanced)
+        ADVANCED=1
+        ;;
       --install-dir)
         shift
         [[ $# -gt 0 ]] || die "--install-dir requires a value."
@@ -220,6 +231,9 @@ parse_args() {
         shift
         [[ $# -gt 0 ]] || die "--config requires a value."
         CONFIG_PATH="$1"
+        ;;
+      --live-checks)
+        RUN_LIVE_CHECKS=1
         ;;
       --with-systemd)
         SYSTEMD_MODE="with"
@@ -511,45 +525,33 @@ precheck_tls_dns() {
 }
 
 collect_config() {
-  RUN_DOCTOR="$(prompt_yes_no "Run non-live doctor after install?" "yes")"
-  RUN_LIVE_CHECKS="$(prompt_yes_no "Run live Telegram/X-UI checks? Default is no." "no")"
-
   if [[ -n "$CONFIG_PATH" ]]; then
     [[ -f "$CONFIG_PATH" ]] || die "Config file not found: $CONFIG_PATH"
     mapfile -t config_metadata < <(load_config_metadata "$CONFIG_PATH")
     APP_DOMAIN="${config_metadata[0]:-}"
     APP_ENABLE_TLS="${config_metadata[1]:-0}"
     resolve_optional_layers
+    RUN_DOCTOR="$(prompt_yes_no "Run non-live doctor after install?" "yes")"
     log "Using provided install config: $CONFIG_PATH"
     return 0
   fi
 
   INSTALL_DIR="$(prompt_value "Install directory" "$INSTALL_DIR" "yes")"
   APP_DOMAIN="$(prompt_value "Public domain (optional)" "" "no")"
-  if [[ -z "$APP_DOMAIN" && "$YES" -eq 0 ]]; then
-    confirm "Continue without a domain?" "no" || die "Install cancelled because no domain was provided."
-  fi
   APP_ENABLE_TLS="0"
   resolve_optional_layers
-  APP_TIMEZONE="$(prompt_value "Timezone" "Asia/Tehran" "yes")"
-  APP_LANGUAGE="$(prompt_value "Language" "fa" "yes")"
+  APP_TIMEZONE="Asia/Tehran"
+  APP_LANGUAGE="fa"
   ADMIN_USERNAME="$(prompt_value "Admin username" "admin" "yes")"
-  ADMIN_EMAIL="$(prompt_value "Admin email (optional)" "admin@example.com" "no")"
+  ADMIN_EMAIL="$(prompt_value "Admin email (optional)" "" "no")"
   ADMIN_PASSWORD="$(prompt_secret_or_generate "Admin password")"
   DATABASE_ENGINE="sqlite"
   SQLITE_PATH="$(prompt_value "SQLite database path" "$INSTALL_DIR/data/db.sqlite3" "yes")"
-  STORE_NAME="$(prompt_value "Store name" "VPN Store" "yes")"
-  STORE_ENGLISH_NAME="$(prompt_value "Store English name" "$STORE_NAME" "yes")"
-
-  if [[ "$(prompt_yes_no "Configure payment/card settings now? Optional." "no")" == "1" ]]; then
-    STORE_CARD_NUMBER="$(prompt_value "Manual payment card number" "" "no")"
-    STORE_CARD_OWNER="$(prompt_value "Manual payment card owner" "" "no")"
-  else
-    STORE_CARD_NUMBER="0000000000000000"
-    STORE_CARD_OWNER="Configure Payment Owner"
-  fi
-
-  TELEGRAM_ENABLED="$(prompt_yes_no "Enable Telegram bot?" "no")"
+  STORE_NAME="Qasedak"
+  STORE_ENGLISH_NAME="Qasedak"
+  STORE_CARD_NUMBER=""
+  STORE_CARD_OWNER=""
+  TELEGRAM_ENABLED="0"
   TELEGRAM_BOT_TOKEN=""
   TELEGRAM_BOT_USERNAME=""
   TELEGRAM_ADMIN_IDS=""
@@ -559,22 +561,7 @@ collect_config() {
   TELEGRAM_PROXY_PORT=""
   TELEGRAM_PROXY_USERNAME=""
   TELEGRAM_PROXY_PASSWORD=""
-  if [[ "$TELEGRAM_ENABLED" == "1" ]]; then
-    TELEGRAM_BOT_TOKEN="$(prompt_secret_required "Telegram bot token")"
-    TELEGRAM_BOT_USERNAME="$(prompt_value "Telegram bot username without @" "" "yes")"
-    TELEGRAM_ADMIN_IDS="$(prompt_value "Telegram admin IDs, comma-separated" "" "yes")"
-    TELEGRAM_PROXY_ENABLED="$(prompt_yes_no "Use Telegram proxy?" "no")"
-    if [[ "$TELEGRAM_PROXY_ENABLED" == "1" ]]; then
-      TELEGRAM_PROXY_PROTOCOL="$(prompt_value "Telegram proxy protocol" "http" "yes")"
-      TELEGRAM_PROXY_HOST="$(prompt_value "Telegram proxy host" "" "yes")"
-      TELEGRAM_PROXY_PORT="$(prompt_value "Telegram proxy port" "" "yes")"
-      TELEGRAM_PROXY_USERNAME="$(prompt_value "Telegram proxy username (optional)" "" "no")"
-      TELEGRAM_PROXY_PASSWORD="$(prompt_secret_or_generate "Telegram proxy password (leave empty only if proxy has a password)")"
-      [[ "$TELEGRAM_PROXY_PASSWORD" != "__GENERATE__" ]] || TELEGRAM_PROXY_PASSWORD=""
-    fi
-  fi
-
-  XUI_CONFIGURE_NOW="$(prompt_yes_no "Configure X-UI panel now?" "no")"
+  XUI_CONFIGURE_NOW="0"
   XUI_PANEL_NAME="Primary X-UI panel"
   XUI_PANEL_URL=""
   XUI_USERNAME=""
@@ -596,38 +583,67 @@ collect_config() {
   PLAN_PRICE="100000"
   PLAN_CURRENCY="TOMAN"
   PLAN_DEVICE_LIMIT="2"
-  if [[ "$XUI_CONFIGURE_NOW" == "1" ]]; then
-    XUI_PANEL_NAME="$(prompt_value "X-UI panel name" "$XUI_PANEL_NAME" "yes")"
-    XUI_PANEL_URL="$(prompt_value "X-UI panel URL" "" "yes")"
-    XUI_USERNAME="$(prompt_value "X-UI username" "" "yes")"
-    XUI_PASSWORD="$(prompt_secret_required "X-UI password")"
-    XUI_PROXY_URL="$(prompt_value "X-UI panel proxy URL (optional)" "" "no")"
-    XUI_INBOUND_KEY="$(prompt_value "Inbound key" "$XUI_INBOUND_KEY" "yes")"
-    XUI_INBOUND_ID="$(prompt_value "X-UI inbound ID" "$XUI_INBOUND_ID" "yes")"
-    XUI_INBOUND_REMARK="$(prompt_value "Inbound remark" "$XUI_INBOUND_REMARK" "yes")"
-    XUI_INBOUND_SERVER="$(prompt_value "Inbound server IP/domain" "${APP_DOMAIN:-vpn.example.com}" "yes")"
-    XUI_INBOUND_PORT="$(prompt_value "Inbound port" "$XUI_INBOUND_PORT" "yes")"
-    XUI_INBOUND_CONFIG_PARAMS="$(prompt_value "Inbound config params" "$XUI_INBOUND_CONFIG_PARAMS" "yes")"
-    PLAN_KEY="$(prompt_value "Plan key" "$PLAN_KEY" "yes")"
-    PLAN_NAME="$(prompt_value "Plan name" "$PLAN_NAME" "yes")"
-    PLAN_TRAFFIC_GB="$(prompt_value "Plan traffic GB" "$PLAN_TRAFFIC_GB" "yes")"
-    PLAN_DURATION_DAYS="$(prompt_value "Plan duration days" "$PLAN_DURATION_DAYS" "yes")"
-    PLAN_PRICE="$(prompt_value "Plan price" "$PLAN_PRICE" "yes")"
-    PLAN_DEVICE_LIMIT="$(prompt_value "Plan device limit" "$PLAN_DEVICE_LIMIT" "yes")"
+
+  if (( ADVANCED )); then
+    STORE_NAME="$(prompt_value "Store name" "$STORE_NAME" "yes")"
+    STORE_ENGLISH_NAME="$(prompt_value "Store English name" "$STORE_NAME" "yes")"
+
+    if [[ "$(prompt_yes_no "Configure payment/card settings now? Optional." "no")" == "1" ]]; then
+      STORE_CARD_NUMBER="$(prompt_value "Manual payment card number" "" "no")"
+      STORE_CARD_OWNER="$(prompt_value "Manual payment card owner" "" "no")"
+    else
+      STORE_CARD_NUMBER="0000000000000000"
+      STORE_CARD_OWNER="Configure Payment Owner"
+    fi
+
+    TELEGRAM_ENABLED="$(prompt_yes_no "Enable Telegram bot?" "no")"
+    if [[ "$TELEGRAM_ENABLED" == "1" ]]; then
+      TELEGRAM_BOT_TOKEN="$(prompt_secret_required "Telegram bot token")"
+      TELEGRAM_BOT_USERNAME="$(prompt_value "Telegram bot username without @" "" "yes")"
+      TELEGRAM_ADMIN_IDS="$(prompt_value "Telegram admin IDs, comma-separated" "" "yes")"
+      TELEGRAM_PROXY_ENABLED="$(prompt_yes_no "Use Telegram proxy?" "no")"
+      if [[ "$TELEGRAM_PROXY_ENABLED" == "1" ]]; then
+        TELEGRAM_PROXY_PROTOCOL="$(prompt_value "Telegram proxy protocol" "http" "yes")"
+        TELEGRAM_PROXY_HOST="$(prompt_value "Telegram proxy host" "" "yes")"
+        TELEGRAM_PROXY_PORT="$(prompt_value "Telegram proxy port" "" "yes")"
+        TELEGRAM_PROXY_USERNAME="$(prompt_value "Telegram proxy username (optional)" "" "no")"
+        TELEGRAM_PROXY_PASSWORD="$(prompt_secret_or_generate "Telegram proxy password (leave empty only if proxy has a password)")"
+        [[ "$TELEGRAM_PROXY_PASSWORD" != "__GENERATE__" ]] || TELEGRAM_PROXY_PASSWORD=""
+      fi
+    fi
+
+    XUI_CONFIGURE_NOW="$(prompt_yes_no "Configure X-UI panel now?" "no")"
+    if [[ "$XUI_CONFIGURE_NOW" == "1" ]]; then
+      XUI_PANEL_NAME="$(prompt_value "X-UI panel name" "$XUI_PANEL_NAME" "yes")"
+      XUI_PANEL_URL="$(prompt_value "X-UI panel URL" "" "yes")"
+      XUI_USERNAME="$(prompt_value "X-UI username" "" "yes")"
+      XUI_PASSWORD="$(prompt_secret_required "X-UI password")"
+      XUI_PROXY_URL="$(prompt_value "X-UI panel proxy URL (optional)" "" "no")"
+      XUI_INBOUND_KEY="$(prompt_value "Inbound key" "$XUI_INBOUND_KEY" "yes")"
+      XUI_INBOUND_ID="$(prompt_value "X-UI inbound ID" "$XUI_INBOUND_ID" "yes")"
+      XUI_INBOUND_REMARK="$(prompt_value "Inbound remark" "$XUI_INBOUND_REMARK" "yes")"
+      XUI_INBOUND_SERVER="$(prompt_value "Inbound server IP/domain" "${APP_DOMAIN:-vpn.example.com}" "yes")"
+      XUI_INBOUND_PORT="$(prompt_value "Inbound port" "$XUI_INBOUND_PORT" "yes")"
+      XUI_INBOUND_CONFIG_PARAMS="$(prompt_value "Inbound config params" "$XUI_INBOUND_CONFIG_PARAMS" "yes")"
+      PLAN_KEY="$(prompt_value "Plan key" "$PLAN_KEY" "yes")"
+      PLAN_NAME="$(prompt_value "Plan name" "$PLAN_NAME" "yes")"
+      PLAN_TRAFFIC_GB="$(prompt_value "Plan traffic GB" "$PLAN_TRAFFIC_GB" "yes")"
+      PLAN_DURATION_DAYS="$(prompt_value "Plan duration days" "$PLAN_DURATION_DAYS" "yes")"
+      PLAN_PRICE="$(prompt_value "Plan price" "$PLAN_PRICE" "yes")"
+      PLAN_DEVICE_LIMIT="$(prompt_value "Plan device limit" "$PLAN_DEVICE_LIMIT" "yes")"
+    fi
   fi
 
-  REVENUE_ENGINE_ENABLED="$(prompt_yes_no "Enable Revenue Engine? It will stay dry-run." "yes")"
-  if [[ "$REVENUE_ENGINE_ENABLED" != "1" ]]; then
-    die "P3 requires Revenue Engine enabled with dry_run=true for new installs."
-  fi
+  REVENUE_ENGINE_ENABLED="1"
   REVENUE_ENGINE_DRY_RUN="1"
-  log "Revenue Engine dry-run is locked to yes for P3."
+  RUN_DOCTOR="$(prompt_yes_no "Run non-live doctor after install?" "yes")"
+  log "Revenue Engine is enabled and locked to dry-run for fresh installs."
 }
 
 materialize_generated_secrets() {
   if [[ "${ADMIN_PASSWORD:-}" == "__GENERATE__" ]]; then
     ADMIN_PASSWORD="$(generate_secret)"
-    log "Admin password generated and stored in .env as VPN_STORE_ADMIN_PASSWORD. It was not printed."
+    log "Admin password generated and stored in .env as $ADMIN_PASSWORD_ENV_NAME. It was not printed."
   fi
 }
 
@@ -694,9 +710,9 @@ write_env_file() {
     printf '%s=%q\n' SQLITE_DATABASE_PATH "${SQLITE_PATH:-$INSTALL_DIR/data/db.sqlite3}"
     printf '%s=%q\n' DJANGO_LANGUAGE_CODE "${APP_LANGUAGE:-fa}"
     printf '%s=%q\n' DJANGO_TIME_ZONE "${APP_TIMEZONE:-Asia/Tehran}"
-    printf '%s=%q\n' VPN_STORE_ADMIN_PASSWORD "$ADMIN_PASSWORD"
+    printf '%s=%q\n' "$ADMIN_PASSWORD_ENV_NAME" "$ADMIN_PASSWORD"
     if [[ "${TELEGRAM_ENABLED:-0}" == "1" ]]; then
-      printf '%s=%q\n' VPN_STORE_TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
+      printf '%s=%q\n' "$TELEGRAM_BOT_TOKEN_ENV_NAME" "$TELEGRAM_BOT_TOKEN"
       printf '%s=%q\n' TELEGRAM_BOT_USERNAME "$TELEGRAM_BOT_USERNAME"
     else
       printf '%s=%q\n' TELEGRAM_BOT_USERNAME ""
@@ -712,7 +728,7 @@ write_env_file() {
     printf '%s=%q\n' TELEGRAM_PROXY_PASSWORD "$TELEGRAM_PROXY_PASSWORD"
     printf '%s=%q\n' XUI_PANEL_PROXY_URL ""
     if [[ "${XUI_CONFIGURE_NOW:-0}" == "1" ]]; then
-      printf '%s=%q\n' VPN_STORE_XUI_PASSWORD "$XUI_PASSWORD"
+      printf '%s=%q\n' "$XUI_PASSWORD_ENV_NAME" "$XUI_PASSWORD"
     fi
     printf '%s=%q\n' SMSFORWARDER_WEBHOOK_TOKEN ""
     printf '%s=%q\n' PAYMENT_SMS_TIME_ZONE "${APP_TIMEZONE:-Asia/Tehran}"
@@ -834,6 +850,7 @@ write_generated_config() {
 
   export APP_INSTALL_DIR="$INSTALL_DIR"
   export APP_DOMAIN APP_ENABLE_TLS APP_TIMEZONE APP_LANGUAGE
+  export ADVANCED ADMIN_PASSWORD_ENV_NAME TELEGRAM_BOT_TOKEN_ENV_NAME XUI_PASSWORD_ENV_NAME
   export ADMIN_USERNAME ADMIN_EMAIL
   export DATABASE_ENGINE SQLITE_PATH
   export STORE_NAME STORE_ENGLISH_NAME STORE_CARD_NUMBER STORE_CARD_OWNER
@@ -862,20 +879,10 @@ def slug(value, default):
     text = re.sub(r"[^a-zA-Z0-9]+", "-", value.lower()).strip("-")
     return text or default
 
+advanced = enabled("ADVANCED")
 xui_enabled = enabled("XUI_CONFIGURE_NOW")
 telegram_enabled = enabled("TELEGRAM_ENABLED")
-store_name = env("STORE_NAME", "VPN Store")
-plan = {
-    "key": env("PLAN_KEY", "starter-30d"),
-    "name": env("PLAN_NAME", "Starter 30D"),
-    "traffic_gb": env("PLAN_TRAFFIC_GB", "30"),
-    "duration_days": int(env("PLAN_DURATION_DAYS", "30")),
-    "price": int(env("PLAN_PRICE", "100000")),
-    "currency": env("PLAN_CURRENCY", "TOMAN"),
-    "device_limit": int(env("PLAN_DEVICE_LIMIT", "2")),
-    "is_public": True,
-    "sort_order": 10,
-}
+store_name = env("STORE_NAME", "Qasedak")
 config = {
     "app": {
         "install_dir": env("APP_INSTALL_DIR"),
@@ -887,25 +894,50 @@ config = {
     "admin": {
         "username": env("ADMIN_USERNAME", "admin"),
         "email": env("ADMIN_EMAIL"),
-        "password_env": "VPN_STORE_ADMIN_PASSWORD",
+        "password_env": env("ADMIN_PASSWORD_ENV_NAME", "QASEDAK_ADMIN_PASSWORD"),
     },
     "database": {
         "engine": "sqlite",
         "sqlite_path": env("SQLITE_PATH"),
     },
     "store": {
-        "slug": slug(env("STORE_ENGLISH_NAME", store_name), "default-store"),
         "name": store_name,
         "english_name": env("STORE_ENGLISH_NAME", store_name),
+    },
+    "telegram": {
+        "enabled": telegram_enabled,
+    },
+    "xui": {
+        "configure_now": xui_enabled,
+    },
+    "revenue_engine": {
+        "enabled": True,
+        "dry_run": True,
+    },
+}
+
+if advanced:
+    plan = {
+        "key": env("PLAN_KEY", "starter-30d"),
+        "name": env("PLAN_NAME", "Starter 30D"),
+        "traffic_gb": env("PLAN_TRAFFIC_GB", "30"),
+        "duration_days": int(env("PLAN_DURATION_DAYS", "30")),
+        "price": int(env("PLAN_PRICE", "100000")),
+        "currency": env("PLAN_CURRENCY", "TOMAN"),
+        "device_limit": int(env("PLAN_DEVICE_LIMIT", "2")),
+        "is_public": True,
+        "sort_order": 10,
+    }
+    config["store"].update({
+        "slug": slug(env("STORE_ENGLISH_NAME", store_name), "default-store"),
         "domain": env("APP_DOMAIN"),
         "payment_mode": "manual_card",
         "card_number": env("STORE_CARD_NUMBER", "0000000000000000"),
         "card_owner": env("STORE_CARD_OWNER", "Configure Payment Owner"),
         "receipt_image_only_payment": False,
-    },
-    "telegram": {
-        "enabled": telegram_enabled,
-        "bot_token_env": "VPN_STORE_TELEGRAM_BOT_TOKEN" if telegram_enabled else "",
+    })
+    config["telegram"].update({
+        "bot_token_env": env("TELEGRAM_BOT_TOKEN_ENV_NAME", "QASEDAK_TELEGRAM_BOT_TOKEN") if telegram_enabled else "",
         "bot_username": env("TELEGRAM_BOT_USERNAME"),
         "admin_ids": [item.strip() for item in env("TELEGRAM_ADMIN_IDS").split(",") if item.strip()],
         "proxy_enabled": enabled("TELEGRAM_PROXY_ENABLED"),
@@ -916,30 +948,27 @@ config = {
             "username": env("TELEGRAM_PROXY_USERNAME"),
             "password_env": "TELEGRAM_PROXY_PASSWORD" if env("TELEGRAM_PROXY_USERNAME") else "",
         },
-    },
-    "xui": {
-        "configure_now": xui_enabled,
+    })
+    config["xui"].update({
         "name": env("XUI_PANEL_NAME", "Primary X-UI panel"),
         "panel_url": env("XUI_PANEL_URL"),
         "username": env("XUI_USERNAME"),
-        "password_env": "VPN_STORE_XUI_PASSWORD" if xui_enabled else "",
+        "password_env": env("XUI_PASSWORD_ENV_NAME", "QASEDAK_XUI_PASSWORD") if xui_enabled else "",
         "proxy_url": env("XUI_PROXY_URL"),
         "inbounds": [],
-    },
-    "plans": [plan],
-    "plan_routes": [],
-    "revenue_engine": {
-        "enabled": True,
-        "dry_run": True,
+    })
+    config["plans"] = [plan]
+    config["plan_routes"] = []
+    config["revenue_engine"].update({
         "daily_per_user": 1,
         "weekly_per_user": 3,
         "total_daily_cap": 100,
         "cooldown_hours": 24,
         "retention_cooldown_hours": 72,
         "min_ai_confidence": "0.50",
-    },
-}
-if xui_enabled:
+    })
+
+if advanced and xui_enabled:
     config["xui"]["inbounds"].append({
         "key": env("XUI_INBOUND_KEY", "primary-vless"),
         "inbound_id": int(env("XUI_INBOUND_ID", "1")),
@@ -1189,18 +1218,18 @@ run_doctor_if_requested() {
   run_cmd "${args[@]}"
 }
 
-print_p5_todos() {
+print_post_install_next_steps() {
   cat <<'EOF'
-P5 maintenance tooling is available:
-- scripts/backup.sh
-- scripts/update.sh
-- scripts/doctor.sh
-- scripts/timers.sh
+Install complete.
+Business setup may still be incomplete.
 
-Future productization work:
-- GitHub release install mode
-- public curl install command
-- CI/release cleanup
+Open Django Admin and complete docs/POST_INSTALL_SETUP.md:
+- Store identity and payment/card settings
+- Telegram BotConfiguration and optional proxy/force-join settings
+- X-UI/Sanaei Panel, Inbound, Plan, and PlanInboundRoute
+- Non-live doctor/check_integrations
+- Test purchase
+- Revenue Engine dry-run review before any real sends
 EOF
 }
 
@@ -1223,7 +1252,7 @@ main() {
   configure_nginx
   configure_tls
   run_doctor_if_requested
-  print_p5_todos
+  print_post_install_next_steps
 }
 
 main "$@"

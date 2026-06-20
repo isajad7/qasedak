@@ -179,6 +179,7 @@ class BootstrapInstaller:
             },
             "objects": {},
             "warnings": self.warnings,
+            "business_setup_incomplete": False,
         }
         self.store = None
         self.panel = None
@@ -200,7 +201,9 @@ class BootstrapInstaller:
             self._record_skip("inbound", "xui.configure_now=false")
             self._record_skip("plan", "xui.configure_now=false")
             self._record_skip("plan_inbound_route", "xui.configure_now=false")
-            self.warnings.append("X-UI setup is incomplete until an admin configures panel, inbounds, plans, and routes.")
+            self._mark_business_setup_incomplete(
+                "X-UI setup is incomplete until an admin configures panel, inbounds, plans, and routes."
+            )
         self._record_revenue_status()
         if self.live_check and not self.dry_run:
             self._run_live_checks()
@@ -300,6 +303,11 @@ class BootstrapInstaller:
             "retention_offer_cooldown_hours": int(self._revenue_config().get("retention_cooldown_hours", 72) or 72),
             "revenue_min_ai_confidence": Decimal(str(self._revenue_config().get("min_ai_confidence", "0.50"))),
         }
+        if (
+            defaults["card_number"] == SAFE_PLACEHOLDER_CARD_NUMBER
+            or defaults["card_owner"] == SAFE_PLACEHOLDER_CARD_OWNER
+        ):
+            self._mark_business_setup_incomplete("Payment/card setup is incomplete until an admin reviews Store settings.")
 
         if not store:
             self._record_action("store", "create", slug=slug, pk=None)
@@ -334,6 +342,9 @@ class BootstrapInstaller:
         telegram = self._telegram_config()
         if not _bool(telegram.get("enabled"), default=False):
             self._record_skip("bot_configuration", "telegram.enabled=false")
+            self._mark_business_setup_incomplete(
+                "Telegram setup is incomplete until an admin creates or enables a BotConfiguration."
+            )
             return None
 
         username = _clean_string(telegram.get("bot_username")).lstrip("@")
@@ -650,6 +661,11 @@ class BootstrapInstaller:
         action = "would_skip" if self.dry_run else "skip"
         self._count(action if self.dry_run else "skipped")
         self.summary["objects"][label] = {"action": action, "reason": reason}
+
+    def _mark_business_setup_incomplete(self, message):
+        self.summary["business_setup_incomplete"] = True
+        if message not in self.warnings:
+            self.warnings.append(message)
 
     def _count(self, key):
         self.summary["counts"][key] = self.summary["counts"].get(key, 0) + 1
