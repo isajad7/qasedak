@@ -9,6 +9,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import urlencode
 
+from .admin_support_services import customer_message_url, support_workbench_url
 from .models import BotConfiguration, Customer, Order, RevenueOfferLog, Store
 
 
@@ -195,23 +196,29 @@ def get_recent_revenue_events(store=None, limit=RECENT_LOG_LIMIT):
         "skip_reason",
         "created_at",
     )
-    return [
-        {
-            "id": log.pk,
-            "status": log.status,
-            "status_label": log.get_status_display(),
-            "status_tone": _status_tone(log.status),
-            "engine_type": log.engine_type,
-            "engine_label": log.get_engine_type_display(),
-            "event_type": log.event_type,
-            "target_label": _target_label(log),
-            "decision_source": log.decision_source,
-            "decision_source_label": log.get_decision_source_display(),
-            "skip_reason": log.skip_reason,
-            "created_at": log.created_at,
-        }
-        for log in queryset[:limit]
-    ]
+    rows = []
+    for log in queryset[:limit]:
+        customer_url = reverse("admin_store_customer_review", args=[log.customer_id]) if log.customer_id else ""
+        message_url = customer_message_url(Customer(pk=log.customer_id)) if log.customer_id else ""
+        rows.append(
+            {
+                "id": log.pk,
+                "status": log.status,
+                "status_label": log.get_status_display(),
+                "status_tone": _status_tone(log.status),
+                "engine_type": log.engine_type,
+                "engine_label": log.get_engine_type_display(),
+                "event_type": log.event_type,
+                "target_label": _target_label(log),
+                "decision_source": log.decision_source,
+                "decision_source_label": log.get_decision_source_display(),
+                "skip_reason": log.skip_reason,
+                "customer_url": customer_url,
+                "message_url": message_url,
+                "created_at": log.created_at,
+            }
+        )
+    return rows
 
 
 def get_engine_switches(store=None):
@@ -423,7 +430,7 @@ def get_revenue_action_items(store=None, metrics=None, safety=None):
                 "title": "بعضی پیشنهادها target تلگرام ندارند",
                 "description": f"{no_target_count:,} مورد recent به دلیل نبود target تلگرام skip شده‌اند.",
                 "tone": "warning",
-                "url": revenue_logs_url(store, {"skip_reason": "no_personal_telegram_target"}),
+                "url": support_workbench_url("problematic", store),
             }
         )
     if metrics["dry_run"] >= 10 and metrics["sent"] == 0:

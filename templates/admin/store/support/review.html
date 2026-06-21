@@ -1,0 +1,198 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_support_workbench' %}">میز کار پشتیبانی</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-support-review" dir="rtl">
+    <section class="qadmin-hero qadmin-support-hero">
+        <div>
+            <p class="qadmin-eyebrow">Support Review</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ workbench_url }}" class="qadmin-action qadmin-action-secondary">میز کار پشتیبانی</a>
+            <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-info">فرم ادمین</a>
+        </div>
+    </section>
+
+    <section class="qadmin-review-layout">
+        <div class="qadmin-review-main">
+            <article class="qadmin-review-panel qadmin-customer-context">
+                <header>
+                    <h2>خلاصه مشتری</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ customer_summary.telegram_tone }}">{{ customer_summary.telegram_label }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>شناسه مشتری</dt><dd>{% if customer_summary.id %}#{{ customer_summary.id }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>نام</dt><dd>{{ customer_summary.name }}</dd></div>
+                    <div><dt>تلفن</dt><dd>{% if customer_summary.phone_masked %}{{ customer_summary.phone_masked }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Username</dt><dd>{% if customer_summary.username_masked %}{{ customer_summary.username_masked }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Telegram target</dt><dd>{{ customer_summary.telegram_target_count }} مقصد</dd></div>
+                    <div><dt>سرویس فعال</dt><dd>{{ customer_summary.active_services_count }}</dd></div>
+                    <div><dt>سفارش‌ها</dt><dd>{{ customer_summary.recent_orders_count }}</dd></div>
+                </dl>
+                <div class="qadmin-actions">
+                    {% if customer_summary.review_url %}<a href="{{ customer_summary.review_url }}" class="qadmin-action">Customer Review</a>{% endif %}
+                    {% if customer_summary.message_url %}<a href="{{ customer_summary.message_url }}" class="qadmin-action qadmin-action-secondary">پیام به مشتری</a>{% endif %}
+                    {% if customer_summary.change_url %}<a href="{{ customer_summary.change_url }}" class="qadmin-action qadmin-action-info">فرم مشتری</a>{% endif %}
+                </div>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>خلاصه تیکت</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ ticket_summary.status_tone }}">{{ ticket_summary.status }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>موضوع</dt><dd>{{ ticket_summary.subject }}</dd></div>
+                    <div><dt>Source</dt><dd>{{ ticket_summary.source }}</dd></div>
+                    <div><dt>Created</dt><dd>{{ ticket_summary.created_at|date:"Y-m-d H:i" }}</dd></div>
+                    <div><dt>Last message</dt><dd>{% if ticket_summary.last_message_at %}{{ ticket_summary.last_message_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Last customer</dt><dd>{% if ticket_summary.last_customer_message_at %}{{ ticket_summary.last_customer_message_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Last admin</dt><dd>{% if ticket_summary.last_admin_message_at %}{{ ticket_summary.last_admin_message_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                </dl>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>پیام‌ها</h2>
+                    <span class="qadmin-badge qadmin-badge-info">{{ timeline_messages|length }}</span>
+                </header>
+                <div class="qadmin-message-timeline">
+                    {% for item in timeline_messages %}
+                        <article class="qadmin-message-row qadmin-message-{{ item.sender_type }}">
+                            <div class="qadmin-message-bubble">
+                                <header>
+                                    <span class="qadmin-badge qadmin-badge-{{ item.sender_tone }}">{{ item.sender_label }}</span>
+                                    <time>{{ item.created_at|date:"Y-m-d H:i" }}</time>
+                                </header>
+                                <p>{{ item.body|linebreaksbr }}</p>
+                                {% if item.delivery_status %}
+                                    <small>delivery: {{ item.delivery_status }}</small>
+                                {% endif %}
+                            </div>
+                        </article>
+                    {% empty %}
+                        <p class="qadmin-empty">پیامی در این گفتگو ثبت نشده است.</p>
+                    {% endfor %}
+                </div>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>سفارش‌ها و سرویس‌های مرتبط</h2>
+                    <span class="qadmin-badge qadmin-badge-info">{{ related_orders|length }} / {{ related_services|length }}</span>
+                </header>
+                <div class="qadmin-support-related">
+                    <div>
+                        <h3>سفارش‌ها</h3>
+                        <div class="qadmin-mini-list">
+                            {% for item in related_orders %}
+                                <p><a href="{{ item.review_url }}">{{ item.tracking_code }}</a> · {{ item.plan }} · {{ item.status }}</p>
+                            {% empty %}
+                                <p>سفارش مرتبطی پیدا نشد.</p>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div>
+                        <h3>سرویس‌ها</h3>
+                        <div class="qadmin-mini-list">
+                            {% for item in related_services %}
+                                <p><a href="{{ item.review_url }}">#{{ item.client.pk }} · {{ item.label }}</a> · {{ item.plan }} · {{ item.status }}</p>
+                            {% empty %}
+                                <p>سرویس مرتبطی پیدا نشد.</p>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </article>
+        </div>
+
+        <aside class="qadmin-action-box qadmin-reply-box">
+            <h2>پاسخ</h2>
+            {{ message_templates|json_script:"support-message-templates" }}
+            <form method="post" class="qadmin-action-form">
+                {% csrf_token %}
+                <label for="support-reply-message">متن پاسخ</label>
+                <textarea id="support-reply-message" name="message" rows="8" maxlength="2000" required></textarea>
+                <div class="qadmin-template-buttons">
+                    {% for template in message_templates %}
+                        <button type="button" class="qadmin-template-button" data-template-key="{{ template.key }}">{{ template.label }}</button>
+                    {% endfor %}
+                </div>
+                <label class="qadmin-confirm-row">
+                    <input type="checkbox" name="confirm_customer" value="1" required>
+                    ارسال پاسخ به همین مشتری
+                </label>
+                {% if actions.has_telegram_target %}
+                    <button type="submit" name="action" value="reply" class="qadmin-button">ارسال پاسخ</button>
+                {% else %}
+                    <button type="submit" name="action" value="reply" class="qadmin-button qadmin-button-secondary">ثبت پاسخ و نمایش خطای target</button>
+                {% endif %}
+            </form>
+
+            <h2>Action</h2>
+            {% if actions.can_close %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <label class="qadmin-confirm-row"><input type="checkbox" name="confirm_action" value="1" required> تایید تغییر وضعیت همین گفتگو</label>
+                    <button type="submit" name="action" value="close" class="qadmin-button qadmin-button-secondary">بستن گفتگو</button>
+                </form>
+            {% endif %}
+            {% if actions.can_reopen %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <label class="qadmin-confirm-row"><input type="checkbox" name="confirm_action" value="1" required> تایید تغییر وضعیت همین گفتگو</label>
+                    <button type="submit" name="action" value="reopen" class="qadmin-button">باز کردن دوباره</button>
+                </form>
+            {% endif %}
+            {% if actions.can_mark_followup %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <label class="qadmin-confirm-row"><input type="checkbox" name="confirm_action" value="1" required> تایید تغییر وضعیت همین گفتگو</label>
+                    <button type="submit" name="action" value="mark_followup" class="qadmin-button qadmin-button-secondary">نیازمند پیگیری</button>
+                </form>
+            {% endif %}
+            <div class="qadmin-disabled-note qadmin-internal-note">
+                <strong>Internal note</strong>
+                <p>مدل note جداگانه برای پشتیبانی وجود ندارد؛ note داخلی از این صفحه ذخیره نمی‌شود.</p>
+            </div>
+        </aside>
+    </section>
+</div>
+
+<script>
+    document.addEventListener("DOMContentLoaded", function () {
+        const textarea = document.getElementById("support-reply-message");
+        const dataNode = document.getElementById("support-message-templates");
+        const templates = dataNode ? JSON.parse(dataNode.textContent || "[]") : [];
+        const byKey = {};
+        templates.forEach(function (item) {
+            byKey[item.key] = item.body || "";
+        });
+        document.querySelectorAll("[data-template-key]").forEach(function (button) {
+            button.addEventListener("click", function () {
+                if (textarea) {
+                    textarea.value = byKey[button.dataset.templateKey] || "";
+                    textarea.focus();
+                }
+            });
+        });
+    });
+</script>
+{% endblock %}

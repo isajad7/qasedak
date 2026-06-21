@@ -46,6 +46,16 @@ journalctl -u vpn-store-telegram.service -n 100 --no-pager
 - GET pages are read-only and do not call Telegram or X-UI. Use the explicit buttons to resend config, refresh links, update usage, disable, or enable.
 - If resend fails, verify the customer has an active Telegram `BotUser` target and saved config links. The admin UI will not print the full link or token.
 
+## Support and Customer Messages
+
+- Support queues are in `/admin/store/support/workbench/`.
+- A single conversation review page is under `/admin/store/support/<support_id>/review/`.
+- A one-off customer message page is under `/admin/store/customers/<customer_id>/message/`.
+- GET pages are read-only and do not send Telegram messages.
+- Support replies and direct customer messages require POST, CSRF, and explicit confirmation.
+- If sending fails with "no Telegram target", link or reactivate the customer `BotUser` first. The admin page targets only that customer and has no group audience selector; use existing campaign/broadcast tools separately and cautiously for group messaging.
+- Review pages redact full config links, UUIDs, tokens, proxy credentials, full phone numbers, and full emails.
+
 ## Nginx and TLS
 
 ```bash

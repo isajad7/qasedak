@@ -6273,6 +6273,394 @@ class AdminServiceWorkbenchTests(TestCase):
 
 
 @override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")
+class AdminSupportWorkbenchTests(TestCase):
+    def setUp(self):
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="support-admin",
+            email="support-admin@example.com",
+            password="secret",
+        )
+        self.store = Store.objects.create(
+            name="Support Store",
+            english_name="Support Store",
+            slug="support-store",
+            card_number="621986" + "1234567890",
+            card_owner="Support Owner",
+        )
+        self.plan = Plan.objects.create(
+            store=self.store,
+            name="Support 10GB",
+            slug="support-10gb",
+            volume_gb=Decimal("10.000"),
+            duration_days=30,
+            price=100000,
+            currency=Plan.Currency.TOMAN,
+            is_active=True,
+            is_public=True,
+        )
+        self.customer = Customer.objects.create(
+            display_name="Support Alice",
+            username="support_alice",
+            phone_number="+989121234567",
+        )
+        self.bot_config = BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Support Telegram",
+            bot_token="123456" + ":" + "support-secret-token",
+            admin_user_id="999",
+            is_active=True,
+        )
+
+    def login_admin(self):
+        self.client.force_login(self.admin_user)
+
+    def create_bot_user(self, customer=None):
+        return BotUser.objects.create(
+            bot_config=self.bot_config,
+            customer=customer or self.customer,
+            provider_user_id="42",
+            chat_id="42",
+            username="support_user",
+            display_name="Support User",
+            is_active=True,
+        )
+
+    def create_conversation(self, **kwargs):
+        body = kwargs.pop("body", "سلام، اتصال من مشکل دارد.")
+        data = {
+            "store": self.store,
+            "customer": self.customer,
+            "subject": "مشکل اتصال",
+            "contact_value": self.customer.phone_number,
+            "status": SupportConversation.Status.WAITING_ADMIN,
+            "last_customer_message_at": timezone.now(),
+        }
+        data.update(kwargs)
+        conversation = SupportConversation.objects.create(**data)
+        SupportMessage.objects.create(
+            conversation=conversation,
+            customer=conversation.customer,
+            sender_type=SupportMessage.SenderType.CUSTOMER,
+            body=body,
+            metadata={"source": "web_support"},
+        )
+        return conversation
+
+    def create_order(self):
+        return Order.objects.create(
+            store=self.store,
+            customer=self.customer,
+            plan=self.plan,
+            amount=100000,
+            original_amount=100000,
+            currency=Plan.Currency.TOMAN,
+            status=Order.Status.REJECTED,
+            verification_status=Order.VerificationStatus.REJECTED,
+            payment_method=Order.PaymentMethod.MANUAL_CARD,
+            is_paid=False,
+        )
+
+    def create_vpn_client(self, order=None):
+        panel = Panel.objects.create(
+            store=self.store,
+            name="Support Panel",
+            url="https://panel.example.com/admin",
+            username="panel-admin",
+            password="panel-secret",
+            is_active=True,
+        )
+        inbound = Inbound.objects.create(
+            panel=panel,
+            inbound_id=27,
+            remark="Support inbound",
+            server_ip="vpn.example.com",
+            port="443",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        return VPNClient.objects.create(
+            store=self.store,
+            order=order or self.create_order(),
+            plan=self.plan,
+            inbound=inbound,
+            username="support-client",
+            xui_email="support-client",
+            uuid="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            sub_link="https://example.com/sub/SECRET-SUB-TOKEN",
+            direct_link="vless://aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@vpn.example.com:443#Support",
+            status=VPNClient.Status.ACTIVE,
+            traffic_limit_bytes=10 * (1024 ** 3),
+            used_traffic_bytes=1 * (1024 ** 3),
+            duration_days=30,
+            expires_at=timezone.now() + timedelta(days=20),
+        )
+
+    def test_support_workbench_url_loads_for_superuser(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_support_workbench"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "میز کار پشتیبانی")
+
+    def test_support_workbench_requires_staff_login(self):
+        response = self.client.get(reverse("admin_store_support_workbench"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        regular_user = get_user_model().objects.create_user(username="support-regular", password="secret")
+        self.client.force_login(regular_user)
+
+        response = self.client.get(reverse("admin_store_support_workbench"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_fresh_install_without_support_data_does_not_500(self):
+        SupportMessage.objects.all().delete()
+        SupportConversation.objects.all().delete()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_support_workbench"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "موردی در این صف نیست")
+
+    def test_support_review_page_loads_for_superuser(self):
+        conversation = self.create_conversation()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_support_review", args=[conversation.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "خلاصه مشتری")
+        self.assertContains(response, "پیام‌ها")
+
+    def test_support_review_get_does_not_send_telegram(self):
+        conversation = self.create_conversation()
+        self.login_admin()
+
+        with patch("store.admin_views.send_support_reply") as reply_mock, patch(
+            "store.admin_support_services.BotClient.send_message"
+        ) as send_mock:
+            response = self.client.get(reverse("admin_store_support_review", args=[conversation.pk]), {"action": "reply"})
+
+        self.assertEqual(response.status_code, 200)
+        reply_mock.assert_not_called()
+        send_mock.assert_not_called()
+
+    def test_send_reply_requires_post_and_confirmation(self):
+        conversation = self.create_conversation()
+        self.login_admin()
+
+        with patch("store.admin_views.send_support_reply") as reply_mock:
+            get_response = self.client.get(reverse("admin_store_support_review", args=[conversation.pk]), {"action": "reply"})
+            post_response = self.client.post(
+                reverse("admin_store_support_review", args=[conversation.pk]),
+                {"action": "reply", "message": "سلام"},
+            )
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(post_response.status_code, 302)
+        reply_mock.assert_not_called()
+
+    def test_send_reply_without_telegram_target_fails_safely(self):
+        conversation = self.create_conversation()
+        self.login_admin()
+
+        with patch("store.admin_support_services.BotClient.send_message") as send_mock:
+            response = self.client.post(
+                reverse("admin_store_support_review", args=[conversation.pk]),
+                {"action": "reply", "message": "سلام، بررسی شد.", "confirm_customer": "1"},
+                follow=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        send_mock.assert_not_called()
+        self.assertContains(response, "مقصد تلگرام")
+
+    def test_send_reply_with_mock_delivery_succeeds(self):
+        self.create_bot_user()
+        conversation = self.create_conversation()
+        self.login_admin()
+
+        with patch("store.admin_support_services.BotClient.send_message", return_value={"ok": True}) as send_mock:
+            response = self.client.post(
+                reverse("admin_store_support_review", args=[conversation.pk]),
+                {"action": "reply", "message": "سلام، مشکل بررسی شد.", "confirm_customer": "1"},
+                follow=True,
+            )
+        conversation.refresh_from_db()
+
+        self.assertEqual(response.status_code, 200)
+        send_mock.assert_called_once()
+        self.assertEqual(conversation.status, SupportConversation.Status.ANSWERED)
+        self.assertTrue(conversation.messages.filter(sender_type=SupportMessage.SenderType.ADMIN).exists())
+
+    def test_support_reply_and_timeline_do_not_leak_config_or_uuid(self):
+        secret_uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        secret_config = f"vless://{secret_uuid}@vpn.example.com:443#Alice"
+        conversation = self.create_conversation(body=f"config {secret_config} phone {self.customer.phone_number}")
+        self.create_bot_user()
+        self.login_admin()
+
+        with patch("store.admin_support_services.BotClient.send_message", return_value={"ok": True}):
+            response = self.client.post(
+                reverse("admin_store_support_review", args=[conversation.pk]),
+                {"action": "reply", "message": f"reply {secret_config}", "confirm_customer": "1"},
+                follow=True,
+            )
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(secret_config, body)
+        self.assertNotIn(secret_uuid, body)
+        self.assertNotIn(self.customer.phone_number, body)
+        self.assertIn("config-link-hidden", body)
+
+    def test_close_and_reopen_require_post_confirmation(self):
+        conversation = self.create_conversation()
+        self.login_admin()
+
+        get_response = self.client.get(reverse("admin_store_support_review", args=[conversation.pk]), {"action": "close"})
+        conversation.refresh_from_db()
+        self.assertEqual(get_response.status_code, 200)
+        self.assertNotEqual(conversation.status, SupportConversation.Status.CLOSED)
+
+        missing_confirm_response = self.client.post(
+            reverse("admin_store_support_review", args=[conversation.pk]),
+            {"action": "close"},
+        )
+        conversation.refresh_from_db()
+        self.assertEqual(missing_confirm_response.status_code, 302)
+        self.assertNotEqual(conversation.status, SupportConversation.Status.CLOSED)
+
+        close_response = self.client.post(
+            reverse("admin_store_support_review", args=[conversation.pk]),
+            {"action": "close", "confirm_action": "1"},
+        )
+        conversation.refresh_from_db()
+        self.assertEqual(close_response.status_code, 302)
+        self.assertEqual(conversation.status, SupportConversation.Status.CLOSED)
+
+        reopen_response = self.client.post(
+            reverse("admin_store_support_review", args=[conversation.pk]),
+            {"action": "reopen", "confirm_action": "1"},
+        )
+        conversation.refresh_from_db()
+        self.assertEqual(reopen_response.status_code, 302)
+        self.assertEqual(conversation.status, SupportConversation.Status.OPEN)
+
+    def test_customer_message_page_get_renders_form(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_customer_message", args=[self.customer.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "پیام شخصی")
+        self.assertContains(response, "مقصد تلگرام")
+
+    def test_customer_direct_message_requires_post_and_confirmation(self):
+        self.create_bot_user()
+        self.login_admin()
+
+        with patch("store.admin_views.send_customer_direct_message") as direct_mock:
+            get_response = self.client.get(reverse("admin_store_customer_message", args=[self.customer.pk]), {"action": "send"})
+            post_response = self.client.post(
+                reverse("admin_store_customer_message", args=[self.customer.pk]),
+                {"action": "send", "message": "سلام"},
+            )
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(post_response.status_code, 302)
+        direct_mock.assert_not_called()
+
+    def test_customer_direct_message_without_target_fails_safe(self):
+        self.login_admin()
+
+        with patch("store.admin_support_services.BotClient.send_message") as send_mock:
+            response = self.client.post(
+                reverse("admin_store_customer_message", args=[self.customer.pk]),
+                {"action": "send", "message": "سلام", "confirm_customer": "1"},
+                follow=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        send_mock.assert_not_called()
+        self.assertContains(response, "مقصد تلگرام")
+
+    def test_customer_direct_message_with_mock_delivery_succeeds(self):
+        self.create_bot_user()
+        self.login_admin()
+
+        with patch("store.admin_support_services.BotClient.send_message", return_value={"ok": True}) as send_mock:
+            response = self.client.post(
+                reverse("admin_store_customer_message", args=[self.customer.pk]),
+                {"action": "send", "message": "سلام، مشکل شما بررسی شد.", "confirm_customer": "1"},
+                follow=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        send_mock.assert_called_once()
+        self.assertTrue(
+            SupportMessage.objects.filter(
+                conversation__customer=self.customer,
+                sender_type=SupportMessage.SenderType.ADMIN,
+                metadata__source="customer_direct_message",
+            ).exists()
+        )
+
+    def test_dashboard_links_to_support_workbench(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse("admin_store_support_workbench"))
+        self.assertTrue(any(reverse("admin_store_support_workbench") in link.url for link in response.context["quick_actions"] if link.url))
+
+    def test_order_and_service_reviews_link_to_customer_message(self):
+        order = self.create_order()
+        vpn_client = self.create_vpn_client(order=order)
+        self.login_admin()
+
+        order_response = self.client.get(reverse("admin_store_order_review", args=[order.pk]))
+        service_response = self.client.get(reverse("admin_store_service_review", args=[vpn_client.pk]))
+
+        self.assertEqual(order_response.status_code, 200)
+        self.assertEqual(service_response.status_code, 200)
+        self.assertContains(order_response, reverse("admin_store_customer_message", args=[self.customer.pk]))
+        self.assertContains(service_response, reverse("admin_store_customer_message", args=[self.customer.pk]))
+
+    def test_message_templates_render_without_secrets(self):
+        conversation = self.create_conversation()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_support_review", args=[conversation.pk]))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "connection_help")
+        self.assertContains(response, "payment_review")
+        self.assertNotIn("vless://", body)
+        self.assertNotIn("SECRET-SUB-TOKEN", body)
+        self.assertNotIn("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", body)
+
+    def test_customer_message_page_has_no_bulk_selection(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_customer_message", args=[self.customer.pk]))
+        body = response.content.decode().lower()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("broadcast", body)
+        self.assertNotIn("audience", body)
+        self.assertNotIn("همه مشتریان", body)
+
+
+@override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")
 class AdminSetupWizardTests(TestCase):
     def setUp(self):
         self.admin_user = get_user_model().objects.create_superuser(

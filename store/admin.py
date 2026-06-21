@@ -82,6 +82,7 @@ from .admin_setup import (
     setup_wizard_index_url,
 )
 from .admin_revenue import revenue_control_url
+from .admin_support_services import customer_message_url, sanitize_support_message, support_review_url
 from .broadcast_services import create_campaign_recipients, resolve_campaign_recipients, send_campaign
 from .legacy_wizwiz_import_services import (
     analyze_wizwiz_import_job,
@@ -1240,22 +1241,79 @@ class SupportMessageInline(admin.TabularInline):
 class SupportConversationAdmin(ImportExportModelAdmin):
     list_display = (
         "id",
-        "customer",
+        "customer_summary",
         "store",
-        "contact_value",
-        "status",
-        "last_customer_message_at",
-        "last_admin_message_at",
+        "masked_contact_value",
+        "status_badge",
+        "last_message_snippet",
+        "created_at",
         "updated_at",
+        "quick_review_link",
     )
     list_filter = ("status", "store", "created_at", "updated_at")
-    search_fields = ("contact_value", "customer__display_name", "customer__username", "customer__phone_number", "messages__body")
+    search_fields = (
+        "=id",
+        "=customer__id",
+        "contact_value",
+        "customer__display_name",
+        "customer__username",
+        "customer__phone_number",
+    )
     autocomplete_fields = ("store", "customer")
     readonly_fields = ("created_at", "updated_at", "last_customer_message_at", "last_admin_message_at", "closed_at")
     date_hierarchy = "updated_at"
     list_select_related = ("store", "customer")
     inlines = (SupportMessageInline,)
     actions = ("close_conversations", "mark_waiting_admin")
+
+    def qadmin_badge(self, label, tone="secondary"):
+        css_class = {
+            "success": "bg-success",
+            "warning": "bg-warning text-dark",
+            "danger": "bg-danger",
+            "info": "bg-info text-dark",
+            "secondary": "bg-secondary",
+        }.get(tone, "bg-secondary")
+        return format_html('<span class="badge {}">{}</span>', css_class, label)
+
+    @admin.display(description=_("Customer"), ordering="customer__display_name")
+    def customer_summary(self, obj):
+        if not obj.customer_id:
+            return self.qadmin_badge(_("No customer"), "secondary")
+        label = admin_safe_customer_label(obj.customer)
+        phone = admin_mask_phone(obj.customer.phone_number)
+        url = reverse("admin_store_customer_review", args=[obj.customer_id])
+        if phone:
+            return format_html('<a href="{}">{}</a><br><small>{}</small>', url, label, phone)
+        return format_html('<a href="{}">{}</a>', url, label)
+
+    @admin.display(description=_("Contact"))
+    def masked_contact_value(self, obj):
+        return sanitize_support_message(obj.contact_value, limit=80) or "-"
+
+    @admin.display(description=_("Status"), ordering="status")
+    def status_badge(self, obj):
+        tone = {
+            SupportConversation.Status.OPEN: "info",
+            SupportConversation.Status.WAITING_ADMIN: "warning",
+            SupportConversation.Status.ANSWERED: "success",
+            SupportConversation.Status.CLOSED: "secondary",
+        }.get(obj.status, "secondary")
+        return self.qadmin_badge(obj.get_status_display(), tone)
+
+    @admin.display(description=_("Last message"))
+    def last_message_snippet(self, obj):
+        message = obj.messages.order_by("-created_at", "-pk").first()
+        if not message:
+            return "-"
+        body = sanitize_support_message(message.body, limit=90)
+        return format_html("{}<br><small>{}</small>", body or "-", message.get_sender_type_display())
+
+    @admin.display(description=_("Review"))
+    def quick_review_link(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        return format_html('<a class="button" href="{}">{}</a>', support_review_url(obj), _("Review"))
 
     @admin.action(description=_("Close selected support conversations"))
     def close_conversations(self, request, queryset):
@@ -3574,8 +3632,10 @@ class CustomerAdmin(ImportExportModelAdmin):
         "telegram_connection_status",
         "active_clients_total",
         "orders_total",
+        "open_support_total",
         "last_order_date",
         "customer_review_link",
+        "customer_message_link",
     )
     list_filter = ("is_active", "is_wholesale", "created_at", "last_seen_at")
     search_fields = (
@@ -3602,8 +3662,10 @@ class CustomerAdmin(ImportExportModelAdmin):
         "latest_web_telegram_token_status",
         "active_clients_total",
         "orders_total",
+        "open_support_total",
         "last_order_date",
         "customer_review_link",
+        "customer_message_link",
         "created_at",
         "updated_at",
         "last_seen_at",
@@ -3623,7 +3685,9 @@ class CustomerAdmin(ImportExportModelAdmin):
                     "telegram_connection_status",
                     "active_clients_total",
                     "orders_total",
+                    "open_support_total",
                     "last_order_date",
+                    "customer_message_link",
                 )
             },
         ),
@@ -3711,6 +3775,11 @@ class CustomerAdmin(ImportExportModelAdmin):
                     .order_by("-created_at")
                     .values("status")[:1]
                 ),
+                admin_open_support_count=Count(
+                    "support_conversations",
+                    filter=~Q(support_conversations__status=SupportConversation.Status.CLOSED),
+                    distinct=True,
+                ),
             )
         )
 
@@ -3750,6 +3819,19 @@ class CustomerAdmin(ImportExportModelAdmin):
             return "-"
         url = reverse("admin_store_customer_review", args=[obj.pk])
         return format_html('<a class="button" href="{}">{}</a>', url, _("Review"))
+
+    @admin.display(description=_("Message"))
+    def customer_message_link(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        return format_html('<a class="button" href="{}">{}</a>', customer_message_url(obj), _("Message"))
+
+    @admin.display(description=_("Open support"), ordering="admin_open_support_count")
+    def open_support_total(self, obj):
+        value = getattr(obj, "admin_open_support_count", None)
+        if value is not None:
+            return value
+        return obj.support_conversations.exclude(status=SupportConversation.Status.CLOSED).count()
 
     @admin.display(description=_("Orders"))
     def orders_total(self, obj):

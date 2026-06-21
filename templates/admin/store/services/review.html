@@ -26,6 +26,7 @@
         </div>
         <div class="qadmin-hero-actions">
             <a href="{{ workbench_url }}" class="qadmin-action qadmin-action-secondary">میز کار سرویس‌ها</a>
+            {% if customer_summary.message_url %}<a href="{{ customer_summary.message_url }}" class="qadmin-action qadmin-action-warning">پیام به مشتری</a>{% endif %}
             <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-info">فرم ادمین</a>
         </div>
     </section>
@@ -45,6 +46,10 @@
                     <div><dt>آخرین سفارش</dt><dd>{% if customer_summary.last_order %}<a href="{{ customer_summary.last_order_url }}">{{ customer_summary.last_order.order_tracking_code }}</a>{% else %}-{% endif %}</dd></div>
                     <div><dt>Customer admin</dt><dd>{% if customer_summary.change_url %}<a href="{{ customer_summary.change_url }}">باز کردن</a>{% else %}-{% endif %}</dd></div>
                 </dl>
+                <div class="qadmin-actions">
+                    {% if customer_summary.message_url %}<a href="{{ customer_summary.message_url }}" class="qadmin-action qadmin-action-warning">پیام به مشتری</a>{% endif %}
+                    {% if customer_summary.support_history_url %}<a href="{{ customer_summary.support_history_url }}" class="qadmin-action qadmin-action-secondary">Support history</a>{% endif %}
+                </div>
             </article>
 
             <article class="qadmin-review-panel">

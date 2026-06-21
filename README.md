@@ -66,6 +66,15 @@ For customer and VPN service work, open:
 
 Owner flow: customer -> service -> usage/expiry -> resend/update/disable. GET pages are read-only; live Telegram/X-UI work happens only through explicit POST actions.
 
+For customer support and one-to-one messages, open:
+
+```text
+/admin/store/support/workbench/
+/admin/store/customers/<id>/message/
+```
+
+Support replies and direct customer messages are POST-only, require CSRF plus explicit confirmation, and target only the selected customer. These pages do not provide group audience selection; use the existing campaign/broadcast tools separately and with care.
+
 For Revenue Engine rollout and daily guardrails, open:
 
 ```text

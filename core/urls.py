@@ -5,6 +5,7 @@ from django.conf import settings
 from django.conf.urls.static import static
 from store.admin_views import (
     card_receipts_report,
+    customer_message,
     customer_review,
     order_review,
     order_workbench,
@@ -15,6 +16,8 @@ from store.admin_views import (
     setup_center,
     setup_wizard_index,
     setup_wizard_step,
+    support_review,
+    support_workbench,
 )
 
 urlpatterns = [
@@ -49,6 +52,16 @@ urlpatterns = [
         name='admin_store_order_review',
     ),
     path(
+        'admin/store/support/workbench/',
+        admin.site.admin_view(support_workbench),
+        name='admin_store_support_workbench',
+    ),
+    path(
+        'admin/store/support/<int:support_id>/review/',
+        admin.site.admin_view(support_review),
+        name='admin_store_support_review',
+    ),
+    path(
         'admin/store/services/workbench/',
         admin.site.admin_view(service_workbench),
         name='admin_store_service_workbench',
@@ -62,6 +75,11 @@ urlpatterns = [
         'admin/store/customers/<int:customer_id>/review/',
         admin.site.admin_view(customer_review),
         name='admin_store_customer_review',
+    ),
+    path(
+        'admin/store/customers/<int:customer_id>/message/',
+        admin.site.admin_view(customer_message),
+        name='admin_store_customer_message',
     ),
     path(
         'admin/store/setup/wizard/',

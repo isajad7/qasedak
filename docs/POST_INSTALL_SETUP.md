@@ -26,6 +26,22 @@ For customer and VPN service operations, use the service workbench:
 
 Owner flow: customer -> service -> usage/expiry -> resend/update/disable. The workbench and review GET pages read local DB state only. Resend config, refresh config link, update usage, disable, and enable are explicit POST actions with CSRF and confirmation. Full config links, UUIDs, tokens, passwords, proxies, and full phone/email values are not shown in the UI.
 
+For support and customer communication, use the support workbench:
+
+```text
+/admin/store/support/workbench/
+```
+
+Use `/admin/store/support/<id>/review/` to review a single conversation, see masked customer/order/service context, reply with a prepared template, close/reopen the ticket, or mark it for follow-up. Replies are POST-only, require CSRF and explicit confirmation, and never run from a GET page.
+
+For a one-off message to a single customer, use:
+
+```text
+/admin/store/customers/<id>/message/
+```
+
+This page only targets that customer. If the customer has no active Telegram target, sending is blocked with a safe error. It has no group audience selection; use the existing campaign/broadcast workflow separately and cautiously for group messaging.
+
 For Revenue Engine operations, use the Revenue Control Center:
 
 ```text
@@ -71,8 +87,9 @@ The wizard walks through Store identity, payment, Telegram, optional Telegram pr
 
 13. Open `/admin/store/orders/workbench/` and review pending receipts from the owner-facing order review page.
 14. Open `/admin/store/services/workbench/` and confirm active/expiring/expired services, Telegram targets, usage snapshots, and route/panel/inbound health.
-15. Test a purchase end to end: storefront or bot order, payment submission, admin approval/rejection, configuration delivery, then service review/resend.
-16. Open `/admin/store/revenue/control/` and keep Revenue Engine in dry-run at first. Review `RevenueOfferLog`, the 7-day metrics, failed logs, and command reports before any gradual real-send rollout.
+15. Open `/admin/store/support/workbench/` and verify support queues, review links, reply templates, and no-target warnings.
+16. Test a purchase end to end: storefront or bot order, payment submission, admin approval/rejection, configuration delivery, then service review/resend.
+17. Open `/admin/store/revenue/control/` and keep Revenue Engine in dry-run at first. Review `RevenueOfferLog`, the 7-day metrics, failed logs, and command reports before any gradual real-send rollout.
 
 ## Notes
 
@@ -84,4 +101,5 @@ The wizard walks through Store identity, payment, Telegram, optional Telegram pr
 - The wizard does not run Telegram or X-UI live checks automatically.
 - The order workbench GET pages read DB state only. The approve/reject/retry buttons require POST confirmation before any external side effect can happen.
 - The service workbench GET pages read DB state only. Live usage refresh, config link refresh, Telegram resend, and enable/disable are opt-in POST actions.
+- Support review and direct customer message sends are POST-only, CSRF-protected, and require explicit confirmation. They do not provide group audience selection.
 - The Revenue Control Center GET page reads DB/log state only. Real-send is POST-only, requires `ENABLE_REAL_REVENUE_SEND`, and is blocked when local safety checks fail.

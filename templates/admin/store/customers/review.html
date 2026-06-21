@@ -26,6 +26,7 @@
         </div>
         <div class="qadmin-hero-actions">
             <a href="{{ workbench_url }}" class="qadmin-action qadmin-action-secondary">میز کار سرویس‌ها</a>
+            <a href="{{ message_url }}" class="qadmin-action qadmin-action-warning">پیام به مشتری</a>
             <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-info">فرم ادمین مشتری</a>
         </div>
     </section>
@@ -102,7 +103,7 @@
                 </header>
                 <div class="qadmin-mini-list">
                     {% for item in support_tickets %}
-                        <p><a href="{{ item.change_url }}">{{ item.subject }}</a> · {{ item.status }} · {{ item.updated_at|date:"Y-m-d H:i" }}</p>
+                        <p><a href="{{ item.review_url }}">{{ item.subject }}</a> · {{ item.status }} · {{ item.updated_at|date:"Y-m-d H:i" }}</p>
                     {% empty %}
                         <p>تیکت پشتیبانی ثبت نشده است.</p>
                     {% endfor %}
@@ -113,6 +114,8 @@
         <aside class="qadmin-action-box">
             <h2>Action links</h2>
             <a href="{{ workbench_url }}" class="qadmin-action">میز کار سرویس‌ها</a>
+            <a href="{{ message_url }}" class="qadmin-action qadmin-action-warning">پیام به مشتری</a>
+            <a href="{{ support_workbench_url }}" class="qadmin-action qadmin-action-secondary">میز کار پشتیبانی</a>
             <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-secondary">فرم ادمین مشتری</a>
             <div class="qadmin-disabled-note">
                 <strong>Side effects</strong>

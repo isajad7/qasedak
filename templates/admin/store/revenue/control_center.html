@@ -237,7 +237,10 @@
                                     <td><span class="qadmin-badge qadmin-badge-{{ event.status_tone }}">{{ event.status_label }}</span></td>
                                     <td>{{ event.engine_label }}</td>
                                     <td>{{ event.event_type }}</td>
-                                    <td>{{ event.target_label }}</td>
+                                    <td>
+                                        {% if event.customer_url %}<a href="{{ event.customer_url }}">{{ event.target_label }}</a>{% else %}{{ event.target_label }}{% endif %}
+                                        {% if event.message_url %}<small><a href="{{ event.message_url }}">پیام به مشتری</a></small>{% endif %}
+                                    </td>
                                     <td>{{ event.decision_source_label }}</td>
                                     <td>{{ event.created_at|date:"Y-m-d H:i" }}</td>
                                 </tr>

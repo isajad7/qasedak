@@ -39,6 +39,16 @@ from .admin_setup_wizard import (
     selected_store_from_id,
     wizard_step_url,
 )
+from .admin_support_services import (
+    customer_message_url,
+    get_customer_message_context,
+    get_support_review_context,
+    get_support_workbench_context,
+    send_customer_direct_message,
+    send_support_reply,
+    support_review_url,
+    support_workbench_url,
+)
 from .config_lookup import mask_identifier
 from .jalali import format_jalali_date
 from .models import (
@@ -853,6 +863,89 @@ def order_workbench(request):
     return TemplateResponse(request, "admin/store/orders/workbench.html", context)
 
 
+def support_workbench(request):
+    stores, selected_store = selected_store_from_id(request.GET.get("store"))
+    workbench_context = get_support_workbench_context(selected_store)
+    context = {
+        **admin.site.each_context(request),
+        **workbench_context,
+        "stores": stores,
+        "selected_store": selected_store,
+        "title": "میز کار پشتیبانی",
+        "subtitle": "پیام‌ها، گفتگوها، مشتری و مسیرهای مرتبط بدون نمایش داده حساس.",
+    }
+    return TemplateResponse(request, "admin/store/support/workbench.html", context)
+
+
+def handle_support_review_action(request, conversation):
+    action = request.POST.get("action", "")
+    review_url = support_review_url(conversation)
+    if action not in {"reply", "close", "reopen", "mark_followup"}:
+        messages.error(request, "Action معتبر نیست.")
+        return redirect(review_url)
+
+    if action == "reply":
+        if request.POST.get("confirm_customer") != "1" and request.POST.get("confirm_external") != "1":
+            messages.error(request, "برای ارسال پاسخ باید تایید صریح owner ثبت شود.")
+            return redirect(review_url)
+        result = send_support_reply(conversation, request.POST.get("message", ""), request.user)
+        if result.duplicate:
+            messages.success(request, "این پاسخ قبلاً ثبت شده بود و دوباره ارسال نشد.")
+        elif result.ok:
+            messages.success(request, f"پاسخ برای {result.sent_count} مقصد تلگرام همین مشتری ارسال شد.")
+        else:
+            messages.error(request, safe_action_message(result.safe_error))
+        return redirect(review_url)
+
+    if request.POST.get("confirm_action") != "1" and request.POST.get("confirm_external") != "1":
+        messages.error(request, "برای تغییر وضعیت تیکت باید تایید صریح ثبت شود.")
+        return redirect(review_url)
+
+    if action == "close":
+        if conversation.status == SupportConversation.Status.CLOSED:
+            messages.success(request, "گفتگو قبلاً بسته شده است.")
+        else:
+            conversation.close()
+            messages.success(request, "گفتگوی پشتیبانی بسته شد.")
+        return redirect(review_url)
+
+    if action == "reopen":
+        if conversation.status != SupportConversation.Status.CLOSED:
+            messages.success(request, "گفتگو قبلاً باز است.")
+        else:
+            conversation.status = SupportConversation.Status.OPEN
+            conversation.closed_at = None
+            conversation.save(update_fields=["status", "closed_at", "updated_at"])
+            messages.success(request, "گفتگوی پشتیبانی دوباره باز شد.")
+        return redirect(review_url)
+
+    if conversation.status == SupportConversation.Status.WAITING_ADMIN:
+        messages.success(request, "گفتگو قبلاً نیازمند پیگیری است.")
+    else:
+        conversation.status = SupportConversation.Status.WAITING_ADMIN
+        conversation.closed_at = None
+        conversation.save(update_fields=["status", "closed_at", "updated_at"])
+        messages.success(request, "گفتگو به وضعیت نیازمند پیگیری منتقل شد.")
+    return redirect(review_url)
+
+
+def support_review(request, support_id):
+    conversation = get_object_or_404(
+        SupportConversation.objects.select_related("store", "customer"),
+        pk=support_id,
+    )
+    if request.method == "POST":
+        return handle_support_review_action(request, conversation)
+
+    context = {
+        **admin.site.each_context(request),
+        **get_support_review_context(conversation.pk),
+        "title": f"بررسی پشتیبانی #{conversation.pk}",
+        "subtitle": "Timeline و پاسخ owner-facing فقط برای همین گفتگو.",
+    }
+    return TemplateResponse(request, "admin/store/support/review.html", context)
+
+
 def base_service_clients(store=None):
     queryset = (
         VPNClient.objects.select_related("store", "order", "order__customer", "plan", "inbound", "inbound__panel")
@@ -1163,6 +1256,8 @@ def build_service_review_context(vpn_client):
             "last_order": last_order,
             "last_order_url": order_review_url(last_order) if last_order else "",
             "review_url": customer_review_url(customer) if customer else "",
+            "message_url": customer_message_url(customer) if customer else "",
+            "support_history_url": customer_review_url(customer) if customer else "",
             "change_url": reverse("admin:store_customer_change", args=[customer.pk]) if customer else "",
         },
         "service_summary": {
@@ -1287,10 +1382,13 @@ def build_customer_review_context(customer):
                 "status": ticket.get_status_display(),
                 "updated_at": ticket.updated_at,
                 "change_url": reverse("admin:store_supportconversation_change", args=[ticket.pk]),
+                "review_url": support_review_url(ticket),
             }
             for ticket in support_tickets[:10]
         ],
         "admin_change_url": reverse("admin:store_customer_change", args=[customer.pk]),
+        "message_url": customer_message_url(customer),
+        "support_workbench_url": support_workbench_url(),
         "workbench_url": service_workbench_url(),
     }
 
@@ -1305,6 +1403,34 @@ def customer_review(request, customer_id):
         "subtitle": "از مشتری به سرویس، usage، expiry و orderهای مرتبط برس.",
     }
     return TemplateResponse(request, "admin/store/customers/review.html", context)
+
+
+def customer_message(request, customer_id):
+    customer = get_object_or_404(Customer, pk=customer_id)
+    message_url = customer_message_url(customer)
+    if request.method == "POST":
+        if request.POST.get("action") != "send":
+            messages.error(request, "Action معتبر نیست.")
+            return redirect(message_url)
+        if request.POST.get("confirm_customer") != "1" and request.POST.get("confirm_external") != "1":
+            messages.error(request, "برای ارسال پیام باید تایید صریح owner ثبت شود.")
+            return redirect(message_url)
+        result = send_customer_direct_message(customer, request.POST.get("message", ""), request.user)
+        if result.duplicate:
+            messages.success(request, "این پیام قبلاً ثبت شده بود و دوباره ارسال نشد.")
+        elif result.ok:
+            messages.success(request, f"پیام شخصی برای {result.sent_count} مقصد تلگرام همین مشتری ارسال شد.")
+        else:
+            messages.error(request, safe_action_message(result.safe_error))
+        return redirect(message_url)
+
+    context = {
+        **admin.site.each_context(request),
+        **get_customer_message_context(customer.pk),
+        "title": f"پیام به مشتری #{customer.pk}",
+        "subtitle": "ارسال پیام شخصی و موردی فقط برای همین مشتری.",
+    }
+    return TemplateResponse(request, "admin/store/customers/message.html", context)
 
 
 def get_review_order(order_id):
@@ -1438,6 +1564,9 @@ def build_review_context(order):
             }
             for client in clients
         ],
+        "customer_message_url": customer_message_url(order.customer) if order.customer_id else "",
+        "support_workbench_url": support_workbench_url(store=order.store),
+        "suggested_message_template": "payment_review" if order.status == Order.Status.REJECTED else "",
         "admin_change_url": reverse("admin:store_order_change", args=[order.pk]),
         "workbench_url": order_workbench_url(store=order.store),
     }

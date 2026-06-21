@@ -21,7 +21,8 @@ from .admin_setup import (
     setup_wizard_url_for_card_key,
     store_change_url,
 )
-from .models import BotConfiguration, Order, PanelHealthCheckLog, PanelHealthStatus, Plan, RevenueOfferLog, Store, VPNClient
+from .admin_support_services import support_workbench_url
+from .models import BotConfiguration, Order, PanelHealthCheckLog, PanelHealthStatus, Plan, RevenueOfferLog, Store, SupportConversation, VPNClient
 
 
 PENDING_ORDER_STATUSES = (
@@ -147,6 +148,51 @@ def service_workbench_url(section="", store=None):
 
 def vpn_client_changelist(params=None):
     return add_query(admin_url("store_vpnclient_changelist"), params or {})
+
+
+def get_support_metrics(store=None):
+    today_start, today_end = local_day_bounds()
+    conversations = for_store(SupportConversation.objects.all(), store)
+    open_count = conversations.exclude(status=SupportConversation.Status.CLOSED).count()
+    needs_reply_count = conversations.filter(status=SupportConversation.Status.WAITING_ADMIN).count()
+    today_count = conversations.filter(updated_at__gte=today_start, updated_at__lt=today_end).count()
+    problematic_count = (
+        conversations.annotate(
+            telegram_target_count=Count(
+                "customer__bot_users",
+                filter=Q(
+                    customer__bot_users__is_active=True,
+                    customer__bot_users__bot_config__is_active=True,
+                    customer__bot_users__bot_config__provider=BotConfiguration.Provider.TELEGRAM,
+                )
+                & ~Q(customer__bot_users__chat_id=""),
+                distinct=True,
+            )
+        )
+        .filter(Q(customer__isnull=True) | Q(telegram_target_count=0))
+        .count()
+    )
+    return {
+        "open": open_count,
+        "needs_reply": needs_reply_count,
+        "today": today_count,
+        "problematic": problematic_count,
+        "card": MetricCard(
+            key="support",
+            title="پشتیبانی",
+            value=format_count(open_count),
+            subtitle=f"{needs_reply_count:,} گفتگو نیازمند پاسخ",
+            tone="warning" if needs_reply_count else ("info" if open_count else "success"),
+            details=[
+                f"امروز: {today_count:,}",
+                f"مشکل‌دار: {problematic_count:,}",
+            ],
+            links=[
+                DashboardLink("میز کار پشتیبانی", support_workbench_url(store=store), tone="warning" if needs_reply_count else "primary"),
+                DashboardLink("نیازمند پاسخ", support_workbench_url("needs-reply", store), tone="warning"),
+            ],
+        ),
+    }
 
 
 def get_order_metrics(store=None):
@@ -506,8 +552,17 @@ def get_setup_summary(store=None):
     }
 
 
-def get_action_items(store, setup_summary, order_metrics, payment_metrics, client_metrics, panel_summary, telegram_summary):
+def get_action_items(store, setup_summary, order_metrics, payment_metrics, client_metrics, panel_summary, telegram_summary, support_metrics=None):
     items = []
+    if support_metrics and support_metrics.get("needs_reply"):
+        items.append(
+            ActionItem(
+                "پیام‌های پشتیبانی را پاسخ بده",
+                f"{support_metrics['needs_reply']:,} گفتگو منتظر پاسخ owner است.",
+                "warning",
+                support_workbench_url("needs-reply", store),
+            )
+        )
     if payment_metrics["pending_receipts"]:
         items.append(
             ActionItem(
@@ -598,6 +653,7 @@ def get_quick_actions(store=None):
     return [
         DashboardLink("میز کار سفارش‌ها", order_workbench_url(store=store)),
         DashboardLink("میز کار سرویس‌ها", service_workbench_url(store=store)),
+        DashboardLink("میز کار پشتیبانی", support_workbench_url(store=store)),
         DashboardLink("سفارش‌های در انتظار", order_workbench_url("needs-review", store), tone="warning"),
         DashboardLink("بررسی رسیدها", order_workbench_url("needs-review", store), tone="warning"),
         DashboardLink("Setup Wizard", setup_wizard_index_url(store)),
@@ -621,10 +677,12 @@ def get_owner_dashboard_context(user=None, selected_store_id=None):
     panel_summary = get_panel_health_summary(selected_store)
     telegram_summary = get_telegram_summary(selected_store)
     revenue_engine_summary = get_revenue_engine_summary(selected_store)
+    support_metrics = get_support_metrics(selected_store)
 
     metric_cards = [
         setup_summary["card"],
         order_metrics["card"],
+        support_metrics["card"],
         payment_metrics["card"],
         revenue_metrics["card"],
         client_metrics["card"],
@@ -644,6 +702,7 @@ def get_owner_dashboard_context(user=None, selected_store_id=None):
         "panel_summary": panel_summary,
         "telegram_summary": telegram_summary,
         "revenue_engine_summary": revenue_engine_summary,
+        "support_metrics": support_metrics,
         "action_items": get_action_items(
             selected_store,
             setup_summary,
@@ -652,6 +711,7 @@ def get_owner_dashboard_context(user=None, selected_store_id=None):
             client_metrics,
             panel_summary,
             telegram_summary,
+            support_metrics,
         ),
         "quick_actions": get_quick_actions(selected_store),
         "generated_at": timezone.now(),

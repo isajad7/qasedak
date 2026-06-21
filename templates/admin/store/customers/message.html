@@ -1,0 +1,99 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{{ customer_summary.review_url }}">Customer Review</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-customer-message" dir="rtl">
+    <section class="qadmin-hero qadmin-support-hero">
+        <div>
+            <p class="qadmin-eyebrow">Customer Message</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ customer_summary.review_url }}" class="qadmin-action qadmin-action-secondary">Customer Review</a>
+            {% if customer_summary.latest_support_url %}
+                <a href="{{ customer_summary.latest_support_url }}" class="qadmin-action qadmin-action-info">آخرین پشتیبانی</a>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="qadmin-review-layout">
+        <div class="qadmin-review-main">
+            <article class="qadmin-review-panel qadmin-customer-context">
+                <header>
+                    <h2>خلاصه مشتری</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ customer_summary.telegram_tone }}">{{ customer_summary.telegram_label }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>نام</dt><dd>{{ customer_summary.name }}</dd></div>
+                    <div><dt>تلفن</dt><dd>{% if customer_summary.phone_masked %}{{ customer_summary.phone_masked }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Username</dt><dd>{% if customer_summary.username_masked %}{{ customer_summary.username_masked }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Telegram target</dt><dd>{{ customer_summary.telegram_target_count }} مقصد</dd></div>
+                </dl>
+            </article>
+        </div>
+
+        <aside class="qadmin-action-box qadmin-reply-box">
+            <h2>پیام شخصی</h2>
+            {{ message_templates|json_script:"customer-message-templates" }}
+            <form method="post" class="qadmin-action-form">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="send">
+                <label for="customer-direct-message">متن پیام</label>
+                <textarea id="customer-direct-message" name="message" rows="8" maxlength="2000" {% if not can_send %}disabled{% else %}required{% endif %}></textarea>
+                <div class="qadmin-template-buttons">
+                    {% for template in message_templates %}
+                        <button type="button" class="qadmin-template-button" data-template-key="{{ template.key }}" {% if not can_send %}disabled{% endif %}>{{ template.label }}</button>
+                    {% endfor %}
+                </div>
+                <label class="qadmin-confirm-row">
+                    <input type="checkbox" name="confirm_customer" value="1" {% if can_send %}required{% else %}disabled{% endif %}>
+                    ارسال پیام به همین مشتری
+                </label>
+                <button type="submit" class="qadmin-button" {% if not can_send %}disabled{% endif %}>ارسال پیام</button>
+            </form>
+            {% if not can_send %}
+                <div class="qadmin-disabled-note">
+                    <strong>Telegram target</strong>
+                    <p>برای این مشتری مقصد تلگرام فعال ثبت نشده است.</p>
+                </div>
+            {% endif %}
+        </aside>
+    </section>
+</div>
+
+<script>
+    document.addEventListener("DOMContentLoaded", function () {
+        const textarea = document.getElementById("customer-direct-message");
+        const dataNode = document.getElementById("customer-message-templates");
+        const templates = dataNode ? JSON.parse(dataNode.textContent || "[]") : [];
+        const byKey = {};
+        templates.forEach(function (item) {
+            byKey[item.key] = item.body || "";
+        });
+        document.querySelectorAll("[data-template-key]").forEach(function (button) {
+            button.addEventListener("click", function () {
+                if (textarea && !textarea.disabled) {
+                    textarea.value = byKey[button.dataset.templateKey] || "";
+                    textarea.focus();
+                }
+            });
+        });
+    });
+</script>
+{% endblock %}

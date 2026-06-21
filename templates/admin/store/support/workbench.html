@@ -1,0 +1,131 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_owner_dashboard' %}">داشبورد قاصدک</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-support-workbench" dir="rtl">
+    <section class="qadmin-hero qadmin-support-hero">
+        <div>
+            <p class="qadmin-eyebrow">Support Workbench</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{% url 'admin_store_owner_dashboard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-secondary">داشبورد</a>
+            <a href="{% url 'admin:store_supportconversation_changelist' %}" class="qadmin-action qadmin-action-info">لیست ادمین</a>
+        </div>
+    </section>
+
+    <section class="qadmin-toolbar">
+        <div>
+            <strong>فروشگاه:</strong>
+            {% if selected_store %}{{ selected_store.name }}{% else %}همه فروشگاه‌ها{% endif %}
+        </div>
+        {% if stores|length > 1 %}
+            <form method="get" class="qadmin-store-switcher">
+                <label for="qadmin-store">Store</label>
+                <select id="qadmin-store" name="store" onchange="this.form.submit()">
+                    {% for store in stores %}
+                        <option value="{{ store.pk }}" {% if selected_store and selected_store.pk == store.pk %}selected{% endif %}>
+                            {{ store.name }}{% if not store.is_active %} - غیرفعال{% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </form>
+        {% endif %}
+    </section>
+
+    <nav class="qadmin-support-tabs" aria-label="Support queues">
+        {% for section in sections %}
+            <a href="#{{ section.key }}" class="qadmin-order-tab qadmin-status-{{ section.tone }}">
+                <span>{{ section.title }}</span>
+                <strong>{{ section.count }}</strong>
+            </a>
+        {% endfor %}
+    </nav>
+
+    <section class="qadmin-order-summary">
+        <div><strong>{{ summary_counts.open }}</strong><span>باز</span></div>
+        <div><strong>{{ summary_counts.needs_reply }}</strong><span>نیازمند پاسخ</span></div>
+        <div><strong>{{ summary_counts.today }}</strong><span>امروز</span></div>
+        <div><strong>{{ summary_counts.problematic }}</strong><span>مشکل‌دار</span></div>
+    </section>
+
+    {% for section in sections %}
+        <section id="{{ section.key }}" class="qadmin-order-section qadmin-support-section qadmin-status-{{ section.tone }}">
+            <header class="qadmin-order-section-header">
+                <div>
+                    <h2>{{ section.title }}</h2>
+                    <p>{{ section.description }} حداکثر {{ section_limit }} مورد اخیر نمایش داده می‌شود.</p>
+                </div>
+                <span class="qadmin-badge qadmin-badge-{{ section.tone }}">{{ section.count }}</span>
+            </header>
+
+            <div class="qadmin-order-table-wrap">
+                <table class="qadmin-order-table qadmin-support-table">
+                    <thead>
+                        <tr>
+                            <th>گفتگو</th>
+                            <th>مشتری</th>
+                            <th>تلگرام</th>
+                            <th>مرتبط‌ها</th>
+                            <th>وضعیت</th>
+                            <th>آخرین پیام</th>
+                            <th>اقدام</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in section.items %}
+                            <tr>
+                                <td>
+                                    <a href="{{ item.review_url }}" class="qadmin-order-code">#{{ item.conversation.pk }}</a>
+                                    <strong>{{ item.subject }}</strong>
+                                    {% if item.send_failed %}<small class="qadmin-danger-text">ارسال قبلی ناموفق بوده است</small>{% endif %}
+                                </td>
+                                <td>
+                                    {% if item.customer_url %}<a href="{{ item.customer_url }}">{{ item.customer_name }}</a>{% else %}{{ item.customer_name }}{% endif %}
+                                    {% if item.phone_masked %}<small>{{ item.phone_masked }}</small>{% endif %}
+                                    {% if item.username_masked %}<small>{{ item.username_masked }}</small>{% endif %}
+                                </td>
+                                <td>
+                                    <span class="qadmin-badge qadmin-badge-{{ item.telegram_tone }}">{{ item.telegram_label }}</span>
+                                    <small>{{ item.telegram_target_count }} مقصد</small>
+                                </td>
+                                <td>
+                                    <span>{{ item.related_orders_count }} سفارش</span>
+                                    <small>{{ item.related_services_count }} سرویس</small>
+                                </td>
+                                <td><span class="qadmin-badge qadmin-badge-{{ item.status_tone }}">{{ item.status_label }}</span></td>
+                                <td>
+                                    {{ item.last_message_sender }}
+                                    <small>{% if item.last_message_at %}{{ item.last_message_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</small>
+                                </td>
+                                <td>
+                                    <a href="{{ item.review_url }}" class="qadmin-action">Review</a>
+                                    {% if item.customer_message_url %}<a href="{{ item.customer_message_url }}" class="qadmin-action qadmin-action-secondary">پیام</a>{% endif %}
+                                </td>
+                            </tr>
+                        {% empty %}
+                            <tr><td colspan="7" class="qadmin-empty-cell">موردی در این صف نیست.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    {% endfor %}
+</div>
+{% endblock %}

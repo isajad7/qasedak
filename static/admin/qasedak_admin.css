@@ -644,19 +644,24 @@
 .qadmin-order-review,
 .qadmin-service-workbench,
 .qadmin-service-review,
-.qadmin-customer-review {
+.qadmin-customer-review,
+.qadmin-support-workbench,
+.qadmin-support-review,
+.qadmin-customer-message {
     gap: 16px;
 }
 
 .qadmin-order-tabs,
 .qadmin-service-tabs,
+.qadmin-support-tabs,
 .qadmin-order-summary {
     display: grid;
     gap: 10px;
 }
 
 .qadmin-order-tabs,
-.qadmin-service-tabs {
+.qadmin-service-tabs,
+.qadmin-support-tabs {
     grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
 }
 
@@ -806,6 +811,15 @@
 
 .qadmin-service-table {
     min-width: 980px;
+}
+
+.qadmin-support-table {
+    min-width: 920px;
+}
+
+.qadmin-danger-text {
+    color: #9c2b21 !important;
+    font-weight: 800;
 }
 
 .qadmin-usage-bar {
@@ -958,6 +972,83 @@
     font-size: 13px;
 }
 
+.qadmin-message-timeline {
+    display: grid;
+    gap: 12px;
+}
+
+.qadmin-message-row {
+    display: flex;
+}
+
+.qadmin-message-customer {
+    justify-content: flex-start;
+}
+
+.qadmin-message-admin,
+.qadmin-message-system {
+    justify-content: flex-end;
+}
+
+.qadmin-message-bubble {
+    width: min(100%, 760px);
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #f8fafc;
+    padding: 12px;
+}
+
+.qadmin-message-admin .qadmin-message-bubble {
+    border-color: #b9decf;
+    background: #f0fbf5;
+}
+
+.qadmin-message-customer .qadmin-message-bubble {
+    border-color: #f0cf8d;
+    background: #fff9ed;
+}
+
+.qadmin-message-system .qadmin-message-bubble {
+    border-color: #cbd4df;
+    background: #f2f5f9;
+}
+
+.qadmin-message-bubble header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.qadmin-message-bubble time,
+.qadmin-message-bubble small {
+    color: #5f6f85;
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.qadmin-message-bubble p {
+    margin: 0;
+    color: #172033;
+    font-size: 14px;
+    line-height: 1.9;
+    overflow-wrap: anywhere;
+}
+
+.qadmin-support-related {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 14px;
+}
+
+.qadmin-support-related h3 {
+    margin: 0 0 8px;
+    color: #172033;
+    font-size: 14px;
+    font-weight: 900;
+}
+
 .qadmin-action-box {
     position: sticky;
     top: 12px;
@@ -991,6 +1082,39 @@
     padding: 8px 10px;
 }
 
+.qadmin-reply-box {
+    align-content: start;
+}
+
+.qadmin-template-buttons {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+    gap: 8px;
+}
+
+.qadmin-template-button {
+    min-height: 36px;
+    border: 1px solid #c4ceda;
+    border-radius: 6px;
+    background: #fff;
+    color: #172033;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 900;
+    padding: 7px 8px;
+}
+
+.qadmin-template-button:hover {
+    border-color: #216c5c;
+    background: #effaf6;
+}
+
+.qadmin-template-button:disabled,
+.qadmin-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.58;
+}
+
 .qadmin-confirm-row {
     display: flex;
     align-items: flex-start;
@@ -1008,6 +1132,10 @@
     border-radius: 8px;
     background: #f8fafc;
     padding: 12px;
+}
+
+.qadmin-internal-note {
+    border-style: dashed;
 }
 
 .qadmin-inline-badges {
