@@ -42,7 +42,51 @@ curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/uninst
 
 ## After Install
 
-Open Django Admin and finish store setup:
+Open Django Admin and start from the owner dashboard:
+
+```text
+/admin/store/dashboard/
+```
+
+Use it to see today’s orders, pending receipts, revenue, active/expiring services, saved panel health, Telegram status, and action items. The dashboard is an admin UI overview, not a replacement for `doctor.sh`.
+
+For daily order/payment work, open:
+
+```text
+/admin/store/orders/workbench/
+```
+
+Owner flow: pending receipt -> review -> approve/reject -> delivery status. Actions are explicit POST confirmations and reuse the existing order services.
+
+For customer and VPN service work, open:
+
+```text
+/admin/store/services/workbench/
+```
+
+Owner flow: customer -> service -> usage/expiry -> resend/update/disable. GET pages are read-only; live Telegram/X-UI work happens only through explicit POST actions.
+
+For Revenue Engine rollout and daily guardrails, open:
+
+```text
+/admin/store/revenue/control/
+```
+
+Dry-run means offers are logged and reported without sending real Telegram messages. Enable real-send only after reviewing dry-run reports and local safety warnings; use reset safe defaults to quickly return to enabled + dry-run with conservative caps.
+
+Use the Setup Center to complete installation:
+
+```text
+/admin/store/setup/
+```
+
+Use the guided wizard for the short post-install flow:
+
+```text
+/admin/store/setup/wizard/
+```
+
+The installer is intentionally minimal. Finish store setup from Django Admin:
 
 - Store name/support/payment card
 - Telegram bot settings
@@ -50,7 +94,12 @@ Open Django Admin and finish store setup:
 - Inbounds
 - Plans
 - Plan routes
+- Payment details
+- Service workbench review for active/expiring/expired clients
+- Revenue Control Center dry-run review before any real-send rollout
 - Test purchase
+
+The wizard and Setup Center read local state and do not run Telegram/X-UI live checks automatically.
 
 Guide: [Post-Install Setup](docs/POST_INSTALL_SETUP.md)
 
@@ -72,3 +121,4 @@ sudo /opt/qasedak/scripts/backup.sh --install-dir /opt/qasedak --output-dir /opt
 
 - Telegram and X-UI live checks are opt-in.
 - Revenue Engine starts enabled but dry-run by default.
+- Real-send is a POST-only admin action with explicit confirmation and local safety checks.

@@ -1,0 +1,174 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_owner_dashboard' %}">داشبورد قاصدک</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-service-workbench" dir="rtl">
+    <section class="qadmin-hero qadmin-service-hero">
+        <div>
+            <p class="qadmin-eyebrow">Service Workbench</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{% url 'admin_store_owner_dashboard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-secondary">داشبورد</a>
+            <a href="{% url 'admin:store_vpnclient_changelist' %}" class="qadmin-action qadmin-action-info">لیست ادمین</a>
+        </div>
+    </section>
+
+    <section class="qadmin-toolbar">
+        <div>
+            <strong>فروشگاه:</strong>
+            {% if selected_store %}{{ selected_store.name }}{% else %}همه فروشگاه‌ها{% endif %}
+        </div>
+        {% if stores|length > 1 %}
+            <form method="get" class="qadmin-store-switcher">
+                <label for="qadmin-store">Store</label>
+                <select id="qadmin-store" name="store" onchange="this.form.submit()">
+                    {% for store in stores %}
+                        <option value="{{ store.pk }}" {% if selected_store and selected_store.pk == store.pk %}selected{% endif %}>
+                            {{ store.name }}{% if not store.is_active %} - غیرفعال{% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </form>
+        {% endif %}
+    </section>
+
+    <section class="qadmin-service-tabs">
+        {% for section in sections %}
+            <a href="#{{ section.key }}" class="qadmin-order-tab qadmin-status-{{ section.tone }}">
+                <span>{{ section.title }}</span>
+                <strong>{{ section.count }}</strong>
+            </a>
+        {% endfor %}
+    </section>
+
+    <section class="qadmin-order-summary">
+        <div><strong>{{ summary_counts.active }}</strong><span>فعال</span></div>
+        <div><strong>{{ summary_counts.expiring }}</strong><span>در حال انقضا</span></div>
+        <div><strong>{{ summary_counts.needs_telegram }}</strong><span>بدون مقصد تلگرام</span></div>
+        <div><strong>{{ summary_counts.attention }}</strong><span>نیازمند بررسی</span></div>
+    </section>
+
+    {% for section in sections %}
+        <section id="{{ section.key }}" class="qadmin-order-section qadmin-status-{{ section.tone }}">
+            <header class="qadmin-order-section-header">
+                <div>
+                    <h2>{{ section.title }}</h2>
+                    <p>{{ section.description }} حداکثر {{ section_limit }} مورد اخیر نمایش داده می‌شود.</p>
+                </div>
+                <div class="qadmin-order-section-actions">
+                    <span class="qadmin-badge qadmin-badge-{{ section.tone }}">{{ section.count }}</span>
+                    {% if section.link %}
+                        <a href="{{ section.link }}" class="qadmin-action qadmin-action-secondary">Filtered list</a>
+                    {% endif %}
+                </div>
+            </header>
+            <div class="qadmin-order-table-wrap">
+                <table class="qadmin-order-table qadmin-service-table">
+                    <thead>
+                        <tr>
+                            <th>سرویس</th>
+                            <th>مشتری</th>
+                            <th>پلن / مسیر</th>
+                            <th>وضعیت</th>
+                            <th>انقضا / مصرف</th>
+                            <th>تحویل</th>
+                            <th>اقدام</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in section.items %}
+                            <tr>
+                                <td>
+                                    <a href="{{ item.review_url }}" class="qadmin-order-code">#{{ item.client.pk }} · {{ item.service_label }}</a>
+                                    <small>{% if item.order_code %}Order {{ item.order_code }}{% else %}بدون سفارش{% endif %}</small>
+                                </td>
+                                <td>
+                                    {% if item.customer_url %}<a href="{{ item.customer_url }}">{{ item.customer_name }}</a>{% else %}{{ item.customer_name }}{% endif %}
+                                    {% if item.phone_masked %}<small>{{ item.phone_masked }}</small>{% endif %}
+                                </td>
+                                <td>
+                                    {{ item.plan }}
+                                    <small>{% if item.panel %}{{ item.panel }} / {{ item.inbound }}{% else %}بدون panel/inbound{% endif %}</small>
+                                </td>
+                                <td>
+                                    <span class="qadmin-badge qadmin-badge-{{ item.status_tone }}">{{ item.status_label }}</span>
+                                    <small><span class="qadmin-badge qadmin-badge-{{ item.route_tone }}">{{ item.route_label }}</span></small>
+                                </td>
+                                <td>
+                                    {% if item.expires_at %}{{ item.expires_at|date:"Y-m-d H:i" }}{% else %}بدون تاریخ{% endif %}
+                                    <small>{{ item.days_left_label }}</small>
+                                    <div class="qadmin-usage-bar"><span style="width: {{ item.usage.percent }}%"></span></div>
+                                    <small>{{ item.usage.used_label }} از {{ item.usage.total_label }}</small>
+                                </td>
+                                <td>
+                                    <span class="qadmin-badge qadmin-badge-{{ item.telegram_tone }}">{{ item.telegram_label }}</span>
+                                    <small>اشتراک: {% if item.has_subscription_link %}مخفی/موجود{% else %}ندارد{% endif %}</small>
+                                    <small>مستقیم: {% if item.has_direct_link %}مخفی/موجود{% else %}ندارد{% endif %}</small>
+                                </td>
+                                <td><a href="{{ item.review_url }}" class="qadmin-action">Review</a></td>
+                            </tr>
+                        {% empty %}
+                            <tr><td colspan="7" class="qadmin-empty-cell">موردی در این صف نیست.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    {% endfor %}
+
+    <section class="qadmin-order-section qadmin-status-info">
+        <header class="qadmin-order-section-header">
+            <div>
+                <h2>مشتری‌های اخیر</h2>
+                <p>برای شروع از مشتری، وارد customer review شو و سرویس‌های فعال/منقضی را ببین.</p>
+            </div>
+            <span class="qadmin-badge qadmin-badge-info">{{ summary_counts.recent_customers }}</span>
+        </header>
+        <div class="qadmin-order-table-wrap">
+            <table class="qadmin-order-table">
+                <thead>
+                    <tr>
+                        <th>مشتری</th>
+                        <th>تلگرام</th>
+                        <th>سفارش‌ها</th>
+                        <th>سرویس فعال</th>
+                        <th>آخرین سفارش</th>
+                        <th>اقدام</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in recent_customers %}
+                        <tr>
+                            <td><a href="{{ item.review_url }}">{{ item.name }}</a>{% if item.phone_masked %}<small>{{ item.phone_masked }}</small>{% endif %}</td>
+                            <td>{{ item.telegram_label }}</td>
+                            <td>{{ item.orders_count }}</td>
+                            <td>{{ item.active_clients_count }}</td>
+                            <td>{% if item.last_order_at %}{{ item.last_order_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</td>
+                            <td><a href="{{ item.review_url }}" class="qadmin-action">Customer Review</a></td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="6" class="qadmin-empty-cell">مشتری‌ای برای نمایش نیست.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+{% endblock %}

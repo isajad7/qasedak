@@ -1,0 +1,94 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Setup Center</p>
+            <h1>{{ title }}</h1>
+            <p>وضعیت نصب و تنظیمات اولیه را بدون اجرای live call بررسی کن.</p>
+        </div>
+        <div class="qadmin-hero-stack">
+            <div class="qadmin-summary">
+                <span class="qadmin-count qadmin-count-done">{{ counts.done }} انجام شده</span>
+                <span class="qadmin-count qadmin-count-safe">{{ counts.safe }} ایمن</span>
+                <span class="qadmin-count qadmin-count-warning">{{ counts.warning }} هشدار</span>
+                <span class="qadmin-count qadmin-count-error">{{ counts.error }} خطا</span>
+            </div>
+            <div class="qadmin-actions">
+                <a href="{{ wizard_url }}" class="qadmin-action">شروع راه‌اندازی مرحله‌ای</a>
+                <a href="{% url 'admin_store_owner_dashboard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-secondary">داشبورد قاصدک</a>
+            </div>
+        </div>
+    </section>
+
+    <section class="qadmin-toolbar">
+        <div>
+            <strong>فروشگاه انتخاب‌شده:</strong>
+            {% if selected_store %}
+                {{ selected_store.name }}
+            {% else %}
+                هنوز فروشگاهی ساخته نشده است
+            {% endif %}
+        </div>
+        {% if stores|length > 1 %}
+            <form method="get" class="qadmin-store-switcher">
+                <label for="qadmin-store">Store</label>
+                <select id="qadmin-store" name="store" onchange="this.form.submit()">
+                    {% for store in stores %}
+                        <option value="{{ store.pk }}" {% if selected_store and selected_store.pk == store.pk %}selected{% endif %}>
+                            {{ store.name }}{% if not store.is_active %} - غیرفعال{% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </form>
+        {% endif %}
+    </section>
+
+    <section class="qadmin-card-grid">
+        {% for card in cards %}
+            <article id="{{ card.key }}" class="qadmin-card qadmin-status-{{ card.status }}">
+                <header>
+                    <div>
+                        <h2>{{ card.title }}</h2>
+                        <p>{{ card.description }}</p>
+                    </div>
+                    <span class="qadmin-badge qadmin-badge-{{ card.status }}">{{ card.status_label }}</span>
+                </header>
+                {% if card.details %}
+                    <ul class="qadmin-detail-list">
+                        {% for detail in card.details %}
+                            <li>{{ detail }}</li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+                {% if card.command %}
+                    <code class="qadmin-command">{{ card.command }}</code>
+                {% endif %}
+                {% if card.actions %}
+                    <div class="qadmin-actions">
+                        {% for action in card.actions %}
+                            <a href="{{ action.url }}" class="qadmin-action qadmin-action-{{ action.style }}">{{ action.label }}</a>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            </article>
+        {% endfor %}
+    </section>
+</div>
+{% endblock %}

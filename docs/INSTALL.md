@@ -28,7 +28,29 @@ Default install directory:
 /opt/qasedak
 ```
 
-After install, open Django Admin and complete [Post-Install Setup](POST_INSTALL_SETUP.md).
+After install, open Django Admin and start from the owner dashboard:
+
+```text
+/admin/store/dashboard/
+```
+
+The dashboard shows the overall state and action items from DB/log data only. It does not replace `doctor.sh`.
+
+Use the Setup Center to complete the installation:
+
+```text
+/admin/store/setup/
+```
+
+For the shortest owner-facing setup path, use the guided wizard:
+
+```text
+/admin/store/setup/wizard/
+```
+
+Telegram, X-UI/Sanaei, plans, routes, payment details, and Revenue Engine rollout are completed from Django Admin. The wizard and Setup Center do not run live Telegram/X-UI checks automatically. The installer is intentionally minimal; missing integration records after install are setup warnings, not installer failures. Keep Revenue Engine dry-run at first and review logs before real sends.
+
+Full guide: [Post-Install Setup](POST_INSTALL_SETUP.md).
 
 ## Advanced Install
 

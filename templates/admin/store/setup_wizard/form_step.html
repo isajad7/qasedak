@@ -1,0 +1,70 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_setup_wizard' %}">راه‌اندازی مرحله‌ای</a>
+    &rsaquo; {{ current_step.title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-wizard" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Setup Wizard</p>
+            <h1>{{ current_step.title }}</h1>
+            <p>{{ current_step.description }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <span class="qadmin-badge qadmin-badge-{{ current_status }}">{{ current_status_label }}</span>
+            <a href="{% url 'admin_store_setup_wizard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-secondary">همه مراحل</a>
+        </div>
+    </section>
+
+    <section class="qadmin-toolbar">
+        <div><strong>پیشرفت:</strong> {{ progress_percent }}٪</div>
+        <div class="qadmin-progress"><span style="width: {{ progress_percent }}%"></span></div>
+    </section>
+
+    <section class="qadmin-wizard-layout">
+        <aside class="qadmin-wizard-steps">
+            {% for item in wizard_steps %}
+                <a href="{{ item.url }}" class="qadmin-wizard-step {% if item.step.slug == current_step.slug %}is-current{% endif %}">
+                    <span>{{ forloop.counter }}. {{ item.step.title }}</span>
+                    <b class="qadmin-badge qadmin-badge-{{ item.status }}">{{ item.status_label }}</b>
+                </a>
+            {% endfor %}
+        </aside>
+
+        <form method="post" class="qadmin-form-panel" novalidate>
+            {% csrf_token %}
+            {{ form.non_field_errors }}
+            {% for field in form %}
+                <div class="qadmin-form-row{% if field.errors %} has-error{% endif %}">
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    {{ field }}
+                    {% if field.help_text %}<p class="qadmin-help">{{ field.help_text }}</p>{% endif %}
+                    {% for error in field.errors %}<p class="qadmin-error">{{ error }}</p>{% endfor %}
+                </div>
+            {% endfor %}
+            <div class="qadmin-form-actions">
+                <a href="{{ previous_url }}" class="qadmin-action qadmin-action-secondary">قبلی</a>
+                {% if can_skip %}
+                    <button type="submit" name="_skip" value="1" class="qadmin-button qadmin-button-secondary">بعداً انجام می‌دهم</button>
+                {% endif %}
+                <button type="submit" class="qadmin-button">ذخیره و ادامه</button>
+                <a href="{{ next_url }}" class="qadmin-action qadmin-action-info">بعدی بدون ذخیره</a>
+            </div>
+        </form>
+    </section>
+</div>
+{% endblock %}

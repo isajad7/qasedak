@@ -1,0 +1,18 @@
+{% extends "admin/import_export/change_list_import_export.html" %}
+{% load i18n %}
+
+{% block object-tools-items %}
+    <a href="{% url 'admin_store_owner_dashboard' %}" class="btn btn-primary float-end">
+        داشبورد قاصدک
+    </a>
+    <a href="{% url 'admin_store_setup_wizard' %}" class="btn btn-success float-end">
+        Setup Wizard
+    </a>
+    <a href="{% url 'admin_store_setup_center' %}" class="btn btn-info float-end">
+        راه‌اندازی قاصدک
+    </a>
+    <a href="{% url 'admin_store_revenue_control' %}" class="btn btn-danger float-end">
+        کنترل درآمد هوشمند
+    </a>
+    {{ block.super }}
+{% endblock %}

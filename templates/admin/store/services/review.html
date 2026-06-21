@@ -1,0 +1,164 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_service_workbench' %}">میز کار سرویس‌ها</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-service-review" dir="rtl">
+    <section class="qadmin-hero qadmin-service-hero">
+        <div>
+            <p class="qadmin-eyebrow">VPN Client Review</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ workbench_url }}" class="qadmin-action qadmin-action-secondary">میز کار سرویس‌ها</a>
+            <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-info">فرم ادمین</a>
+        </div>
+    </section>
+
+    <section class="qadmin-review-layout">
+        <div class="qadmin-review-main">
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>خلاصه مشتری</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ customer_summary.telegram_tone }}">{{ customer_summary.telegram_label }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>مشتری</dt><dd>{% if customer_summary.review_url %}<a href="{{ customer_summary.review_url }}">{{ customer_summary.name }}</a>{% else %}{{ customer_summary.name }}{% endif %}</dd></div>
+                    <div><dt>تلفن</dt><dd>{% if customer_summary.phone_masked %}{{ customer_summary.phone_masked }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Username</dt><dd>{% if customer_summary.username_masked %}{{ customer_summary.username_masked }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Telegram target</dt><dd>{{ customer_summary.telegram_target_count }} مقصد فعال</dd></div>
+                    <div><dt>آخرین سفارش</dt><dd>{% if customer_summary.last_order %}<a href="{{ customer_summary.last_order_url }}">{{ customer_summary.last_order.order_tracking_code }}</a>{% else %}-{% endif %}</dd></div>
+                    <div><dt>Customer admin</dt><dd>{% if customer_summary.change_url %}<a href="{{ customer_summary.change_url }}">باز کردن</a>{% else %}-{% endif %}</dd></div>
+                </dl>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>خلاصه سرویس</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ service_summary.status_tone }}">{{ service_summary.status_label }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>Plan / Order</dt><dd>{{ service_summary.plan }}{% if service_summary.order %}<small><a href="{{ service_summary.order_url }}">{{ service_summary.order.order_tracking_code }}</a></small>{% endif %}</dd></div>
+                    <div><dt>Panel</dt><dd>{{ service_summary.panel }}</dd></div>
+                    <div><dt>Inbound</dt><dd>{{ service_summary.inbound }}</dd></div>
+                    <div><dt>Protocol</dt><dd>{{ service_summary.protocol }}</dd></div>
+                    <div><dt>Created</dt><dd>{{ service_summary.created_at|date:"Y-m-d H:i" }}</dd></div>
+                    <div><dt>Activated</dt><dd>{% if service_summary.activated_at %}{{ service_summary.activated_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Expires</dt><dd>{% if service_summary.expires_at %}{{ service_summary.expires_at|date:"Y-m-d H:i" }}{% else %}نامشخص{% endif %}<small>{{ service_summary.days_left_label }}</small></dd></div>
+                    <div><dt>Last sync</dt><dd>{% if service_summary.last_synced_at %}{{ service_summary.last_synced_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Last online</dt><dd>{% if service_summary.last_online_at %}{{ service_summary.last_online_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                </dl>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>مصرف</h2>
+                    <span class="qadmin-badge qadmin-badge-info">{{ service_summary.usage.percent }}%</span>
+                </header>
+                <div class="qadmin-usage-wide">
+                    <div class="qadmin-usage-bar"><span style="width: {{ service_summary.usage.percent }}%"></span></div>
+                    <dl class="qadmin-review-grid">
+                        <div><dt>Total</dt><dd>{{ service_summary.usage.total_label }}</dd></div>
+                        <div><dt>Used</dt><dd>{{ service_summary.usage.used_label }}</dd></div>
+                        <div><dt>Remaining</dt><dd>{{ service_summary.usage.remaining_label }}</dd></div>
+                        <div><dt>Last snapshot</dt><dd>{% if service_summary.usage.snapshot %}{{ service_summary.usage.snapshot.recorded_at|date:"Y-m-d H:i" }}{% else %}ثبت نشده{% endif %}</dd></div>
+                    </dl>
+                </div>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>تحویل کانفیگ</h2>
+                    <span class="qadmin-badge qadmin-badge-{% if delivery_summary.config_exists %}success{% else %}warning{% endif %}">{% if delivery_summary.config_exists %}Config exists{% else %}No config{% endif %}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>Subscription link</dt><dd>{{ delivery_summary.subscription_status }}</dd></div>
+                    <div><dt>Direct config</dt><dd>{{ delivery_summary.direct_status }}</dd></div>
+                    <div><dt>Telegram delivery</dt><dd>{{ delivery_summary.delivered_to_telegram }}</dd></div>
+                    <div><dt>آخرین خطا</dt><dd>{% if delivery_summary.last_error %}{{ delivery_summary.last_error }}{% else %}-{% endif %}</dd></div>
+                </dl>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>وضعیت سلامت</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ health_summary.route_tone }}">{{ health_summary.route_label }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>Route / Panel / Inbound</dt><dd>{{ health_summary.route_label }}</dd></div>
+                    <div><dt>Telegram target</dt><dd><span class="qadmin-badge qadmin-badge-{{ health_summary.telegram_tone }}">{{ health_summary.telegram_label }}</span></dd></div>
+                    <div><dt>Reminder status</dt><dd>{{ health_summary.reminder_label }}</dd></div>
+                    <div><dt>Reminder time</dt><dd>{% if health_summary.reminder_at %}{{ health_summary.reminder_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                </dl>
+            </article>
+        </div>
+
+        <aside class="qadmin-action-box">
+            <h2>Action</h2>
+            {% if actions.can_resend_config %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <label class="qadmin-confirm-row"><input type="checkbox" name="confirm_external" value="1" required> تایید می‌کنم ارسال Telegram فقط با همین action انجام شود.</label>
+                    <button type="submit" name="action" value="resend_config" class="qadmin-button">ارسال مجدد کانفیگ به تلگرام</button>
+                </form>
+            {% else %}
+                <div class="qadmin-disabled-note"><strong>Resend config</strong><p>لینک کانفیگ یا مقصد تلگرام آماده نیست.</p></div>
+            {% endif %}
+
+            {% if actions.can_refresh_config %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <label class="qadmin-confirm-row"><input type="checkbox" name="confirm_external" value="1" required> تایید می‌کنم refresh از X-UI اجرا شود.</label>
+                    <button type="submit" name="action" value="refresh_config_link" class="qadmin-button qadmin-button-secondary">Refresh config link</button>
+                </form>
+            {% else %}
+                <div class="qadmin-disabled-note"><strong>Refresh config</strong><p>Panel / inbound / identifier معتبر موجود نیست.</p></div>
+            {% endif %}
+
+            {% if actions.can_update_usage %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <label class="qadmin-confirm-row"><input type="checkbox" name="confirm_external" value="1" required> تایید می‌کنم usage از پنل به‌روزرسانی شود.</label>
+                    <button type="submit" name="action" value="update_usage" class="qadmin-button qadmin-button-secondary">Update usage from panel</button>
+                </form>
+            {% endif %}
+
+            {% if actions.can_disable %}
+                <form method="post" class="qadmin-action-form qadmin-danger-form">
+                    {% csrf_token %}
+                    <label class="qadmin-confirm-row"><input type="checkbox" name="confirm_external" value="1" required> تایید می‌کنم سرویس روی پنل غیرفعال شود.</label>
+                    <button type="submit" name="action" value="disable_client" class="qadmin-button qadmin-button-danger">غیرفعال کردن سرویس</button>
+                </form>
+            {% endif %}
+
+            {% if actions.can_enable %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <label class="qadmin-confirm-row"><input type="checkbox" name="confirm_external" value="1" required> تایید می‌کنم سرویس روی پنل فعال شود.</label>
+                    <button type="submit" name="action" value="enable_client" class="qadmin-button">فعال کردن سرویس</button>
+                </form>
+            {% endif %}
+
+            <div class="qadmin-disabled-note">
+                <strong>Delete service</strong>
+                <p>حذف از admin review در P5 فعال نشده است؛ فقط actionهای امن موجود نمایش داده می‌شوند.</p>
+            </div>
+        </aside>
+    </section>
+</div>
+{% endblock %}

@@ -7,6 +7,8 @@ from django.utils.translation import gettext_lazy as _
 from import_export import fields, resources
 from import_export.admin import ImportExportModelAdmin
 
+from store.models import normalize_payment_digits
+
 from .models import IncomingPaymentSMS
 from .payment_matching import (
     confirm_incoming_payment_sms,
@@ -72,12 +74,12 @@ class IncomingPaymentSMSAdmin(ImportExportModelAdmin):
     resource_class = IncomingPaymentSMSResource
     list_display = (
         "id",
+        "matched_order_customer",
         "amount",
-        "balance",
-        "sms_datetime",
         "status",
         "matched_orders_summary",
-        "raw_preview",
+        "order_review_links",
+        "sms_datetime",
         "received_at",
     )
     list_filter = ("status", MatchedOrderCountFilter, "sms_datetime", "received_at")
@@ -115,13 +117,35 @@ class IncomingPaymentSMSAdmin(ImportExportModelAdmin):
         return (
             super()
             .get_queryset(request)
-            .prefetch_related("matched_orders")
+            .prefetch_related("matched_orders__customer")
             .annotate(order_match_count=Count("matched_orders", distinct=True))
         )
 
     @admin.display(description=_("Raw preview"))
     def raw_preview(self, obj):
         return Truncator(obj.raw_text).chars(90)
+
+    def mask_phone(self, value):
+        cleaned = "".join(ch for ch in normalize_payment_digits(value) if ch.isdigit() or ch == "+")
+        if not cleaned:
+            return ""
+        prefix = cleaned[:4] if cleaned.startswith("+") else cleaned[:3]
+        suffix = cleaned[-2:] if len(cleaned) > 5 else ""
+        return f"{prefix}***{suffix}" if suffix else "***"
+
+    def safe_customer_label(self, customer):
+        if not customer:
+            return "-"
+        phone = getattr(customer, "phone_number", "") or ""
+        label = (getattr(customer, "display_name", "") or getattr(customer, "username", "") or "").strip()
+        if phone and normalize_payment_digits(label) == normalize_payment_digits(phone):
+            return self.mask_phone(phone)
+        return label or f"Customer {str(customer.public_id)[:8]}"
+
+    @admin.display(description=_("Customer"))
+    def matched_order_customer(self, obj):
+        order = next(iter(obj.matched_orders.all()), None)
+        return self.safe_customer_label(order.customer) if order else "-"
 
     @admin.display(description=_("Matched orders"), ordering="order_match_count")
     def matched_orders_summary(self, obj):
@@ -138,6 +162,15 @@ class IncomingPaymentSMSAdmin(ImportExportModelAdmin):
         suffix = "" if count <= 5 else _(" +%(count)s more") % {"count": count - 5}
         order_links = format_html_join(", ", '<a href="{}">{}</a>', links)
         return format_html("{}{}", order_links, suffix)
+
+    @admin.display(description=_("Review"))
+    def order_review_links(self, obj):
+        links = []
+        for order in obj.matched_orders.all()[:3]:
+            links.append((reverse("admin_store_order_review", args=[order.pk]), _("Review %(code)s") % {"code": order.order_tracking_code}))
+        if not links:
+            return "-"
+        return format_html_join(", ", '<a href="{}">{}</a>', links)
 
     @admin.action(description=_("Re-evaluate SMS matching for selected messages"))
     def re_evaluate_sms_match(self, request, queryset):

@@ -1,0 +1,166 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_order_workbench' %}">میز کار سفارش‌ها</a>
+    &rsaquo; {{ order.order_tracking_code }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-order-review" dir="rtl">
+    <section class="qadmin-hero qadmin-order-hero">
+        <div>
+            <p class="qadmin-eyebrow">Order Review</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ workbench_url }}" class="qadmin-action qadmin-action-secondary">بازگشت به میز کار</a>
+            <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-info">فرم ادمین</a>
+        </div>
+    </section>
+
+    <section class="qadmin-review-layout">
+        <div class="qadmin-review-main">
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>خلاصه سفارش</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ row.status_tone }}">{{ row.status_label }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>کد سفارش</dt><dd>{{ order.order_tracking_code }}</dd></div>
+                    <div><dt>مشتری</dt><dd>{{ row.customer_name }}{% if row.phone_masked %} · {{ row.phone_masked }}{% endif %}</dd></div>
+                    <div><dt>وضعیت تلگرام</dt><dd>{{ row.telegram_status }}</dd></div>
+                    <div><dt>پلن</dt><dd>{{ row.plan }}</dd></div>
+                    <div><dt>حجم / مدت</dt><dd>{{ order.plan.volume_gb }} GB / {{ order.plan.duration_days }} روز</dd></div>
+                    <div><dt>تعداد</dt><dd>{{ order.quantity }}</dd></div>
+                    <div><dt>مبلغ</dt><dd>{{ row.amount }}</dd></div>
+                    <div><dt>اپراتور</dt><dd>{% if row.operator %}{{ row.operator }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>ایجاد</dt><dd>{{ order.created_at|date:"Y-m-d H:i" }}</dd></div>
+                </dl>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>پرداخت / رسید</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ payment.tone }}">{{ payment.label }}</span>
+                </header>
+                <div class="qadmin-payment-layout">
+                    <dl class="qadmin-review-grid">
+                        <div><dt>روش پرداخت</dt><dd>{{ order.get_payment_method_display }}</dd></div>
+                        <div><dt>مبلغ مورد انتظار</dt><dd>{{ payment.expected_amount }}</dd></div>
+                        <div><dt>مبلغ تشخیص‌داده‌شده</dt><dd>{{ payment.detected_amount }}</dd></div>
+                        <div><dt>وضعیت تحلیل رسید</dt><dd>{{ payment.analysis_status }}</dd></div>
+                        <div><dt>زمان ثبت پرداخت</dt><dd>{% if payment.submitted_at %}{{ payment.submitted_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                        <div><dt>چهار رقم کارت پرداخت‌کننده</dt><dd>{% if payment.sender_card_last4 %}****{{ payment.sender_card_last4 }}{% else %}-{% endif %}</dd></div>
+                    </dl>
+                    <div class="qadmin-receipt-preview">
+                        {% if payment.receipt_url %}
+                            <a href="{{ payment.receipt_url }}" target="_blank" rel="noopener">
+                                <img src="{{ payment.receipt_url }}" alt="Payment receipt preview">
+                            </a>
+                        {% else %}
+                            <p class="qadmin-empty">رسید تصویری ثبت نشده است.</p>
+                        {% endif %}
+                    </div>
+                </div>
+                {% if payment.analysis_warning %}
+                    <p class="qadmin-warning-text">{{ payment.analysis_warning }}</p>
+                {% endif %}
+                {% if payment.sms_messages %}
+                    <div class="qadmin-mini-list">
+                        <h3>SMSهای match شده</h3>
+                        {% for sms in payment.sms_messages %}
+                            <p>#{{ sms.pk }} · {{ sms.amount }} ریال · {{ sms.get_status_display }} · {{ sms.sms_datetime|date:"Y-m-d H:i" }}</p>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>مسیر تحویل</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ delivery.tone }}">{{ delivery.label }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>Panel</dt><dd>{% if delivery.panel %}{{ delivery.panel }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Inbound</dt><dd>{% if delivery.inbound %}{{ delivery.inbound }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Route status</dt><dd><span class="qadmin-badge qadmin-badge-{{ delivery.route_tone }}">{{ delivery.route_label }}</span></dd></div>
+                    <div><dt>Config ساخته شده؟</dt><dd>{% if delivery.config_created %}بله{% else %}خیر{% endif %}</dd></div>
+                    <div><dt>Config ارسال شده؟</dt><dd>{{ delivery.config_sent }}</dd></div>
+                    <div><dt>تعداد کانفیگ</dt><dd>{{ delivery.active_client_count }} فعال از {{ delivery.client_count }}</dd></div>
+                    <div><dt>وضعیت کلاینت اصلی</dt><dd>{% if delivery.primary_client_status %}{{ delivery.primary_client_status }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>آخرین خطا</dt><dd>{% if delivery.last_error %}{{ delivery.last_error }}{% else %}-{% endif %}</dd></div>
+                </dl>
+            </article>
+
+            {% if service_reviews %}
+                <article class="qadmin-review-panel">
+                    <header>
+                        <h2>سرویس‌های مرتبط</h2>
+                        <span class="qadmin-badge qadmin-badge-info">{{ service_reviews|length }}</span>
+                    </header>
+                    <div class="qadmin-mini-list">
+                        {% for service in service_reviews %}
+                            <p><a href="{{ service.url }}">{{ service.label }}</a> · {{ service.status }}</p>
+                        {% endfor %}
+                    </div>
+                </article>
+            {% endif %}
+        </div>
+
+        <aside class="qadmin-action-box">
+            <h2>Action</h2>
+            {% if can_approve %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <label class="qadmin-confirm-row">
+                        <input type="checkbox" name="confirm_external" value="1" required>
+                        تایید می‌کنم این action ممکن است X-UI و Telegram را اجرا کند.
+                    </label>
+                    <button type="submit" name="action" value="approve" class="qadmin-button">تایید پرداخت / تکمیل سفارش</button>
+                </form>
+            {% endif %}
+
+            {% if can_reject %}
+                <form method="post" class="qadmin-action-form qadmin-danger-form">
+                    {% csrf_token %}
+                    <label for="reject-reason">Reason رد سفارش</label>
+                    <textarea id="reject-reason" name="reason" required rows="3"></textarea>
+                    <label class="qadmin-confirm-row">
+                        <input type="checkbox" name="confirm_external" value="1" required>
+                        تایید می‌کنم رد سفارش ممکن است حذف/تعلیق کانفیگ و پیام‌رسانی را اجرا کند.
+                    </label>
+                    <button type="submit" name="action" value="reject" class="qadmin-button qadmin-button-danger">رد سفارش</button>
+                </form>
+            {% endif %}
+
+            {% if can_retry_delivery %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <label class="qadmin-confirm-row">
+                        <input type="checkbox" name="confirm_external" value="1" required>
+                        تایید می‌کنم retry delivery ممکن است X-UI و Telegram را اجرا کند.
+                    </label>
+                    <button type="submit" name="action" value="retry_delivery" class="qadmin-button qadmin-button-secondary">Retry delivery</button>
+                </form>
+            {% endif %}
+
+            <div class="qadmin-disabled-note">
+                <strong>Needs support / admin note</strong>
+                <p>مدل note جداگانه برای سفارش وجود ندارد؛ فعلاً این action غیرفعال است.</p>
+            </div>
+        </aside>
+    </section>
+</div>
+{% endblock %}

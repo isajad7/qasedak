@@ -1,0 +1,362 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_owner_dashboard' %}">داشبورد قاصدک</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-revenue-control" dir="rtl">
+    <section class="qadmin-hero qadmin-revenue-hero qadmin-status-{{ status.tone }}">
+        <div>
+            <p class="qadmin-eyebrow">Revenue Engine Control Center</p>
+            <h1>{{ title }}</h1>
+            <p>{{ status.description }}</p>
+            <div class="qadmin-inline-badges">
+                <span class="qadmin-badge qadmin-badge-{{ status.tone }}">{{ status.label }}</span>
+                {% if selected_store %}
+                    <span class="qadmin-badge qadmin-badge-secondary">Store #{{ selected_store.pk }} · {{ selected_store.name }}</span>
+                {% else %}
+                    <span class="qadmin-badge qadmin-badge-missing">Store انتخاب نشده</span>
+                {% endif %}
+            </div>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{% url 'admin_store_owner_dashboard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-secondary">داشبورد</a>
+            <a href="{{ logs_url }}" class="qadmin-action qadmin-action-info">RevenueOfferLog</a>
+            <a href="{{ store_admin_url }}" class="qadmin-action">Advanced settings</a>
+        </div>
+    </section>
+
+    <section class="qadmin-toolbar">
+        <div>
+            <strong>Mode:</strong>
+            {% if selected_store %}
+                {% if not selected_store.revenue_engine_enabled %}disabled{% elif selected_store.revenue_engine_dry_run %}dry-run{% else %}real-send{% endif %}
+            {% else %}
+                -
+            {% endif %}
+        </div>
+        {% if stores|length > 1 %}
+            <form method="get" class="qadmin-store-switcher">
+                <label for="qadmin-store">Store</label>
+                <select id="qadmin-store" name="store" onchange="this.form.submit()">
+                    {% for store in stores %}
+                        <option value="{{ store.pk }}" {% if selected_store and selected_store.pk == store.pk %}selected{% endif %}>
+                            {{ store.name }}{% if not store.is_active %} - غیرفعال{% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </form>
+        {% endif %}
+    </section>
+
+    <section class="qadmin-revenue-layout">
+        <div class="qadmin-revenue-main">
+            <section class="qadmin-revenue-section">
+                <header>
+                    <h2>وضعیت ۷ روز اخیر</h2>
+                    <span class="qadmin-badge qadmin-badge-secondary">{{ metrics.total }} پیشنهاد</span>
+                </header>
+                <div class="qadmin-revenue-metrics">
+                    <article>
+                        <strong>{{ metrics.dry_run }}</strong>
+                        <span>dry-run</span>
+                    </article>
+                    <article>
+                        <strong>{{ metrics.sent }}</strong>
+                        <span>sent واقعی</span>
+                    </article>
+                    <article>
+                        <strong>{{ metrics.failed }}</strong>
+                        <span>failed</span>
+                    </article>
+                    <article>
+                        <strong>{{ metrics.skipped_suppressed }}</strong>
+                        <span>skipped/suppressed</span>
+                    </article>
+                    <article>
+                        <strong>{{ metrics.conversions }}</strong>
+                        <span>conversions</span>
+                    </article>
+                    <article>
+                        <strong>{{ metrics.conversion_rate }}%</strong>
+                        <span>conversion rate</span>
+                    </article>
+                </div>
+            </section>
+
+            <section class="qadmin-revenue-section">
+                <header>
+                    <h2>Engine switches</h2>
+                    <a href="{{ store_admin_url }}" class="qadmin-action qadmin-action-secondary">Advanced</a>
+                </header>
+                <div class="qadmin-engine-grid">
+                    {% for engine in engine_switches %}
+                        <article class="qadmin-engine-card">
+                            <div>
+                                <h3>{{ engine.label }}</h3>
+                                <p>{{ engine.description }}</p>
+                            </div>
+                            {% if engine.enabled %}
+                                <span class="qadmin-badge qadmin-badge-success">روشن</span>
+                            {% else %}
+                                <span class="qadmin-badge qadmin-badge-secondary">خاموش</span>
+                            {% endif %}
+                        </article>
+                    {% endfor %}
+                </div>
+            </section>
+
+            <section class="qadmin-revenue-section">
+                <header>
+                    <h2>Safety limits</h2>
+                    <span class="qadmin-badge {% if safety.safe %}qadmin-badge-safe{% else %}qadmin-badge-warning{% endif %}">
+                        {% if safety.safe %}safe to consider{% else %}needs review{% endif %}
+                    </span>
+                </header>
+                <div class="qadmin-limit-grid">
+                    {% for limit in safety_limits %}
+                        <article>
+                            <span>{{ limit.label }}</span>
+                            <strong>{{ limit.value }}</strong>
+                            {% if limit.safe %}
+                                <em class="qadmin-badge qadmin-badge-safe">محافظه‌کارانه</em>
+                            {% else %}
+                                <em class="qadmin-badge qadmin-badge-warning">نیاز به کاهش</em>
+                            {% endif %}
+                        </article>
+                    {% empty %}
+                        <p class="qadmin-empty">Store انتخاب نشده است.</p>
+                    {% endfor %}
+                </div>
+            </section>
+
+            <section class="qadmin-revenue-section">
+                <header>
+                    <h2>Breakdown</h2>
+                    <span class="qadmin-badge qadmin-badge-secondary">engine / decision_source</span>
+                </header>
+                <div class="qadmin-breakdown-grid">
+                    <div class="qadmin-table-wrap">
+                        <h3>Engine</h3>
+                        <table class="qadmin-revenue-table">
+                            <thead>
+                                <tr>
+                                    <th>engine</th>
+                                    <th>total</th>
+                                    <th>dry</th>
+                                    <th>sent</th>
+                                    <th>fail</th>
+                                    <th>skip</th>
+                                    <th>conv</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for row in engine_breakdown %}
+                                    <tr>
+                                        <td>{{ row.label }}</td>
+                                        <td>{{ row.total }}</td>
+                                        <td>{{ row.dry_run }}</td>
+                                        <td>{{ row.sent }}</td>
+                                        <td>{{ row.failed }}</td>
+                                        <td>{{ row.skipped_suppressed }}</td>
+                                        <td>{{ row.conversions }}</td>
+                                    </tr>
+                                {% empty %}
+                                    <tr><td colspan="7" class="qadmin-empty-cell">داده‌ای نیست</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="qadmin-table-wrap">
+                        <h3>Decision source</h3>
+                        <table class="qadmin-revenue-table">
+                            <thead>
+                                <tr>
+                                    <th>source</th>
+                                    <th>total</th>
+                                    <th>dry</th>
+                                    <th>sent</th>
+                                    <th>fail</th>
+                                    <th>skip</th>
+                                    <th>conv</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for row in decision_source_breakdown %}
+                                    <tr>
+                                        <td>{{ row.label }}</td>
+                                        <td>{{ row.total }}</td>
+                                        <td>{{ row.dry_run }}</td>
+                                        <td>{{ row.sent }}</td>
+                                        <td>{{ row.failed }}</td>
+                                        <td>{{ row.skipped_suppressed }}</td>
+                                        <td>{{ row.conversions }}</td>
+                                    </tr>
+                                {% empty %}
+                                    <tr><td colspan="7" class="qadmin-empty-cell">داده‌ای نیست</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <section class="qadmin-revenue-section">
+                <header>
+                    <h2>Recent events</h2>
+                    <a href="{{ logs_url }}" class="qadmin-action qadmin-action-secondary">همه لاگ‌ها</a>
+                </header>
+                <div class="qadmin-table-wrap">
+                    <table class="qadmin-revenue-table qadmin-revenue-events">
+                        <thead>
+                            <tr>
+                                <th>status</th>
+                                <th>engine</th>
+                                <th>event</th>
+                                <th>customer</th>
+                                <th>decision</th>
+                                <th>created</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for event in recent_events %}
+                                <tr>
+                                    <td><span class="qadmin-badge qadmin-badge-{{ event.status_tone }}">{{ event.status_label }}</span></td>
+                                    <td>{{ event.engine_label }}</td>
+                                    <td>{{ event.event_type }}</td>
+                                    <td>{{ event.target_label }}</td>
+                                    <td>{{ event.decision_source_label }}</td>
+                                    <td>{{ event.created_at|date:"Y-m-d H:i" }}</td>
+                                </tr>
+                            {% empty %}
+                                <tr><td colspan="6" class="qadmin-empty-cell">RevenueOfferLog هنوز داده‌ای ندارد</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+        <aside class="qadmin-revenue-side">
+            <section class="qadmin-side-panel">
+                <h2>Action required</h2>
+                <div class="qadmin-action-list">
+                    {% for item in action_items %}
+                        <article class="qadmin-action-item qadmin-action-item-{{ item.tone }}">
+                            <span class="qadmin-badge qadmin-badge-{{ item.tone }}">{{ item.tone }}</span>
+                            <h3>{{ item.title }}</h3>
+                            <p>{{ item.description }}</p>
+                            {% if item.url %}
+                                <a href="{{ item.url }}" class="qadmin-action qadmin-action-{{ item.tone }}">باز کردن</a>
+                            {% endif %}
+                            {% if item.command %}
+                                <code class="qadmin-command">{{ item.command }}</code>
+                            {% endif %}
+                        </article>
+                    {% empty %}
+                        <p class="qadmin-empty">اقدام فوری ثبت نشده است.</p>
+                    {% endfor %}
+                </div>
+            </section>
+
+            <section class="qadmin-side-panel">
+                <h2>Real-send gate</h2>
+                {% if safety.safe %}
+                    <p class="qadmin-safe-text">شرط‌های محلی برای فعال‌سازی real-send آماده‌اند.</p>
+                {% else %}
+                    <ul class="qadmin-issue-list">
+                        {% for issue in safety.blocking %}
+                            <li>{{ issue }}</li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+                {% if safety.warnings %}
+                    <ul class="qadmin-warning-list">
+                        {% for warning in safety.warnings %}
+                            <li>{{ warning }}</li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+                <p class="qadmin-muted">{{ safety.target_coverage.label }}</p>
+            </section>
+
+            <section class="qadmin-side-panel">
+                <h2>Safe actions</h2>
+                {% if selected_store %}
+                    <form method="post" class="qadmin-action-form">
+                        {% csrf_token %}
+                        <input type="hidden" name="store" value="{{ selected_store.pk }}">
+                        <input type="hidden" name="action" value="enable_dry_run">
+                        <button type="submit" class="qadmin-button">Enable dry-run mode</button>
+                    </form>
+                    <form method="post" class="qadmin-action-form">
+                        {% csrf_token %}
+                        <input type="hidden" name="store" value="{{ selected_store.pk }}">
+                        <input type="hidden" name="action" value="enable_engine_dry_run">
+                        <button type="submit" class="qadmin-button">Enable engine in dry-run</button>
+                    </form>
+                {% else %}
+                    <p class="qadmin-empty">Store انتخاب نشده است.</p>
+                {% endif %}
+            </section>
+
+            <section class="qadmin-side-panel">
+                <h2>Danger zone</h2>
+                {% if selected_store %}
+                    <form method="post" class="qadmin-action-form qadmin-danger-form">
+                        {% csrf_token %}
+                        <input type="hidden" name="store" value="{{ selected_store.pk }}">
+                        <input type="hidden" name="action" value="enable_real_send">
+                        <label for="real-send-confirm">ENABLE_REAL_REVENUE_SEND</label>
+                        <input id="real-send-confirm" type="text" name="confirmation" autocomplete="off">
+                        <button type="submit" class="qadmin-button qadmin-button-danger">Enable real-send mode</button>
+                    </form>
+                    <form method="post" class="qadmin-action-form qadmin-danger-form">
+                        {% csrf_token %}
+                        <input type="hidden" name="store" value="{{ selected_store.pk }}">
+                        <input type="hidden" name="action" value="disable_revenue">
+                        <label for="disable-confirm">DISABLE_REVENUE_ENGINE</label>
+                        <input id="disable-confirm" type="text" name="confirmation" autocomplete="off">
+                        <button type="submit" class="qadmin-button qadmin-button-danger">Disable Revenue Engine</button>
+                    </form>
+                    <form method="post" class="qadmin-action-form">
+                        {% csrf_token %}
+                        <input type="hidden" name="store" value="{{ selected_store.pk }}">
+                        <input type="hidden" name="action" value="reset_safe_defaults">
+                        <label for="reset-confirm">RESET_REVENUE_SAFE_DEFAULTS</label>
+                        <input id="reset-confirm" type="text" name="confirmation" autocomplete="off">
+                        <button type="submit" class="qadmin-button qadmin-button-secondary">Reset to safe defaults</button>
+                    </form>
+                {% else %}
+                    <p class="qadmin-empty">Store انتخاب نشده است.</p>
+                {% endif %}
+            </section>
+
+            <section class="qadmin-side-panel">
+                <h2>Command hints</h2>
+                <div class="qadmin-command-list">
+                    {% for command in commands %}
+                        <div>
+                            <strong>{{ command.label }}</strong>
+                            <code class="qadmin-command">{{ command.command }}</code>
+                        </div>
+                    {% endfor %}
+                </div>
+            </section>
+        </aside>
+    </section>
+</div>
+{% endblock %}

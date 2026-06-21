@@ -1,0 +1,124 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_service_workbench' %}">میز کار سرویس‌ها</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-customer-review" dir="rtl">
+    <section class="qadmin-hero qadmin-service-hero">
+        <div>
+            <p class="qadmin-eyebrow">Customer Review</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ workbench_url }}" class="qadmin-action qadmin-action-secondary">میز کار سرویس‌ها</a>
+            <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-info">فرم ادمین مشتری</a>
+        </div>
+    </section>
+
+    <section class="qadmin-review-layout">
+        <div class="qadmin-review-main">
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>خلاصه مشتری</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ customer_summary.telegram_tone }}">{{ customer_summary.telegram_label }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>نام</dt><dd>{{ customer_summary.name }}</dd></div>
+                    <div><dt>تلفن</dt><dd>{% if customer_summary.phone_masked %}{{ customer_summary.phone_masked }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Username</dt><dd>{% if customer_summary.username_masked %}{{ customer_summary.username_masked }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Telegram targets</dt><dd>{{ customer_summary.telegram_target_count }}</dd></div>
+                    <div><dt>Created</dt><dd>{{ customer_summary.created_at|date:"Y-m-d H:i" }}</dd></div>
+                    <div><dt>Last seen</dt><dd>{% if customer_summary.last_seen_at %}{{ customer_summary.last_seen_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                </dl>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>سفارش‌ها</h2>
+                    <span class="qadmin-badge qadmin-badge-info">{{ orders_summary.total }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>کل سفارش‌ها</dt><dd>{{ orders_summary.total }}</dd></div>
+                    <div><dt>تکمیل‌شده</dt><dd>{{ orders_summary.completed }}</dd></div>
+                    <div><dt>در انتظار</dt><dd>{{ orders_summary.pending }}</dd></div>
+                </dl>
+                <div class="qadmin-mini-list">
+                    <h3>آخرین سفارش‌ها</h3>
+                    {% for item in orders_summary.recent %}
+                        <p><a href="{{ item.review_url }}">{{ item.tracking_code }}</a> · {{ item.plan }} · <span class="qadmin-badge qadmin-badge-{{ item.status_tone }}">{{ item.status_label }}</span></p>
+                    {% empty %}
+                        <p>سفارشی ثبت نشده است.</p>
+                    {% endfor %}
+                </div>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>سرویس‌های فعال</h2>
+                    <span class="qadmin-badge qadmin-badge-success">{{ active_clients|length }}</span>
+                </header>
+                <div class="qadmin-mini-list">
+                    {% for item in active_clients %}
+                        <p><a href="{{ item.review_url }}">#{{ item.client.pk }} · {{ item.service_label }}</a> · {{ item.plan }} · {{ item.days_left_label }}</p>
+                    {% empty %}
+                        <p>سرویس فعال ثبت نشده است.</p>
+                    {% endfor %}
+                </div>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>سرویس‌های منقضی</h2>
+                    <span class="qadmin-badge qadmin-badge-warning">{{ expired_clients|length }}</span>
+                </header>
+                <div class="qadmin-mini-list">
+                    {% for item in expired_clients %}
+                        <p><a href="{{ item.review_url }}">#{{ item.client.pk }} · {{ item.service_label }}</a> · {{ item.plan }} · {% if item.expires_at %}{{ item.expires_at|date:"Y-m-d" }}{% else %}بدون تاریخ{% endif %}</p>
+                    {% empty %}
+                        <p>سرویس منقضی ثبت نشده است.</p>
+                    {% endfor %}
+                </div>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>پشتیبانی</h2>
+                    <span class="qadmin-badge qadmin-badge-info">{{ support_tickets|length }}</span>
+                </header>
+                <div class="qadmin-mini-list">
+                    {% for item in support_tickets %}
+                        <p><a href="{{ item.change_url }}">{{ item.subject }}</a> · {{ item.status }} · {{ item.updated_at|date:"Y-m-d H:i" }}</p>
+                    {% empty %}
+                        <p>تیکت پشتیبانی ثبت نشده است.</p>
+                    {% endfor %}
+                </div>
+            </article>
+        </div>
+
+        <aside class="qadmin-action-box">
+            <h2>Action links</h2>
+            <a href="{{ workbench_url }}" class="qadmin-action">میز کار سرویس‌ها</a>
+            <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-secondary">فرم ادمین مشتری</a>
+            <div class="qadmin-disabled-note">
+                <strong>Side effects</strong>
+                <p>این صفحه فقط read-only است و هیچ Telegram/X-UI call اجرا نمی‌کند.</p>
+            </div>
+        </aside>
+    </section>
+</div>
+{% endblock %}

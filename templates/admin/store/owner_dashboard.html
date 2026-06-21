@@ -1,0 +1,125 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-dashboard" dir="rtl">
+    <section class="qadmin-hero qadmin-dashboard-hero">
+        <div>
+            <p class="qadmin-eyebrow">Owner Dashboard</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }} سفارش‌ها، پرداخت‌ها، سرویس‌ها و وضعیت تنظیمات را از داده‌های موجود ببین.</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{% url 'admin_store_order_workbench' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-warning">میز کار سفارش‌ها</a>
+            <a href="{% url 'admin_store_setup_wizard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action">Setup Wizard</a>
+            <a href="{% url 'admin_store_setup_center' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action">Setup Center</a>
+            <code class="qadmin-small-command">doctor --no-fail</code>
+        </div>
+    </section>
+
+    <section class="qadmin-toolbar">
+        <div>
+            <strong>فروشگاه:</strong>
+            {% if selected_store %}
+                {{ selected_store.name }}
+            {% else %}
+                هنوز فروشگاهی ساخته نشده است
+            {% endif %}
+        </div>
+        {% if stores|length > 1 %}
+            <form method="get" class="qadmin-store-switcher">
+                <label for="qadmin-store">Store</label>
+                <select id="qadmin-store" name="store" onchange="this.form.submit()">
+                    {% for store in stores %}
+                        <option value="{{ store.pk }}" {% if selected_store and selected_store.pk == store.pk %}selected{% endif %}>
+                            {{ store.name }}{% if not store.is_active %} - غیرفعال{% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </form>
+        {% endif %}
+    </section>
+
+    <section class="qadmin-dashboard-layout">
+        <div class="qadmin-dashboard-main">
+            <div class="qadmin-metric-grid">
+                {% for card in metric_cards %}
+                    <article class="qadmin-metric-card qadmin-status-{{ card.tone }}">
+                        <header>
+                            <div>
+                                <h2>{{ card.title }}</h2>
+                                <p>{{ card.subtitle }}</p>
+                            </div>
+                            <span class="qadmin-badge qadmin-badge-{{ card.tone }}">{{ card.value }}</span>
+                        </header>
+                        {% if card.details %}
+                            <ul class="qadmin-detail-list">
+                                {% for detail in card.details %}
+                                    <li>{{ detail }}</li>
+                                {% endfor %}
+                            </ul>
+                        {% endif %}
+                        {% if card.links %}
+                            <div class="qadmin-actions">
+                                {% for link in card.links %}
+                                    <a href="{{ link.url }}" class="qadmin-action qadmin-action-{{ link.tone }}">{{ link.label }}</a>
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+                    </article>
+                {% endfor %}
+            </div>
+        </div>
+
+        <aside class="qadmin-dashboard-side">
+            <section class="qadmin-side-panel">
+                <h2>اقدام فوری</h2>
+                <div class="qadmin-action-list">
+                    {% for item in action_items %}
+                        <article class="qadmin-action-item qadmin-action-item-{{ item.tone }}">
+                            <span class="qadmin-badge qadmin-badge-{{ item.tone }}">{{ item.tone }}</span>
+                            <h3>{{ item.title }}</h3>
+                            <p>{{ item.description }}</p>
+                            {% if item.url %}
+                                <a href="{{ item.url }}" class="qadmin-action qadmin-action-{{ item.tone }}">باز کردن</a>
+                            {% endif %}
+                            {% if item.command %}
+                                <code class="qadmin-command">{{ item.command }}</code>
+                            {% endif %}
+                        </article>
+                    {% empty %}
+                        <p class="qadmin-empty">اقدام فوری ثبت نشده است.</p>
+                    {% endfor %}
+                </div>
+            </section>
+
+            <section class="qadmin-side-panel">
+                <h2>Quick Actions</h2>
+                <div class="qadmin-quick-grid">
+                    {% for action in quick_actions %}
+                        {% if action.url %}
+                            <a href="{{ action.url }}" class="qadmin-quick-action qadmin-quick-{{ action.tone }}">{{ action.label }}</a>
+                        {% else %}
+                            <code class="qadmin-command">{{ action.command }}</code>
+                        {% endif %}
+                    {% endfor %}
+                </div>
+            </section>
+        </aside>
+    </section>
+</div>
+{% endblock %}

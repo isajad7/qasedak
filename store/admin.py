@@ -1,7 +1,10 @@
 import csv
+import json
+import re
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from django import forms
 from django.contrib import admin, messages
@@ -59,6 +62,7 @@ from .models import (
     ReferralRewardLedger,
     RevenueOfferLog,
     Store,
+    normalize_payment_digits,
     SupportConversation,
     SupportMessage,
     VPNClient,
@@ -68,6 +72,16 @@ from .models import (
     WebTelegramLinkToken,
     DailyAdminReportLog,
 )
+from .admin_setup import (
+    active_sales_inbounds,
+    active_sellable_plans,
+    active_telegram_configs,
+    build_store_admin_summary,
+    has_real_payment_card,
+    missing_route_labels,
+    setup_wizard_index_url,
+)
+from .admin_revenue import revenue_control_url
 from .broadcast_services import create_campaign_recipients, resolve_campaign_recipients, send_campaign
 from .legacy_wizwiz_import_services import (
     analyze_wizwiz_import_job,
@@ -133,6 +147,53 @@ def format_usage_bytes(value):
     from .panel_usage_services import format_bytes_fa
 
     return format_bytes_fa(value)
+
+
+def mask_url_credentials(value):
+    raw_url = str(value or "").strip()
+    if not raw_url:
+        return "-"
+    parsed = urlsplit(raw_url)
+    if not parsed.hostname:
+        return raw_url
+    auth = ""
+    if parsed.username:
+        auth = "****@"
+    port = f":{parsed.port}" if parsed.port else ""
+    netloc = f"{auth}{parsed.hostname}{port}"
+    path = parsed.path or ""
+    return urlunsplit((parsed.scheme, netloc, path, "", ""))
+
+
+def admin_mask_phone(value):
+    cleaned = "".join(ch for ch in normalize_payment_digits(value) if ch.isdigit() or ch == "+")
+    if not cleaned:
+        return ""
+    prefix = cleaned[:4] if cleaned.startswith("+") else cleaned[:3]
+    suffix = cleaned[-2:] if len(cleaned) > 5 else ""
+    return f"{prefix}***{suffix}" if suffix else "***"
+
+
+def admin_mask_identifier(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "@" in text:
+        local, domain = text.split("@", 1)
+        return f"{local[:2]}***@{domain}" if local else f"***@{domain}"
+    if len(text) <= 8:
+        return f"{text[:2]}***"
+    return f"{text[:6]}...{text[-4:]}"
+
+
+def admin_safe_customer_label(customer):
+    if not customer:
+        return _("No customer")
+    phone = getattr(customer, "phone_number", "") or ""
+    label = (getattr(customer, "display_name", "") or getattr(customer, "username", "") or "").strip()
+    if phone and normalize_payment_digits(label) == normalize_payment_digits(phone):
+        return admin_mask_phone(phone)
+    return label or f"Customer {str(customer.public_id)[:8]}"
 
 
 class UserResource(resources.ModelResource):
@@ -205,6 +266,13 @@ class GroupAdmin(ImportExportModelAdmin, DjangoGroupAdmin):
 
 
 class StoreAdminForm(forms.ModelForm):
+    card_number = forms.CharField(
+        label=_("card number"),
+        required=False,
+        strip=True,
+        widget=forms.PasswordInput(render_value=False),
+        help_text=_("برای تغییر شماره کارت، مقدار کامل ۱۶ رقمی را وارد کنید. مقدار فعلی کامل نمایش داده نمی‌شود."),
+    )
     new_smsforwarder_webhook_token = forms.CharField(
         label=_("Set or rotate SMSForwarder webhook token"),
         required=False,
@@ -216,6 +284,14 @@ class StoreAdminForm(forms.ModelForm):
     class Meta:
         model = Store
         fields = "__all__"
+
+    def clean_card_number(self):
+        value = normalize_payment_digits(self.cleaned_data.get("card_number") or "").strip()
+        if value:
+            return value
+        if self.instance and self.instance.pk:
+            return self.instance.card_number
+        raise forms.ValidationError(_("شماره کارت برای فروش دستی لازم است."))
 
     def save(self, commit=True):
         store = super().save(commit=False)
@@ -231,6 +307,7 @@ class StoreAdminForm(forms.ModelForm):
 @admin.register(Store)
 class StoreAdmin(ImportExportModelAdmin):
     form = StoreAdminForm
+    import_export_change_list_template = "admin/store/store/change_list.html"
     revenue_engine_fields = (
         "revenue_engine_enabled",
         "revenue_engine_dry_run",
@@ -252,104 +329,301 @@ class StoreAdmin(ImportExportModelAdmin):
     )
     list_display = (
         "name",
-        "english_name",
         "domain",
-        "sales_mode",
-        "plan_inbound_routing_enabled",
-        "allow_global_inbound_fallback",
-        "telegram_support",
-        "bale_support",
-        "receipt_image_only_payment",
-        "payment_sms_time_zone",
-        "sms_webhook_token_status",
-        "custom_volume_price_per_gb",
-        "referral_system_enabled",
-        "referral_reward_traffic_gb",
-        "referral_reward_duration_days",
-        "free_trial_enabled",
-        "free_trial_traffic_gb",
-        "free_trial_duration_hours",
-        "free_trial_cooldown_days",
-        "analytics_enabled",
-        "broadcast_enabled",
-        "renewal_reminders_enabled",
-        "panel_monitor_enabled",
-        "panel_monitor_alerts_enabled",
-        "daily_admin_report_enabled",
-        "panel_usage_tracking_enabled",
-        "panel_usage_report_enabled",
-        "renewal_reminders_start_at",
-        "low_traffic_reminders_enabled",
-        "broadcast_rate_limit_per_second",
-        "broadcast_max_recipients_per_campaign",
+        "sales_status",
+        "payment_status",
+        "telegram_status",
+        "xui_status",
+        "revenue_status",
         "is_active",
         "updated_at",
     )
     list_filter = (
-        "sales_mode",
-        "plan_inbound_routing_enabled",
-        "allow_global_inbound_fallback",
         "is_active",
-        "receipt_image_only_payment",
-        "referral_system_enabled",
-        "free_trial_enabled",
-        "analytics_enabled",
-        "broadcast_enabled",
-        "renewal_reminders_enabled",
-        "panel_monitor_enabled",
-        "panel_monitor_alerts_enabled",
-        "daily_admin_report_enabled",
-        "panel_usage_tracking_enabled",
-        "panel_usage_report_enabled",
-        "panel_usage_active_user_method",
-        "renewal_reminders_start_at",
-        "low_traffic_reminders_enabled",
+        "sales_mode",
+        "revenue_engine_enabled",
+        "revenue_engine_dry_run",
     )
-    search_fields = ("name", "english_name", "domain", "telegram_support", "bale_support")
+    search_fields = ("name", "english_name", "domain")
     date_hierarchy = "created_at"
     prepopulated_fields = {"slug": ("english_name",)}
     autocomplete_fields = ("free_trial_panel", "free_trial_inbound")
     readonly_fields = (
-        "post_install_setup_checklist",
+        "admin_setup_summary",
+        "setup_center_link",
+        "revenue_control_center_link",
+        "telegram_bot_hint",
+        "card_number_status",
         "sms_webhook_token_status",
-        "smsforwarder_webhook_token_hint",
         "sms_webhook_token_rotation_help",
+        "created_at",
+        "updated_at",
     )
 
     def get_fieldsets(self, request, obj=None):
-        fieldsets = []
-        revenue_fields = set(self.revenue_engine_fields)
-        setup_fields = {"post_install_setup_checklist"}
-        for title, options in super().get_fieldsets(request, obj):
-            fields = options.get("fields", ())
-            filtered_fields = tuple(field for field in fields if field not in revenue_fields and field not in setup_fields)
-            if filtered_fields:
-                next_options = dict(options)
-                next_options["fields"] = filtered_fields
-                fieldsets.append((title, next_options))
-        fieldsets.insert(
-            0,
+        revenue_url = revenue_control_url(obj)
+        return (
             (
-                _("Post-install setup checklist"),
+                _("Quick Setup / وضعیت کلی"),
                 {
-                    "fields": ("post_install_setup_checklist",),
-                    "description": _(
-                        "After a minimal install, complete Store identity, payment/card, Telegram, Panel, Plans, "
-                        "routes, doctor checks, test purchase, and Revenue Engine dry-run review."
+                    "fields": ("admin_setup_summary", "setup_center_link", "revenue_control_center_link", "is_active"),
+                    "description": _("بعد از نصب minimal از Setup Center برای تکمیل Store، پرداخت، تلگرام، پنل، پلن‌ها و Revenue استفاده کن."),
+                },
+            ),
+            (
+                _("Brand / Identity"),
+                {
+                    "fields": (
+                        "name",
+                        "english_name",
+                        "slug",
+                        "domain",
+                        "hero_title",
+                        "hero_text",
                     ),
                 },
             ),
-        )
-        fieldsets.append(
+            (
+                _("Payment"),
+                {
+                    "fields": (
+                        "card_number_status",
+                        "card_number",
+                        "card_owner",
+                        "bank_name",
+                        "sheba_number",
+                        "receipt_image_only_payment",
+                        "payment_sms_time_zone",
+                        "new_smsforwarder_webhook_token",
+                        "sms_webhook_token_status",
+                        "sms_webhook_token_rotation_help",
+                    ),
+                    "description": _("شماره کارت و توکن‌ها کامل نمایش داده نمی‌شوند؛ برای تغییر، مقدار جدید را وارد کن."),
+                },
+            ),
+            (
+                _("Customer / Sales Settings"),
+                {
+                    "fields": (
+                        "sales_mode",
+                        "plan_inbound_routing_enabled",
+                        "allow_global_inbound_fallback",
+                        "custom_volume_price_per_gb",
+                        "referral_system_enabled",
+                        "referral_reward_gb",
+                        "referral_reward_duration_days",
+                        "referral_min_order_required",
+                        "free_trial_enabled",
+                        "free_trial_panel",
+                        "free_trial_inbound",
+                        "free_trial_traffic_gb",
+                        "free_trial_duration_hours",
+                        "free_trial_cooldown_days",
+                    ),
+                },
+            ),
+            (
+                _("Telegram / Bot Related"),
+                {
+                    "fields": (
+                        "telegram_bot_hint",
+                        "telegram_channel",
+                        "telegram_support",
+                        "bale_support",
+                        "support_email",
+                    ),
+                    "description": _("تنظیمات اصلی ربات در BotConfiguration است؛ این بخش فقط لینک‌ها و کانال‌های عمومی Store را نگه می‌دارد."),
+                },
+            ),
             (
                 _("Revenue Engine Controls"),
                 {
                     "classes": ("collapse",),
                     "fields": self.revenue_engine_fields,
+                    "description": format_html(
+                        '{} <a class="button" href="{}">{}</a>',
+                        _("Advanced: برای نصب جدید dry_run را فعال نگه دار تا پیام واقعی ارسال نشود."),
+                        revenue_url,
+                        _("Open Revenue Control Center"),
+                    ),
                 },
-            )
+            ),
+            (
+                _("Reminders / Reports / Monitoring"),
+                {
+                    "fields": (
+                        "analytics_enabled",
+                        "broadcast_enabled",
+                        "renewal_reminders_enabled",
+                        "low_traffic_reminders_enabled",
+                        "panel_monitor_enabled",
+                        "panel_monitor_alerts_enabled",
+                        "daily_admin_report_enabled",
+                        "daily_admin_report_time",
+                        "daily_admin_report_timezone",
+                        "daily_admin_report_include_panel_health",
+                        "daily_admin_report_include_financials",
+                        "daily_admin_report_include_errors",
+                        "panel_usage_tracking_enabled",
+                        "panel_usage_report_enabled",
+                    ),
+                },
+            ),
+            (
+                _("Advanced / Legacy"),
+                {
+                    "classes": ("collapse",),
+                    "fields": (
+                        "broadcast_rate_limit_per_second",
+                        "broadcast_max_recipients_per_campaign",
+                        "renewal_reminders_start_at",
+                        "reminder_days_before_expiry",
+                        "reminder_days_after_expiry",
+                        "low_traffic_percent_threshold",
+                        "low_traffic_gb_threshold",
+                        "panel_monitor_check_timeout_seconds",
+                        "panel_monitor_alert_cooldown_minutes",
+                        "panel_monitor_max_log_age_days",
+                        "panel_usage_snapshot_retention_days",
+                        "panel_usage_active_user_method",
+                        "reminder_cooldown_hours",
+                        "reminder_max_per_client_per_day",
+                        "good_customer_min_total_amount",
+                        "loyal_customer_min_orders_30d",
+                        "top_customers_limit",
+                        "inactive_customer_days",
+                        "created_at",
+                        "updated_at",
+                    ),
+                },
+            ),
         )
-        return tuple(fieldsets)
+
+    def status_badge(self, status, label):
+        css_class = {
+            "done": "bg-success",
+            "safe": "bg-info",
+            "warning": "bg-warning text-dark",
+            "missing": "bg-secondary",
+            "error": "bg-danger",
+        }.get(status, "bg-secondary")
+        return format_html('<span class="badge {}">{}</span>', css_class, label)
+
+    @admin.display(description=_("Sales / routes"))
+    def sales_status(self, obj):
+        plans_count = active_sellable_plans(obj).count()
+        missing_routes = missing_route_labels(obj)
+        if missing_routes:
+            return self.status_badge("error", _("Route missing"))
+        if plans_count:
+            return self.status_badge("done", _("%(count)s plan(s)") % {"count": plans_count})
+        if getattr(obj, "custom_volume_price_per_gb", 0):
+            return self.status_badge("done", _("Custom volume"))
+        return self.status_badge("warning", _("No public plan"))
+
+    @admin.display(description=_("Payment"))
+    def payment_status(self, obj):
+        if has_real_payment_card(obj):
+            return self.status_badge("done", _("Configured"))
+        if obj.card_number or obj.card_owner:
+            return self.status_badge("warning", _("Review setup"))
+        return self.status_badge("missing", _("Missing"))
+
+    @admin.display(description=_("Telegram"))
+    def telegram_status(self, obj):
+        configs = list(active_telegram_configs(obj))
+        if not configs:
+            return self.status_badge("warning", _("Not configured"))
+        ready = [config for config in configs if config.bot_token and config.get_admin_user_ids()]
+        if ready:
+            return self.status_badge("done", _("%(count)s active") % {"count": len(ready)})
+        return self.status_badge("warning", _("Incomplete"))
+
+    @admin.display(description=_("X-UI / panel"))
+    def xui_status(self, obj):
+        panel_count = obj.panels.filter(is_active=True).count()
+        inbound_count = active_sales_inbounds(obj).count()
+        if panel_count and inbound_count:
+            return self.status_badge("done", _("%(count)s inbound(s)") % {"count": inbound_count})
+        if panel_count:
+            return self.status_badge("warning", _("No sales inbound"))
+        return self.status_badge("warning", _("No panel"))
+
+    @admin.display(description=_("Revenue"))
+    def revenue_status(self, obj):
+        if not obj.revenue_engine_enabled:
+            return self.status_badge("warning", _("Disabled"))
+        if obj.revenue_engine_dry_run:
+            return self.status_badge("safe", _("Dry-run"))
+        return self.status_badge("warning", _("Real send"))
+
+    @admin.display(description=_("Setup summary"))
+    def admin_setup_summary(self, obj):
+        if not obj:
+            return _("Save the Store first, then review Setup Center.")
+        rows = []
+        for label, value, status in build_store_admin_summary(obj):
+            rows.append((label, self.status_badge(status, value)))
+        setup_url = reverse("admin_store_setup_center") + f"?{urlencode({'store': obj.pk})}"
+        wizard_url = setup_wizard_index_url(obj)
+        summary = format_html_join(
+            "",
+            '<li><strong>{}</strong> {}</li>',
+            rows,
+        )
+        return format_html(
+            '<div class="qasedak-admin-summary"><ul>{}</ul><p><a class="button" href="{}">{}</a> <a class="button" href="{}">{}</a></p></div>',
+            summary,
+            wizard_url,
+            _("Open Setup Wizard"),
+            setup_url,
+            _("Open Setup Center"),
+        )
+
+    @admin.display(description=_("Setup Center"))
+    def setup_center_link(self, obj):
+        url = reverse("admin_store_setup_center")
+        wizard_url = reverse("admin_store_setup_wizard")
+        if obj and obj.pk:
+            url = f"{url}?{urlencode({'store': obj.pk})}"
+            wizard_url = setup_wizard_index_url(obj)
+        return format_html(
+            '<a class="button" href="{}">{}</a> <a class="button" href="{}">{}</a>',
+            wizard_url,
+            _("راه‌اندازی مرحله‌ای"),
+            url,
+            _("Setup Center"),
+        )
+
+    @admin.display(description=_("Revenue Control Center"))
+    def revenue_control_center_link(self, obj):
+        return format_html(
+            '<a class="button" href="{}">{}</a>',
+            revenue_control_url(obj),
+            _("کنترل درآمد هوشمند"),
+        )
+
+    @admin.display(description=_("Card number"))
+    def card_number_status(self, obj):
+        if not obj or not obj.card_number:
+            return self.status_badge("missing", _("Not configured"))
+        hint = str(obj.card_number)[-4:]
+        return format_html("{} {}", self.status_badge("done", _("Configured")), _("ending in %(hint)s") % {"hint": hint})
+
+    @admin.display(description=_("BotConfiguration"))
+    def telegram_bot_hint(self, obj):
+        url = reverse("admin:store_botconfiguration_changelist")
+        if obj and obj.pk:
+            url = f"{url}?{urlencode({'store__id__exact': obj.pk})}"
+            count = active_telegram_configs(obj).count()
+        else:
+            count = 0
+        return format_html(
+            '{} <a class="button" href="{}">{}</a>',
+            _("%(count)s active Telegram bot configuration(s).") % {"count": count},
+            url,
+            _("Manage BotConfiguration"),
+        )
 
     @admin.display(description=_("Referral traffic GB"), ordering="referral_reward_gb")
     def referral_reward_traffic_gb(self, obj):
@@ -414,30 +688,37 @@ class BotEventLogInline(admin.TabularInline):
 class RevenueOfferLogAdmin(ImportExportModelAdmin):
     list_display = (
         "created_at",
-        "customer",
-        "bot_user",
+        "status",
         "engine_type",
         "event_type",
         "offer_type",
-        "variant",
+        "customer_ref",
         "decision_source",
-        "status",
         "skip_reason",
         "ai_confidence",
-        "predicted_purchase_probability",
         "sent_at",
         "converted_at",
     )
-    list_filter = ("engine_type", "status", "decision_source", "event_type", "created_at")
+    list_filter = ("store", "engine_type", "status", "decision_source", "event_type", "created_at")
     search_fields = (
-        "customer__display_name",
-        "customer__username",
-        "bot_user__display_name",
-        "bot_user__username",
+        "=id",
+        "=customer__id",
+        "=bot_user__id",
+        "=vpn_client__id",
         "event_type",
         "offer_type",
+        "variant",
+        "skip_reason",
     )
-    readonly_fields = ("metadata", "error_message", "created_at", "sent_at", "converted_at")
+    readonly_fields = (
+        "control_center_link",
+        "redacted_metadata",
+        "redacted_error_message",
+        "created_at",
+        "sent_at",
+        "converted_at",
+    )
+    exclude = ("metadata", "error_message")
     date_hierarchy = "created_at"
     list_select_related = ("store", "customer", "bot_user", "vpn_client")
     autocomplete_fields = ("store", "customer", "bot_user", "vpn_client")
@@ -445,23 +726,107 @@ class RevenueOfferLogAdmin(ImportExportModelAdmin):
     def has_add_permission(self, request):
         return False
 
+    @admin.display(description=_("customer"))
+    def customer_ref(self, obj):
+        if obj.customer_id:
+            return f"Customer #{obj.customer_id}"
+        if obj.bot_user_id:
+            return f"BotUser #{obj.bot_user_id}"
+        if obj.vpn_client_id:
+            return f"VPNClient #{obj.vpn_client_id}"
+        return "-"
+
+    @admin.display(description=_("Revenue Control Center"))
+    def control_center_link(self, obj):
+        return format_html(
+            '<a class="button" href="{}">{}</a>',
+            revenue_control_url(getattr(obj, "store", None)),
+            _("Back to Revenue Control Center"),
+        )
+
+    def _redact_metadata_value(self, value, key=""):
+        sensitive_key_parts = (
+            "token",
+            "secret",
+            "password",
+            "proxy",
+            "uuid",
+            "link",
+            "config",
+            "phone",
+            "email",
+            "card",
+            "chat_id",
+            "telegram_id",
+            "provider_user_id",
+            "url",
+        )
+        key_lower = str(key or "").lower()
+        if any(part in key_lower for part in sensitive_key_parts):
+            return "<redacted>"
+        if isinstance(value, dict):
+            return {item_key: self._redact_metadata_value(item_value, item_key) for item_key, item_value in value.items()}
+        if isinstance(value, list):
+            return [self._redact_metadata_value(item, key) for item in value]
+        if isinstance(value, str):
+            lowered = value.lower()
+            looks_sensitive = (
+                "://" in lowered
+                or "/sub/" in lowered
+                or "@" in value
+                or re.search(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", value)
+                or re.search(r"[A-Za-z0-9_-]{24,}", value)
+                or re.search(r"\d{10,}", value)
+            )
+            if looks_sensitive:
+                return "<redacted>"
+        return value
+
+    @admin.display(description=_("metadata"))
+    def redacted_metadata(self, obj):
+        redacted = self._redact_metadata_value(obj.metadata or {})
+        return format_html("<pre>{}</pre>", json.dumps(redacted, ensure_ascii=False, indent=2, sort_keys=True))
+
+    @admin.display(description=_("error message"))
+    def redacted_error_message(self, obj):
+        redacted = self._redact_metadata_value(obj.error_message or "")
+        return redacted or "-"
+
+
+class BotConfigurationAdminForm(forms.ModelForm):
+    bot_token = forms.CharField(
+        label=_("bot token"),
+        required=False,
+        strip=True,
+        widget=forms.PasswordInput(render_value=False),
+        help_text=_("برای تغییر token مقدار کامل را وارد کنید. مقدار فعلی کامل نمایش داده نمی‌شود."),
+    )
+
+    class Meta:
+        model = BotConfiguration
+        fields = "__all__"
+
+    def clean_bot_token(self):
+        value = (self.cleaned_data.get("bot_token") or "").strip()
+        if value:
+            return value
+        if self.instance and self.instance.pk:
+            return self.instance.bot_token
+        raise forms.ValidationError(_("Bot token برای BotConfiguration جدید لازم است."))
+
 
 @admin.register(BotConfiguration)
 class BotConfigurationAdmin(ImportExportModelAdmin):
+    form = BotConfigurationAdminForm
     list_display = (
         "name",
         "provider",
         "store",
         "telegram_bot_username",
-        "admin_user_id",
-        "additional_admin_user_ids",
         "is_active",
+        "admin_status",
+        "token_status",
         "force_telegram_channel_join",
-        "notify_new_orders",
-        "notify_order_updates",
-        "send_sales_reports",
-        "last_report_sent_at",
-        "webhook_path",
     )
     list_filter = (
         "provider",
@@ -484,8 +849,9 @@ class BotConfigurationAdmin(ImportExportModelAdmin):
     date_hierarchy = "created_at"
     list_select_related = ("store",)
     readonly_fields = (
-        "webhook_secret",
-        "webhook_path",
+        "token_status",
+        "masked_webhook_secret",
+        "webhook_path_hint",
         "event_logs_link",
         "force_join_configuration_warning",
         "last_error",
@@ -502,6 +868,7 @@ class BotConfigurationAdmin(ImportExportModelAdmin):
                     "store",
                     "provider",
                     "telegram_bot_username",
+                    "token_status",
                     "bot_token",
                     "admin_user_id",
                     "additional_admin_user_ids",
@@ -537,7 +904,8 @@ class BotConfigurationAdmin(ImportExportModelAdmin):
         (
             _("Webhook"),
             {
-                "fields": ("webhook_secret", "webhook_path"),
+                "classes": ("collapse",),
+                "fields": ("masked_webhook_secret", "webhook_path_hint"),
             },
         ),
         (
@@ -550,15 +918,34 @@ class BotConfigurationAdmin(ImportExportModelAdmin):
     )
     actions = ("send_test_message", "send_sales_report_now")
 
+    @admin.display(description=_("Bot token"))
+    def token_status(self, obj):
+        if obj and (obj.bot_token or "").strip():
+            return format_html('<span class="badge bg-success">{}</span>', _("Configured"))
+        return format_html('<span class="badge bg-secondary">{}</span>', _("Not configured"))
+
+    @admin.display(description=_("Admin status"))
+    def admin_status(self, obj):
+        count = len(obj.get_admin_user_ids()) if obj else 0
+        if count:
+            return format_html('<span class="badge bg-success">{} admin(s)</span>', count)
+        return format_html('<span class="badge bg-warning text-dark">{}</span>', _("Missing admins"))
+
+    @admin.display(description=_("Webhook secret"))
+    def masked_webhook_secret(self, obj):
+        if not obj or not obj.pk:
+            return _("Save first to generate webhook secret.")
+        return _("Generated and hidden.")
+
     @admin.display(description=_("Webhook path"))
-    def webhook_path(self, obj):
-        if not obj.pk:
+    def webhook_path_hint(self, obj):
+        if not obj or not obj.pk:
             return _("Save first to generate webhook path.")
-        return reverse("bot_webhook", args=[obj.provider, obj.webhook_secret])
+        return f"/bot/{obj.provider}/<hidden>/webhook/"
 
     @admin.display(description=_("Bot event logs"))
     def event_logs_link(self, obj):
-        if not obj.pk:
+        if not obj or not obj.pk:
             return _("Save first to view logs.")
         url = f"{reverse('admin:store_boteventlog_changelist')}?{urlencode({'bot_config__id__exact': obj.pk})}"
         return format_html('<a class="button" href="{}">{}</a>', url, _("View bot event logs"))
@@ -1117,15 +1504,16 @@ class PlanAdmin(ImportExportModelAdmin):
     list_display = (
         "name",
         "store",
-        "operator_names",
-        "active_route_count",
         "volume_gb",
         "duration_days",
         "price",
         "currency",
-        "is_public",
-        "is_custom_volume",
         "is_active",
+        "is_public",
+        "active_route_count",
+        "routes_link",
+        "operator_names",
+        "is_custom_volume",
         "sort_order",
     )
     list_filter = ("store", ("operators", admin.RelatedOnlyFieldListFilter), "is_active", "is_public", "is_custom_volume", "currency")
@@ -1152,6 +1540,11 @@ class PlanAdmin(ImportExportModelAdmin):
         if value is None:
             value = obj.inbound_routes.filter(is_active=True).count()
         return value
+
+    @admin.display(description=_("Routes"))
+    def routes_link(self, obj):
+        url = f"{reverse('admin:store_planinboundroute_changelist')}?{urlencode({'plan__id__exact': obj.pk})}"
+        return format_html('<a class="button" href="{}">{}</a>', url, _("View routes"))
 
     def get_queryset(self, request):
         return (
@@ -1424,25 +1817,148 @@ class PlanInboundRouteAdmin(ImportExportModelAdmin):
         return format_html('<span class="badge bg-success">{}</span>', _("Ready"))
 
 
+class PanelAdminForm(forms.ModelForm):
+    password = forms.CharField(
+        label=_("password"),
+        required=False,
+        strip=True,
+        widget=forms.PasswordInput(render_value=False),
+        help_text=_("برای تغییر password مقدار جدید را وارد کنید. مقدار فعلی کامل نمایش داده نمی‌شود."),
+    )
+    proxy_url = forms.URLField(
+        label=_("HTTP proxy URL"),
+        required=False,
+        widget=forms.PasswordInput(render_value=False),
+        help_text=_("Proxy URL کامل نمایش داده نمی‌شود. برای تغییر مقدار جدید را وارد کنید."),
+    )
+    clear_proxy_url = forms.BooleanField(
+        label=_("Clear proxy URL"),
+        required=False,
+        help_text=_("اگر فعال شود proxy ذخیره‌شده حذف می‌شود."),
+    )
+
+    class Meta:
+        model = Panel
+        fields = "__all__"
+
+    def clean(self):
+        cleaned_data = super().clean()
+        password = (cleaned_data.get("password") or "").strip()
+        if password:
+            cleaned_data["password"] = password
+        elif self.instance and self.instance.pk:
+            cleaned_data["password"] = self.instance.password
+        else:
+            self.add_error("password", _("Password برای Panel جدید لازم است."))
+
+        proxy_url = (cleaned_data.get("proxy_url") or "").strip()
+        if cleaned_data.get("clear_proxy_url"):
+            cleaned_data["proxy_url"] = ""
+        elif proxy_url:
+            cleaned_data["proxy_url"] = proxy_url
+        elif self.instance and self.instance.pk:
+            cleaned_data["proxy_url"] = self.instance.proxy_url
+        return cleaned_data
+
+
 @admin.register(Panel)
 class PanelAdmin(ImportExportModelAdmin):
-    list_display = ("name", "store", "url", "uses_proxy", "is_active", "inbound_count", "latest_daily_usage", "last_sync_at")
+    form = PanelAdminForm
+    list_display = (
+        "name",
+        "store",
+        "masked_url",
+        "is_active",
+        "panel_health_status",
+        "credential_status",
+        "uses_proxy",
+        "inbounds_link",
+        "last_sync_at",
+    )
     list_filter = ("store", "is_active")
     search_fields = ("name", "url", "username", "proxy_url")
     date_hierarchy = "created_at"
     list_select_related = ("store",)
+    readonly_fields = ("credential_status", "proxy_status", "inbounds_link", "created_at", "updated_at")
+    fieldsets = (
+        (
+            _("Connection"),
+            {
+                "fields": (
+                    "name",
+                    "store",
+                    "url",
+                    "username",
+                    "password",
+                    "credential_status",
+                    "is_active",
+                )
+            },
+        ),
+        (
+            _("Proxy"),
+            {
+                "classes": ("collapse",),
+                "fields": ("proxy_status", "proxy_url", "clear_proxy_url"),
+            },
+        ),
+        (
+            _("Operations"),
+            {
+                "fields": ("inbounds_link", "last_sync_at", "created_at", "updated_at"),
+            },
+        ),
+    )
     actions = ("run_health_check",)
 
     def get_queryset(self, request):
-        return super().get_queryset(request).annotate(admin_inbound_count=Count("inbounds"))
+        return super().get_queryset(request).select_related("health_status").annotate(admin_inbound_count=Count("inbounds"))
+
+    @admin.display(description=_("URL"), ordering="url")
+    def masked_url(self, obj):
+        return mask_url_credentials(obj.url)
 
     @admin.display(description=_("Inbounds"), ordering="admin_inbound_count")
     def inbound_count(self, obj):
         return getattr(obj, "admin_inbound_count", None) if getattr(obj, "admin_inbound_count", None) is not None else obj.inbounds.count()
 
+    @admin.display(description=_("Inbounds"))
+    def inbounds_link(self, obj):
+        if not obj or not obj.pk:
+            return _("Save first to view inbounds.")
+        url = f"{reverse('admin:store_inbound_changelist')}?{urlencode({'panel__id__exact': obj.pk})}"
+        label = _("%(count)s inbound(s)") % {"count": self.inbound_count(obj)}
+        return format_html('<a class="button" href="{}">{}</a>', url, label)
+
     @admin.display(description=_("Proxy"), boolean=True)
     def uses_proxy(self, obj):
         return bool(obj.proxy_url)
+
+    @admin.display(description=_("Credentials"))
+    def credential_status(self, obj):
+        if obj and obj.username and obj.password:
+            return format_html('<span class="badge bg-success">{}</span>', _("Configured"))
+        return format_html('<span class="badge bg-warning text-dark">{}</span>', _("Incomplete"))
+
+    @admin.display(description=_("Proxy status"))
+    def proxy_status(self, obj):
+        if obj and obj.proxy_url:
+            return format_html("{} {}", format_html('<span class="badge bg-success">{}</span>', _("Configured")), mask_url_credentials(obj.proxy_url))
+        return format_html('<span class="badge bg-secondary">{}</span>', _("Not configured"))
+
+    @admin.display(description=_("Health"))
+    def panel_health_status(self, obj):
+        try:
+            health_status = obj.health_status
+        except PanelHealthStatus.DoesNotExist:
+            return format_html('<span class="badge bg-secondary">{}</span>', _("No check"))
+        tone = {
+            PanelHealthStatus.Status.OK: "bg-success",
+            PanelHealthStatus.Status.WARNING: "bg-warning text-dark",
+            PanelHealthStatus.Status.ERROR: "bg-danger",
+            PanelHealthStatus.Status.DISABLED: "bg-secondary",
+        }.get(health_status.status, "bg-secondary")
+        return format_html('<span class="badge {}">{}</span>', tone, health_status.get_status_display())
 
     @admin.display(description=_("Latest daily usage"))
     def latest_daily_usage(self, obj):
@@ -1789,6 +2305,43 @@ class OrderSMSMatchStatusFilter(admin.SimpleListFilter):
         return queryset
 
 
+class OrderDeliveryStatusFilter(admin.SimpleListFilter):
+    title = _("delivery status")
+    parameter_name = "delivery_status"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("pending", _("Not started")),
+            ("ready", _("Config ready")),
+            ("active", _("Active/delivered")),
+            ("failed", _("Needs attention")),
+            ("no_config", _("No config")),
+        )
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if value == "pending":
+            return queryset.filter(status__in=[Order.Status.PENDING_PAYMENT, Order.Status.PENDING_VERIFICATION])
+        if value == "ready":
+            return queryset.filter(vpn_clients__status__in=[VPNClient.Status.CREATED, VPNClient.Status.INACTIVE]).distinct()
+        if value == "active":
+            return queryset.filter(vpn_clients__status=VPNClient.Status.ACTIVE).distinct()
+        if value == "failed":
+            return queryset.filter(
+                Q(metadata__panel_provisioning_deferred=True)
+                | Q(metadata__panel_provisioning_last_failed_at__isnull=False)
+                | Q(vpn_clients__status=VPNClient.Status.ERROR)
+                | Q(status__in=[Order.Status.CONFIRMED, Order.Status.COMPLETED], inbound__isnull=True)
+                | Q(status=Order.Status.COMPLETED, vpn_clients__isnull=True)
+            ).distinct()
+        if value == "no_config":
+            return queryset.filter(
+                vpn_clients__isnull=True,
+                status__in=[Order.Status.CONFIRMED, Order.Status.COMPLETED],
+            ).distinct()
+        return queryset
+
+
 class MatchedPaymentSMSInline(admin.TabularInline):
     model = IncomingPaymentSMS.matched_orders.through
     extra = 0
@@ -1906,35 +2459,24 @@ class OrderAdmin(ImportExportModelAdmin):
     resource_class = OrderResource
     list_display = (
         "order_tracking_code",
-        "username",
-        "customer",
+        "owner_customer",
         "plan",
-        "operator",
-        "quantity",
-        "original_amount",
-        "discount_badge",
-        "discount_source",
-        "discount_amount",
-        "amount",
-        "status",
-        "verification_status",
-        "sms_match_summary",
-        "receipt_analysis_badge",
-        "referral_reward_status",
-        "sender_card_last4",
-        "verified_by",
+        "amount_display",
+        "payment_status_badge",
+        "delivery_status_badge",
         "created_at",
+        "quick_review_link",
     )
     list_filter = (
-        OrderSMSMatchStatusFilter,
-        "store",
-        ("operator", admin.RelatedOnlyFieldListFilter),
-        ("customer", admin.RelatedOnlyFieldListFilter),
         "status",
         "verification_status",
+        OrderDeliveryStatusFilter,
+        "store",
+        ("plan", admin.RelatedOnlyFieldListFilter),
+        ("operator", admin.RelatedOnlyFieldListFilter),
         "payment_method",
+        OrderSMSMatchStatusFilter,
         "discount_source",
-        ("discount_code", admin.RelatedOnlyFieldListFilter),
         "created_at",
     )
     search_fields = (
@@ -1943,14 +2485,14 @@ class OrderAdmin(ImportExportModelAdmin):
         "sender_card_name",
         "sender_card_last4",
         "username",
-        "uuid",
         "operator__name",
         "operator__slug",
         "discount_code__code",
         "discount_code_text",
+        "plan__name",
         "customer__username",
+        "customer__display_name",
         "customer__phone_number",
-        "customer__referral_code",
     )
     autocomplete_fields = ("store", "customer", "plan", "operator", "discount_code", "inbound", "verified_by")
     date_hierarchy = "created_at"
@@ -1972,32 +2514,46 @@ class OrderAdmin(ImportExportModelAdmin):
         "admin_notified_at",
         "admin_receipt_notified_at",
         "receipt_analysis_summary",
+        "metadata_safe_summary",
+        "masked_config_links",
+        "owner_customer",
+        "payment_status_badge",
+        "delivery_status_badge",
+        "quick_review_link",
         "verified_at",
     )
     fieldsets = (
         (
-            _("Order"),
+            _("Summary"),
             {
                 "fields": (
                     "public_id",
-                    "store",
-                    "customer",
-                    "plan",
-                    "operator",
-                    "quantity",
                     "order_tracking_code",
                     "status",
                     "verification_status",
-                    "verified_by",
-                    "verified_at",
-                    "rejection_reason",
+                    "quick_review_link",
+                    "created_at",
+                    "updated_at",
                 )
             },
         ),
         (
-            _("Pricing and discount"),
+            _("Customer"),
             {
                 "fields": (
+                    "store",
+                    "customer",
+                    "owner_customer",
+                    "operator",
+                )
+            },
+        ),
+        (
+            _("Plan / Service"),
+            {
+                "fields": (
+                    "plan",
+                    "quantity",
                     "original_amount",
                     "discount_code",
                     "discount_code_text",
@@ -2009,14 +2565,15 @@ class OrderAdmin(ImportExportModelAdmin):
             },
         ),
         (
-            _("Manual payment"),
+            _("Payment"),
             {
                 "fields": (
+                    "payment_status_badge",
                     "payment_method",
                     "is_paid",
+                    "verified_by",
+                    "verified_at",
                     "payment_submitted_at",
-                    "admin_notified_at",
-                    "admin_receipt_notified_at",
                     "sender_card_name",
                     "sender_card_last4",
                     "payment_date",
@@ -2025,37 +2582,33 @@ class OrderAdmin(ImportExportModelAdmin):
                     "receipt_analysis_summary",
                     "bank_tracking_code",
                     "card_last_four",
+                    "rejection_reason",
                 )
             },
         ),
         (
-            _("Gateway placeholders"),
+            _("Delivery"),
+            {
+                "fields": (
+                    "delivery_status_badge",
+                    "inbound",
+                    "username",
+                    "masked_config_links",
+                )
+            },
+        ),
+        (
+            _("Admin / Advanced"),
             {
                 "classes": ("collapse",),
                 "fields": (
+                    "admin_notified_at",
+                    "admin_receipt_notified_at",
                     "payment_gateway",
                     "gateway_authority",
                     "gateway_reference_id",
+                    "metadata_safe_summary",
                 ),
-            },
-        ),
-        (
-            _("VPN provisioning"),
-            {
-                "fields": (
-                    "inbound",
-                    "username",
-                    "uuid",
-                    "sub_link",
-                    "direct_link",
-                )
-            },
-        ),
-        (
-            _("Metadata"),
-            {
-                "classes": ("collapse",),
-                "fields": ("metadata", "created_at", "updated_at"),
             },
         ),
     )
@@ -2063,7 +2616,143 @@ class OrderAdmin(ImportExportModelAdmin):
     inlines = (MatchedPaymentSMSInline, VPNClientInline, OrderReferralRewardLedgerInline)
 
     def get_queryset(self, request):
-        return super().get_queryset(request).annotate(sms_match_count=Count("incoming_payment_sms", distinct=True))
+        return (
+            super()
+            .get_queryset(request)
+            .prefetch_related("vpn_clients")
+            .annotate(sms_match_count=Count("incoming_payment_sms", distinct=True))
+        )
+
+    def qadmin_badge(self, label, tone="secondary"):
+        css_class = {
+            "success": "bg-success",
+            "warning": "bg-warning text-dark",
+            "danger": "bg-danger",
+            "info": "bg-info text-dark",
+            "secondary": "bg-secondary",
+        }.get(tone, "bg-secondary")
+        return format_html('<span class="badge {}">{}</span>', css_class, label)
+
+    def mask_admin_phone(self, value):
+        cleaned = "".join(ch for ch in normalize_payment_digits(value) if ch.isdigit() or ch == "+")
+        if not cleaned:
+            return ""
+        prefix = cleaned[:4] if cleaned.startswith("+") else cleaned[:3]
+        suffix = cleaned[-2:] if len(cleaned) > 5 else ""
+        return f"{prefix}***{suffix}" if suffix else "***"
+
+    def safe_customer_label(self, customer):
+        if not customer:
+            return _("No customer")
+        phone = getattr(customer, "phone_number", "") or ""
+        label = (getattr(customer, "display_name", "") or getattr(customer, "username", "") or "").strip()
+        if phone and normalize_payment_digits(label) == normalize_payment_digits(phone):
+            return self.mask_admin_phone(phone)
+        return label or f"Customer {str(customer.public_id)[:8]}"
+
+    @admin.display(description=_("Customer"), ordering="customer__display_name")
+    def owner_customer(self, obj):
+        if not obj or not obj.customer_id:
+            return self.qadmin_badge(_("No customer"), "secondary")
+        label = self.safe_customer_label(obj.customer)
+        phone = self.mask_admin_phone(obj.customer.phone_number)
+        url = reverse("admin:store_customer_change", args=[obj.customer_id])
+        if phone:
+            return format_html('<a href="{}">{}</a><br><small>{}</small>', url, label, phone)
+        return format_html('<a href="{}">{}</a>', url, label)
+
+    @admin.display(description=_("Amount"), ordering="amount")
+    def amount_display(self, obj):
+        labels = {
+            Plan.Currency.TOMAN: _("Toman"),
+            Plan.Currency.IRR: _("IRR"),
+            Plan.Currency.USD: "USD",
+        }
+        return f"{int(obj.amount or 0):,} {labels.get(obj.currency, obj.currency)}"
+
+    @admin.display(description=_("Payment"), ordering="verification_status")
+    def payment_status_badge(self, obj):
+        if not obj:
+            return "-"
+        if obj.verification_status == Order.VerificationStatus.REJECTED or obj.status == Order.Status.REJECTED:
+            return self.qadmin_badge(_("Rejected"), "danger")
+        if obj.verification_status == Order.VerificationStatus.VERIFIED:
+            return self.qadmin_badge(_("Verified"), "success")
+        if obj.is_paid or obj.payment_submitted_at or obj.payment_receipt_image:
+            return self.qadmin_badge(_("Needs review"), "warning")
+        if obj.status == Order.Status.PENDING_PAYMENT:
+            return self.qadmin_badge(_("Waiting payment"), "secondary")
+        return self.qadmin_badge(_("Unknown"), "secondary")
+
+    def order_delivery_status(self, obj):
+        metadata = obj.metadata or {}
+        if obj.status in {Order.Status.REJECTED, Order.Status.CANCELLED}:
+            return _("Stopped"), "secondary"
+        if metadata.get("panel_provisioning_deferred") or metadata.get("panel_provisioning_last_failed_at"):
+            return _("Provisioning failed"), "danger"
+        clients = list(obj.vpn_clients.all())
+        if not clients:
+            if obj.status in {Order.Status.CONFIRMED, Order.Status.COMPLETED} or obj.verification_status == Order.VerificationStatus.VERIFIED:
+                return _("No config"), "danger"
+            if obj.is_paid:
+                return _("Ready for review"), "warning"
+            return _("Not started"), "secondary"
+        if any(client.status == VPNClient.Status.ERROR for client in clients):
+            return _("Config error"), "danger"
+        active_count = sum(1 for client in clients if client.status == VPNClient.Status.ACTIVE)
+        if active_count == len(clients):
+            return _("Active/delivered"), "success"
+        if active_count:
+            return _("Partially active"), "warning"
+        return _("Config ready"), "info"
+
+    @admin.display(description=_("Delivery"))
+    def delivery_status_badge(self, obj):
+        if not obj:
+            return "-"
+        label, tone = self.order_delivery_status(obj)
+        return self.qadmin_badge(label, tone)
+
+    @admin.display(description=_("Review"))
+    def quick_review_link(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        url = reverse("admin_store_order_review", args=[obj.pk])
+        return format_html('<a class="button" href="{}">{}</a>', url, _("Review"))
+
+    @admin.display(description=_("Config links"))
+    def masked_config_links(self, obj):
+        if not obj:
+            return "-"
+        rows = []
+        if obj.uuid:
+            rows.append(_("UUID saved: ending %(suffix)s") % {"suffix": str(obj.uuid)[-4:]})
+        if obj.sub_link:
+            rows.append(_("Subscription link saved (hidden)."))
+        if obj.direct_link:
+            rows.append(_("Direct config link saved (hidden)."))
+        return format_html_join("<br>", "{}", ((row,) for row in rows)) if rows else "-"
+
+    @admin.display(description=_("Safe metadata summary"))
+    def metadata_safe_summary(self, obj):
+        metadata = obj.metadata or {}
+        safe_keys = (
+            "custom_volume",
+            "custom_volume_gb",
+            "panel_provisioning_deferred",
+            "panel_provisioning_reason",
+            "panel_provisioning_missing_clients",
+            "renewed_at",
+        )
+        rows = [(key, metadata.get(key)) for key in safe_keys if metadata.get(key) not in (None, "", False)]
+        receipt_analysis = metadata.get("receipt_analysis") or {}
+        if receipt_analysis:
+            rows.append(("receipt_analysis.status", receipt_analysis.get("status") or "-"))
+            if receipt_analysis.get("warning"):
+                rows.append(("receipt_analysis.warning", receipt_analysis.get("warning")))
+        if not rows:
+            return "-"
+        return format_html_join("", "<div><strong>{}</strong>: {}</div>", rows)
 
     @admin.display(description=_("Discount"), ordering="discount_code__code")
     def discount_badge(self, obj):
@@ -2443,29 +3132,262 @@ class InboundAdmin(ImportExportModelAdmin):
 class VPNClientAdmin(ImportExportModelAdmin):
     inlines = (VPNClientActionLogInline,)
     list_display = (
-        "username",
-        "store",
-        "order",
-        "inbound",
+        "service_short_label",
+        "owner_customer",
+        "plan_order_label",
+        "panel_inbound_label",
+        "status_active_badge",
+        "expiry_days_left",
+        "traffic_summary",
+        "telegram_delivery_status",
+        "quick_service_review_link",
+    )
+    list_filter = (
         "status",
+        "store",
+        ("inbound__panel", admin.RelatedOnlyFieldListFilter),
+        ("inbound", admin.RelatedOnlyFieldListFilter),
+        "created_at",
+        "expires_at",
+    )
+    search_fields = (
+        "username",
+        "xui_email",
+        "order__order_tracking_code",
+        "order__customer__display_name",
+        "order__customer__username",
+        "order__customer__phone_number",
+    )
+    date_hierarchy = "created_at"
+    list_select_related = ("store", "order", "order__customer", "plan", "inbound", "inbound__panel")
+    readonly_fields = (
+        "public_id",
+        "masked_public_id",
+        "service_short_label",
+        "owner_customer",
+        "plan_order_label",
+        "panel_inbound_label",
+        "status_active_badge",
+        "expiry_days_left",
+        "traffic_summary",
+        "telegram_delivery_status",
+        "masked_config_links",
+        "quick_service_review_link",
         "deleted_at",
         "remote_deleted_at",
-        "duration_days",
-        "used_traffic_bytes",
-        "activated_at",
-        "expires_at",
-        "last_online_at",
-        "last_reminder_sent_at",
         "created_at",
+        "updated_at",
+        "last_reminder_sent_at",
     )
-    list_filter = ("store", "status", "inbound", "deleted_at", "remote_deleted_at", "created_at")
-    search_fields = ("username", "xui_email", "uuid", "order__order_tracking_code")
-    date_hierarchy = "created_at"
-    list_select_related = ("store", "order", "plan", "inbound", "inbound__panel")
-    readonly_fields = ("public_id", "deleted_at", "remote_deleted_at", "created_at", "updated_at")
+    fieldsets = (
+        (
+            _("Summary"),
+            {
+                "fields": (
+                    "masked_public_id",
+                    "service_short_label",
+                    "quick_service_review_link",
+                    "status",
+                    "status_active_badge",
+                    "created_at",
+                    "updated_at",
+                )
+            },
+        ),
+        (
+            _("Customer / Order"),
+            {
+                "fields": (
+                    "store",
+                    "order",
+                    "owner_customer",
+                    "plan",
+                    "plan_order_label",
+                )
+            },
+        ),
+        (
+            _("Service"),
+            {
+                "fields": (
+                    "inbound",
+                    "panel_inbound_label",
+                    "duration_days",
+                    "device_limit",
+                    "activated_at",
+                    "expires_at",
+                    "expiry_days_left",
+                    "disabled_at",
+                )
+            },
+        ),
+        (
+            _("Usage"),
+            {
+                "fields": (
+                    "traffic_limit_bytes",
+                    "used_upload_bytes",
+                    "used_download_bytes",
+                    "used_traffic_bytes",
+                    "traffic_summary",
+                    "last_online_at",
+                    "last_synced_at",
+                    "last_reminder_sent_at",
+                )
+            },
+        ),
+        (
+            _("Delivery"),
+            {
+                "fields": (
+                    "masked_config_links",
+                    "telegram_delivery_status",
+                )
+            },
+        ),
+        (
+            _("Advanced"),
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "deleted_at",
+                    "remote_deleted_at",
+                    "delete_reason",
+                    "deleted_by_customer",
+                    "deleted_by_admin_telegram_id",
+                ),
+            },
+        ),
+    )
 
     def get_queryset(self, request):
-        return super().get_queryset(request).annotate(admin_last_reminder_sent_at=Max("reminder_logs__sent_at"))
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(
+                admin_last_reminder_sent_at=Max("reminder_logs__sent_at"),
+                admin_telegram_bot_users_count=Count(
+                    "order__customer__bot_users",
+                    filter=Q(
+                        order__customer__bot_users__is_active=True,
+                        order__customer__bot_users__bot_config__provider=BotConfiguration.Provider.TELEGRAM,
+                    ),
+                    distinct=True,
+                ),
+            )
+        )
+
+    def qadmin_badge(self, label, tone="secondary"):
+        css_class = {
+            "success": "bg-success",
+            "warning": "bg-warning text-dark",
+            "danger": "bg-danger",
+            "info": "bg-info text-dark",
+            "secondary": "bg-secondary",
+        }.get(tone, "bg-secondary")
+        return format_html('<span class="badge {}">{}</span>', css_class, label)
+
+    @admin.display(description=_("Service"), ordering="id")
+    def service_short_label(self, obj):
+        label = admin_mask_identifier(obj.xui_email or obj.username or obj.public_id)
+        return f"#{obj.pk} · {label}"
+
+    @admin.display(description=_("Public ID"))
+    def masked_public_id(self, obj):
+        return admin_mask_identifier(obj.public_id)
+
+    @admin.display(description=_("Customer"), ordering="order__customer__display_name")
+    def owner_customer(self, obj):
+        customer = obj.order.customer if obj.order_id and obj.order.customer_id else None
+        if not customer:
+            return self.qadmin_badge(_("No customer"), "secondary")
+        url = reverse("admin_store_customer_review", args=[customer.pk])
+        label = admin_safe_customer_label(customer)
+        phone = admin_mask_phone(customer.phone_number)
+        if phone:
+            return format_html('<a href="{}">{}</a><br><small>{}</small>', url, label, phone)
+        return format_html('<a href="{}">{}</a>', url, label)
+
+    @admin.display(description=_("Plan / Order"), ordering="plan__name")
+    def plan_order_label(self, obj):
+        plan = obj.plan.name if obj.plan_id else "-"
+        if obj.order_id:
+            url = reverse("admin_store_order_review", args=[obj.order_id])
+            return format_html('{}<br><small><a href="{}">{}</a></small>', plan, url, obj.order.order_tracking_code)
+        return plan
+
+    @admin.display(description=_("Panel / Inbound"), ordering="inbound__panel__name")
+    def panel_inbound_label(self, obj):
+        if not obj.inbound_id:
+            return self.qadmin_badge(_("Missing inbound"), "danger")
+        panel = obj.inbound.panel.name if obj.inbound.panel_id else _("No panel")
+        inbound = obj.inbound.remark or obj.inbound.inbound_id
+        return format_html("{}<br><small>{}</small>", panel, inbound)
+
+    @admin.display(description=_("Status"), ordering="status")
+    def status_active_badge(self, obj):
+        tone = {
+            VPNClient.Status.ACTIVE: "success",
+            VPNClient.Status.ERROR: "danger",
+            VPNClient.Status.EXPIRED: "warning",
+            VPNClient.Status.SUSPENDED: "warning",
+            VPNClient.Status.CREATED: "info",
+        }.get(obj.status, "secondary")
+        return self.qadmin_badge(obj.get_status_display(), tone)
+
+    @admin.display(description=_("Expires / days left"), ordering="expires_at")
+    def expiry_days_left(self, obj):
+        if not obj.expires_at:
+            return _("Unknown")
+        seconds = int((obj.expires_at - timezone.now()).total_seconds())
+        days = 0 if seconds <= 0 else (seconds + 86_399) // 86_400
+        return format_html(
+            "{}<br><small>{} days</small>",
+            timezone.localtime(obj.expires_at).strftime("%Y-%m-%d %H:%M"),
+            days,
+        )
+
+    @admin.display(description=_("Traffic"))
+    def traffic_summary(self, obj):
+        total = int(obj.traffic_limit_bytes or 0)
+        used = int(obj.used_traffic_bytes or 0)
+        remaining = max(total - used, 0) if total else 0
+        if not total:
+            return _("Unknown")
+        return format_html(
+            "{} used<br><small>{} remaining / {} total</small>",
+            format_usage_bytes(used),
+            format_usage_bytes(remaining),
+            format_usage_bytes(total),
+        )
+
+    @admin.display(description=_("Telegram"))
+    def telegram_delivery_status(self, obj):
+        count = getattr(obj, "admin_telegram_bot_users_count", None)
+        if count is None and obj.order_id and obj.order.customer_id:
+            count = obj.order.customer.bot_users.filter(
+                is_active=True,
+                bot_config__provider=BotConfiguration.Provider.TELEGRAM,
+            ).count()
+        return self.qadmin_badge(_("Linked"), "success") if count else self.qadmin_badge(_("No target"), "warning")
+
+    @admin.display(description=_("Config links"))
+    def masked_config_links(self, obj):
+        rows = []
+        if obj.uuid:
+            rows.append(_("UUID saved: ending %(suffix)s") % {"suffix": str(obj.uuid)[-4:]})
+        if obj.sub_link:
+            rows.append(_("Subscription link saved (hidden)."))
+        if obj.direct_link:
+            rows.append(_("Direct config link saved (hidden)."))
+        return format_html_join("<br>", "{}", ((row,) for row in rows)) if rows else "-"
+
+    @admin.display(description=_("Review"))
+    def quick_service_review_link(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        url = reverse("admin_store_service_review", args=[obj.pk])
+        return format_html('<a class="button" href="{}">{}</a>', url, _("Review"))
 
     @admin.display(description=_("Last reminder"), ordering="admin_last_reminder_sent_at")
     def last_reminder_sent_at(self, obj):
@@ -2646,26 +3568,14 @@ class CustomerResource(resources.ModelResource):
 class CustomerAdmin(ImportExportModelAdmin):
     resource_class = CustomerResource
     list_display = (
-        "display_name",
-        "username",
-        "phone_number",
-        "is_wholesale",
-        "default_discount_percent",
-        "referral_code",
-        "referred_by",
+        "customer_display",
+        "masked_phone_display",
+        "masked_email_display",
         "telegram_connection_status",
-        "telegram_bot_users_total",
-        "latest_web_telegram_token_status",
+        "active_clients_total",
         "orders_total",
-        "invited_total",
-        "successful_referrals_total",
-        "available_referral_packages_total",
-        "available_referral_gb_total",
-        "available_referral_duration_total",
-        "redeemed_referral_gb_total",
-        "last_reminder_sent_at",
-        "last_seen_at",
-        "created_at",
+        "last_order_date",
+        "customer_review_link",
     )
     list_filter = ("is_active", "is_wholesale", "created_at", "last_seen_at")
     search_fields = (
@@ -2677,6 +3587,10 @@ class CustomerAdmin(ImportExportModelAdmin):
     )
     readonly_fields = (
         "public_id",
+        "masked_public_id",
+        "customer_display",
+        "masked_phone_display",
+        "masked_email_display",
         "referral_code",
         "referral_code_used",
         "referred_at",
@@ -2686,9 +3600,62 @@ class CustomerAdmin(ImportExportModelAdmin):
         "telegram_connection_status",
         "telegram_bot_users_total",
         "latest_web_telegram_token_status",
+        "active_clients_total",
+        "orders_total",
+        "last_order_date",
+        "customer_review_link",
         "created_at",
         "updated_at",
         "last_seen_at",
+    )
+    fieldsets = (
+        (
+            _("Summary"),
+            {
+                "fields": (
+                    "masked_public_id",
+                    "display_name",
+                    "username",
+                    "masked_phone_display",
+                    "masked_email_display",
+                    "is_active",
+                    "customer_review_link",
+                    "telegram_connection_status",
+                    "active_clients_total",
+                    "orders_total",
+                    "last_order_date",
+                )
+            },
+        ),
+        (
+            _("Wholesale / Referrals"),
+            {
+                "fields": (
+                    "is_wholesale",
+                    "default_discount_percent",
+                    "referral_code",
+                    "referred_by",
+                    "referral_code_used",
+                    "referred_at",
+                )
+            },
+        ),
+        (
+            _("Technical"),
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "first_ip",
+                    "last_ip",
+                    "user_agent_hash",
+                    "latest_web_telegram_token_status",
+                    "telegram_bot_users_total",
+                    "created_at",
+                    "updated_at",
+                    "last_seen_at",
+                ),
+            },
+        ),
     )
     autocomplete_fields = ("referred_by",)
     date_hierarchy = "created_at"
@@ -2701,6 +3668,12 @@ class CustomerAdmin(ImportExportModelAdmin):
             .get_queryset(request)
             .annotate(
                 admin_orders_count=Count("orders", distinct=True),
+                admin_active_clients_count=Count(
+                    "orders__vpn_clients",
+                    filter=Q(orders__vpn_clients__status=VPNClient.Status.ACTIVE),
+                    distinct=True,
+                ),
+                admin_last_order_at=Max("orders__created_at"),
                 admin_invited_count=Count("referrals_made", distinct=True),
                 admin_successful_referrals_count=Count(
                     "referrals_made",
@@ -2740,6 +3713,43 @@ class CustomerAdmin(ImportExportModelAdmin):
                 ),
             )
         )
+
+    @admin.display(description=_("Public ID"))
+    def masked_public_id(self, obj):
+        return admin_mask_identifier(obj.public_id)
+
+    @admin.display(description=_("Customer"), ordering="display_name")
+    def customer_display(self, obj):
+        label = admin_safe_customer_label(obj)
+        url = reverse("admin_store_customer_review", args=[obj.pk])
+        return format_html('<a href="{}">{}</a>', url, label)
+
+    @admin.display(description=_("Phone"), ordering="phone_number")
+    def masked_phone_display(self, obj):
+        return admin_mask_phone(obj.phone_number) or "-"
+
+    @admin.display(description=_("Email"))
+    def masked_email_display(self, obj):
+        return "-"
+
+    @admin.display(description=_("Active clients"), ordering="admin_active_clients_count")
+    def active_clients_total(self, obj):
+        value = getattr(obj, "admin_active_clients_count", None)
+        if value is not None:
+            return value
+        return obj.orders.filter(vpn_clients__status=VPNClient.Status.ACTIVE).distinct().count()
+
+    @admin.display(description=_("Last order"), ordering="admin_last_order_at")
+    def last_order_date(self, obj):
+        value = getattr(obj, "admin_last_order_at", None)
+        return timezone.localtime(value).strftime("%Y-%m-%d %H:%M") if value else "-"
+
+    @admin.display(description=_("Review"))
+    def customer_review_link(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        url = reverse("admin_store_customer_review", args=[obj.pk])
+        return format_html('<a class="button" href="{}">{}</a>', url, _("Review"))
 
     @admin.display(description=_("Orders"))
     def orders_total(self, obj):

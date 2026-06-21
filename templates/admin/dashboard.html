@@ -7,6 +7,76 @@
         <div class="card mb-3">
             <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
                 <div>
+                    <h3 class="h5 mb-1">داشبورد قاصدک</h3>
+                    <p class="mb-0 text-muted">امروز چه خبر است؟ سفارش‌ها، درآمد، رسیدها، سرویس‌ها و اقدام‌های فوری.</p>
+                </div>
+                <a href="{% url 'admin_store_owner_dashboard' %}" class="btn btn-primary mt-3 mt-sm-0">
+                    مشاهده داشبورد
+                </a>
+            </div>
+        </div>
+    </div>
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
+                <div>
+                    <h3 class="h5 mb-1">میز کار سفارش‌ها</h3>
+                    <p class="mb-0 text-muted">بررسی رسید، تایید یا رد پرداخت، و پیگیری تحویل کانفیگ از یک صفحه owner-facing.</p>
+                </div>
+                <a href="{% url 'admin_store_order_workbench' %}" class="btn btn-warning mt-3 mt-sm-0">
+                    باز کردن میز کار
+                </a>
+            </div>
+        </div>
+    </div>
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
+                <div>
+                    <h3 class="h5 mb-1">میز کار سرویس‌ها</h3>
+                    <p class="mb-0 text-muted">مشتری، سرویس فعال/منقضی، مصرف، انقضا و actionهای explicit از یک صفحه owner-facing.</p>
+                </div>
+                <a href="{% url 'admin_store_service_workbench' %}" class="btn btn-info mt-3 mt-sm-0">
+                    باز کردن میز کار سرویس‌ها
+                </a>
+            </div>
+        </div>
+    </div>
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
+                <div>
+                    <h3 class="h5 mb-1">کنترل درآمد هوشمند</h3>
+                    <p class="mb-0 text-muted">وضعیت dry-run/real-send، guardrailها، metricهای RevenueOfferLog و actionهای امن.</p>
+                </div>
+                <a href="{% url 'admin_store_revenue_control' %}" class="btn btn-danger mt-3 mt-sm-0">
+                    باز کردن کنترل درآمد
+                </a>
+            </div>
+        </div>
+    </div>
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
+                <div>
+                    <h3 class="h5 mb-1">راه‌اندازی قاصدک</h3>
+                    <p class="mb-0 text-muted">وضعیت نصب و تنظیمات اولیه Store، تلگرام، پنل، پلن‌ها، پرداخت و Revenue Engine.</p>
+                </div>
+                <div class="d-flex flex-wrap gap-2 mt-3 mt-sm-0">
+                    <a href="{% url 'admin_store_setup_wizard' %}" class="btn btn-success">
+                        راه‌اندازی مرحله‌ای
+                    </a>
+                    <a href="{% url 'admin_store_setup_center' %}" class="btn btn-outline-success">
+                        وضعیت نصب
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
+                <div>
                     <h3 class="h5 mb-1">گزارش دریافتی کارت‌ها</h3>
                     <p class="mb-0 text-muted">جمع رسیدهای ثبت شده برای هر شماره کارت را با فیلتر بازه زمانی ببین.</p>
                 </div>

@@ -47,3 +47,19 @@ html[dir="rtl"] .admin-metric-card .icon {
     right: auto;
     left: 15px;
 }
+
+.qasedak-admin-summary ul {
+    display: grid;
+    gap: .4rem;
+    margin: 0 0 .75rem;
+    padding: 0;
+}
+
+.qasedak-admin-summary li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .75rem;
+    max-width: 520px;
+    list-style: none;
+}

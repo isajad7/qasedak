@@ -33,6 +33,8 @@ PENDING_RENEWAL_STATUSES = {
     Order.Status.CONFIRMED,
 }
 BYTES_PER_GB = Decimal(1024 ** 3)
+ADMIN_ENABLE_ACTION = "admin_enable"
+ADMIN_DISABLE_ACTION = "admin_disable"
 
 
 class VPNClientManagementError(Exception):
@@ -544,6 +546,106 @@ def sync_local_vpn_client_after_remote_update(vpn_client, remote_result):
             ]
         )
     return locked
+
+
+def _sync_local_enabled_state(vpn_client, remote_result, enabled):
+    if not vpn_client:
+        return None
+    with transaction.atomic():
+        locked = VPNClient.objects.select_for_update().get(pk=vpn_client.pk)
+        if locked.is_deleted:
+            return locked
+        locked.traffic_limit_bytes = int(remote_result.get("new_total_bytes") or locked.traffic_limit_bytes or 0)
+        locked.expires_at = remote_result.get("new_expiry_time") or locked.expires_at
+        locked.last_synced_at = timezone.now()
+        locked.xui_raw = remote_result.get("raw", locked.xui_raw)
+        if enabled:
+            locked.status = VPNClient.Status.ACTIVE
+            locked.disabled_at = None
+        else:
+            locked.status = VPNClient.Status.INACTIVE
+            locked.disabled_at = locked.disabled_at or timezone.now()
+        locked.save(
+            update_fields=[
+                "traffic_limit_bytes",
+                "expires_at",
+                "status",
+                "disabled_at",
+                "last_synced_at",
+                "xui_raw",
+                "updated_at",
+            ]
+        )
+    return locked
+
+
+def set_vpn_client_enabled_by_admin(admin_telegram_id, lookup_token_or_result, *, enabled):
+    payload = dict(lookup_token_or_result or {})
+    panel, inbound, identifier = _lookup_panel_inbound(payload)
+    local_match = find_local_vpn_client_for_lookup(
+        panel,
+        inbound,
+        identifier,
+        result=payload,
+        vpn_client_id=payload.get("vpn_client_id"),
+    )
+    vpn_client = local_match.vpn_client
+    customer = _client_customer(vpn_client) if vpn_client else None
+    log = _create_action_log(
+        vpn_client=vpn_client,
+        customer=customer,
+        actor_type=VPNClientActionLog.ActorType.ADMIN,
+        actor_telegram_id=admin_telegram_id,
+        action=ADMIN_ENABLE_ACTION if enabled else ADMIN_DISABLE_ACTION,
+        panel=panel,
+        inbound=inbound,
+        identifier=identifier,
+        old_total_bytes=getattr(vpn_client, "traffic_limit_bytes", None),
+        old_expiry_time=getattr(vpn_client, "expires_at", None),
+        metadata={
+            "source": "admin_service_review",
+            "local_match_status": local_match.status,
+            "enabled": bool(enabled),
+        },
+    )
+    try:
+        remote_result = update_client_traffic_and_expiry(
+            panel,
+            inbound,
+            identifier,
+            enable=bool(enabled),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Admin VPN client enabled-state update failed admin=%s panel=%s inbound=%s identifier=%s enabled=%s error=%s",
+            admin_telegram_id,
+            panel.pk,
+            inbound.inbound_id,
+            mask_identifier(identifier),
+            bool(enabled),
+            exc,
+        )
+        _complete_action_log(log, status=VPNClientActionLog.Status.FAILED, error_message=str(exc))
+        raise VPNClientManagementError("تغییر وضعیت سرویس روی پنل انجام نشد.") from exc
+
+    if vpn_client:
+        _sync_local_enabled_state(vpn_client, remote_result, bool(enabled))
+
+    _complete_action_log(
+        log,
+        status=VPNClientActionLog.Status.SUCCESS,
+        new_total_bytes=remote_result.get("new_total_bytes"),
+        new_expiry_time=remote_result.get("new_expiry_time"),
+        metadata={
+            "local_updated": bool(vpn_client),
+            "local_match_status": local_match.status,
+            "enabled": bool(remote_result.get("enabled")) if remote_result.get("enabled") is not None else bool(enabled),
+        },
+    )
+    remote_result["audit_log"] = log
+    remote_result["vpn_client"] = vpn_client
+    remote_result["local_match_status"] = local_match.status
+    return remote_result
 
 
 def update_vpn_client_limits_by_admin(

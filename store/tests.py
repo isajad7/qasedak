@@ -4934,6 +4934,1724 @@ class AdminCardReceiptsReportTests(TestCase):
         self.assertEqual(len(response.context["order_rows"]), 1)
 
 
+@override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")
+class AdminSetupCenterTests(TestCase):
+    def setUp(self):
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="setup-admin",
+            email="setup-admin@example.com",
+            password="secret",
+        )
+        self.store = Store.objects.create(
+            name="Qasedak",
+            english_name="Qasedak",
+            slug="qasedak",
+            card_number="0000000000000000",
+            card_owner="Configure Payment Owner",
+        )
+
+    def login_admin(self):
+        self.client.force_login(self.admin_user)
+
+    def test_setup_center_url_loads_for_superuser(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_setup_center"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "راه‌اندازی قاصدک")
+        self.assertContains(response, "Revenue Engine")
+
+    def test_setup_center_requires_staff_login(self):
+        response = self.client.get(reverse("admin_store_setup_center"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        regular_user = get_user_model().objects.create_user(username="regular", password="secret")
+        self.client.force_login(regular_user)
+
+        response = self.client.get(reverse("admin_store_setup_center"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_minimal_install_setup_center_has_warnings_not_500(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_setup_center"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "نیاز به بررسی")
+        self.assertNotContains(response, "qadmin-status-error")
+
+    def test_active_plan_without_route_is_error(self):
+        Plan.objects.create(
+            store=self.store,
+            name="Starter",
+            slug="starter",
+            volume_gb=Decimal("1.000"),
+            duration_days=30,
+            price=100000,
+            currency=Plan.Currency.TOMAN,
+            is_active=True,
+            is_public=True,
+        )
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_setup_center"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "qadmin-status-error")
+        self.assertContains(response, "route معتبر ندارد")
+
+    def test_store_admin_fieldsets_are_grouped_for_owner_and_power_user(self):
+        from django.contrib import admin as django_admin
+
+        store_admin = django_admin.site._registry[Store]
+        request = SimpleNamespace(user=self.admin_user)
+
+        fieldsets = store_admin.get_fieldsets(request, self.store)
+        fieldset_names = [str(name) for name, _options in fieldsets]
+
+        self.assertIn("Quick Setup / وضعیت کلی", fieldset_names)
+        self.assertIn("Brand / Identity", fieldset_names)
+        self.assertIn("Payment", fieldset_names)
+        self.assertIn("Customer / Sales Settings", fieldset_names)
+        self.assertIn("Telegram / Bot Related", fieldset_names)
+        self.assertIn("Reminders / Reports / Monitoring", fieldset_names)
+
+        options_by_name = {str(name): options for name, options in fieldsets}
+        self.assertIn("collapse", options_by_name["Revenue Engine Controls"]["classes"])
+        self.assertIn("collapse", options_by_name["Advanced / Legacy"]["classes"])
+
+    def test_setup_center_does_not_render_full_secrets(self):
+        secret_card = "621986" + "1234567890"
+        secret_token = "123456" + ":" + "telegram-secret-token"
+        secret_password = "panel-super-secret"
+        secret_proxy = "http://" + "proxy-user" + ":" + "proxy-secret" + "@proxy.example:8080"
+        self.store.card_number = secret_card
+        self.store.card_owner = "Owner"
+        self.store.save(update_fields=["card_number", "card_owner", "updated_at"])
+        BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Telegram bot",
+            telegram_bot_username="qasedak_bot",
+            bot_token=secret_token,
+            admin_user_id="999",
+            is_active=True,
+        )
+        Panel.objects.create(
+            store=self.store,
+            name="Primary panel",
+            url="https://panel.example.com/admin",
+            username="panel-admin",
+            password=secret_password,
+            proxy_url=secret_proxy,
+            is_active=True,
+        )
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_setup_center"))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(secret_card, body)
+        self.assertNotIn(secret_token, body)
+        self.assertNotIn(secret_password, body)
+        self.assertNotIn(secret_proxy, body)
+        self.assertNotIn("proxy-secret", body)
+
+    def test_bot_configuration_admin_masks_token_and_webhook_secret(self):
+        bot_token = "123456" + ":" + "telegram-secret-token"
+        bot_config = BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Telegram bot",
+            telegram_bot_username="qasedak_bot",
+            bot_token=bot_token,
+            admin_user_id="999",
+            is_active=True,
+        )
+        self.login_admin()
+
+        response = self.client.get(reverse("admin:store_botconfiguration_change", args=[bot_config.pk]))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(bot_token, body)
+        self.assertNotIn(bot_config.webhook_secret, body)
+        self.assertIn("/bot/telegram/&lt;hidden&gt;/webhook/", body)
+
+    def test_setup_center_does_not_call_live_integrations(self):
+        self.login_admin()
+
+        with patch("store.telegram_bot.client.BotClient.get_me") as get_me_mock, patch(
+            "store.xui_api.login_to_panel"
+        ) as login_mock:
+            response = self.client.get(reverse("admin_store_setup_center"))
+
+        self.assertEqual(response.status_code, 200)
+        get_me_mock.assert_not_called()
+        login_mock.assert_not_called()
+
+    def test_check_integrations_minimal_setup_behavior_still_warns_without_errors(self):
+        stdout = StringIO()
+
+        call_command("check_integrations", "--no-fail", stdout=stdout)
+
+        output = stdout.getvalue()
+        self.assertIn("Setup incomplete: no active X-UI panel exists yet", output)
+        self.assertIn("ERROR=0", output)
+
+
+@override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")
+class AdminOwnerDashboardTests(TestCase):
+    def setUp(self):
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="owner-admin",
+            email="owner-admin@example.com",
+            password="secret",
+        )
+        self.store = Store.objects.create(
+            name="Owner Store",
+            english_name="Owner Store",
+            slug="owner-store",
+            card_number="0000000000000000",
+            card_owner="Configure Payment Owner",
+        )
+        self.plan = Plan.objects.create(
+            store=self.store,
+            name="Owner 1GB",
+            slug="owner-1gb",
+            volume_gb=Decimal("1.000"),
+            duration_days=30,
+            price=100000,
+            currency=Plan.Currency.TOMAN,
+            is_active=True,
+            is_public=True,
+        )
+
+    def login_admin(self):
+        self.client.force_login(self.admin_user)
+
+    def create_order(self, *, status=Order.Status.PENDING_PAYMENT, is_paid=False, amount=100000, **kwargs):
+        data = {
+            "store": self.store,
+            "plan": self.plan,
+            "amount": amount,
+            "original_amount": amount,
+            "currency": Plan.Currency.TOMAN,
+            "status": status,
+            "is_paid": is_paid,
+        }
+        data.update(kwargs)
+        return Order.objects.create(**data)
+
+    def test_owner_dashboard_url_loads_for_superuser(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "داشبورد قاصدک")
+        self.assertContains(response, "سفارش‌های امروز")
+
+    def test_owner_dashboard_requires_staff_login(self):
+        response = self.client.get(reverse("admin_store_owner_dashboard"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        regular_user = get_user_model().objects.create_user(username="owner-regular", password="secret")
+        self.client.force_login(regular_user)
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_owner_dashboard_minimal_install_without_integrations_does_not_500(self):
+        BotConfiguration.objects.all().delete()
+        Panel.objects.all().delete()
+        Plan.objects.all().delete()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "پنل ندارد")
+        self.assertContains(response, "تنظیم نشده")
+
+    def test_owner_dashboard_does_not_render_full_secrets(self):
+        secret_card = "621986" + "1234567890"
+        secret_token = "123456" + ":" + "telegram-secret-token"
+        secret_password = "panel-super-secret"
+        secret_proxy = "http://" + "proxy-user" + ":" + "proxy-secret" + "@proxy.example:8080"
+        self.store.card_number = secret_card
+        self.store.card_owner = "Owner"
+        self.store.save(update_fields=["card_number", "card_owner", "updated_at"])
+        BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Telegram bot",
+            telegram_bot_username="owner_bot",
+            bot_token=secret_token,
+            admin_user_id="999",
+            is_active=True,
+        )
+        Panel.objects.create(
+            store=self.store,
+            name="Primary panel",
+            url="https://panel.example.com/admin",
+            username="panel-admin",
+            password=secret_password,
+            proxy_url=secret_proxy,
+            is_active=True,
+        )
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(secret_card, body)
+        self.assertNotIn(secret_token, body)
+        self.assertNotIn(secret_password, body)
+        self.assertNotIn(secret_proxy, body)
+        self.assertNotIn("proxy-secret", body)
+
+    def test_pending_order_metric_counts_pending_statuses(self):
+        self.create_order(status=Order.Status.PENDING_PAYMENT)
+        self.create_order(status=Order.Status.PENDING_VERIFICATION, payment_submitted_at=timezone.now())
+        self.create_order(status=Order.Status.CONFIRMED, is_paid=True)
+        self.create_order(status=Order.Status.COMPLETED, is_paid=True)
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["order_metrics"]["pending"], 3)
+
+    def test_completed_revenue_metric_uses_paid_completed_orders(self):
+        self.create_order(status=Order.Status.COMPLETED, is_paid=True, amount=200000)
+        self.create_order(status=Order.Status.COMPLETED, is_paid=False, amount=900000)
+        self.create_order(status=Order.Status.CONFIRMED, is_paid=True, amount=700000)
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["revenue_metrics"]["today"]["by_currency"][Plan.Currency.TOMAN], 200000)
+
+    def test_expiring_client_metric_counts_next_three_days(self):
+        VPNClient.objects.create(
+            store=self.store,
+            plan=self.plan,
+            username="expiring-client",
+            status=VPNClient.Status.ACTIVE,
+            traffic_limit_bytes=10_000,
+            used_traffic_bytes=1_000,
+            duration_days=30,
+            expires_at=timezone.now() + timedelta(days=2),
+        )
+        VPNClient.objects.create(
+            store=self.store,
+            plan=self.plan,
+            username="later-client",
+            status=VPNClient.Status.ACTIVE,
+            traffic_limit_bytes=10_000,
+            used_traffic_bytes=1_000,
+            duration_days=30,
+            expires_at=timezone.now() + timedelta(days=10),
+        )
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["client_metrics"]["expiring_soon"], 1)
+
+    def test_revenue_engine_summary_shows_dry_run_safe_state(self):
+        self.store.revenue_engine_dry_run = True
+        self.store.save(update_fields=["revenue_engine_dry_run", "updated_at"])
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["revenue_engine_summary"]["dry_run"])
+        self.assertContains(response, "Dry-run")
+
+    def test_action_items_are_created_for_missing_setup(self):
+        BotConfiguration.objects.all().delete()
+        Panel.objects.all().delete()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"))
+        titles = [item.title for item in response.context["action_items"]]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Route پلن‌ها ناقص است", titles)
+        self.assertIn("پنل X-UI/Sanaei را اضافه کن", titles)
+        self.assertIn("BotConfiguration تلگرام را کامل کن", titles)
+
+    def test_owner_dashboard_does_not_call_live_integrations(self):
+        self.login_admin()
+
+        with patch("store.telegram_bot.client.BotClient.get_me") as get_me_mock, patch(
+            "store.xui_api.login_to_panel"
+        ) as login_mock:
+            response = self.client.get(reverse("admin_store_owner_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        get_me_mock.assert_not_called()
+        login_mock.assert_not_called()
+
+    def test_setup_center_links_back_to_owner_dashboard(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_setup_center"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse("admin_store_owner_dashboard"))
+
+    def test_admin_index_and_store_changelist_link_owner_dashboard(self):
+        self.login_admin()
+
+        index_response = self.client.get(reverse("admin:index"))
+        changelist_response = self.client.get(reverse("admin:store_store_changelist"))
+
+        self.assertEqual(index_response.status_code, 200)
+        self.assertEqual(changelist_response.status_code, 200)
+        self.assertContains(index_response, reverse("admin_store_owner_dashboard"))
+        self.assertContains(changelist_response, reverse("admin_store_owner_dashboard"))
+
+
+@override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")
+class AdminRevenueControlCenterTests(TestCase):
+    def setUp(self):
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="revenue-admin",
+            email="revenue-admin@example.com",
+            password="secret",
+        )
+        self.store = Store.objects.create(
+            name="Revenue Store",
+            english_name="Revenue Store",
+            slug="revenue-store",
+            card_number="0000000000000000",
+            card_owner="Configure Payment Owner",
+        )
+        self.bot_config = BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Revenue Telegram",
+            bot_token="123456" + ":" + "revenue-token",
+            admin_user_id="999",
+            is_active=True,
+        )
+
+    def login_admin(self):
+        self.client.force_login(self.admin_user)
+
+    def revenue_url(self):
+        return reverse("admin_store_revenue_control")
+
+    def create_offer_log(self, **extra):
+        data = {
+            "store": self.store,
+            "engine_type": RevenueOfferLog.EngineType.RETENTION,
+            "event_type": "user_inactive_72h",
+            "offer_type": "retention",
+            "decision_source": RevenueOfferLog.DecisionSource.AI,
+            "status": RevenueOfferLog.Status.DRY_RUN,
+            "metadata": {"safe": "ok"},
+        }
+        data.update(extra)
+        return RevenueOfferLog.objects.create(**data)
+
+    def test_revenue_control_center_url_loads_for_superuser(self):
+        self.login_admin()
+
+        response = self.client.get(self.revenue_url(), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "کنترل درآمد هوشمند")
+        self.assertContains(response, "Revenue Engine Control Center")
+        self.assertContains(response, "Command hints")
+
+    def test_revenue_control_center_requires_staff_login(self):
+        response = self.client.get(self.revenue_url())
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        regular_user = get_user_model().objects.create_user(username="revenue-regular", password="secret")
+        self.client.force_login(regular_user)
+
+        response = self.client.get(self.revenue_url())
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_revenue_control_center_fresh_install_without_logs_does_not_500(self):
+        RevenueOfferLog.objects.all().delete()
+        self.login_admin()
+
+        response = self.client.get(self.revenue_url(), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "RevenueOfferLog هنوز داده‌ای ندارد")
+
+    def test_revenue_control_center_does_not_render_full_secrets(self):
+        secret_card = "621986" + "1234567890"
+        secret_token = "123456" + ":" + "telegram-secret-token"
+        secret_uuid = "11111111" + "-2222-3333-4444-" + "555555555555"
+        secret_config = "vless://" + secret_uuid + "@example.com:443"
+        secret_phone = "0912" + "3456789"
+        secret_email = "customer-secret@example.com"
+        self.store.card_number = secret_card
+        self.store.card_owner = "Owner"
+        self.store.save(update_fields=["card_number", "card_owner", "updated_at"])
+        self.bot_config.bot_token = secret_token
+        self.bot_config.save(update_fields=["bot_token", "updated_at"])
+        customer = Customer.objects.create(
+            username=secret_email,
+            phone_number=secret_phone,
+            display_name="Secret Customer",
+        )
+        bot_user = BotUser.objects.create(
+            bot_config=self.bot_config,
+            customer=customer,
+            provider_user_id="98765" + "43210",
+            chat_id="98765" + "43210",
+            username="secret_user",
+            display_name="Secret User",
+        )
+        self.create_offer_log(
+            customer=customer,
+            bot_user=bot_user,
+            metadata={
+                "config_link": secret_config,
+                "uuid": secret_uuid,
+                "phone": secret_phone,
+                "email": secret_email,
+                "token": secret_token,
+            },
+        )
+        self.login_admin()
+
+        response = self.client.get(self.revenue_url(), {"store": self.store.pk})
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(secret_card, body)
+        self.assertNotIn(secret_token, body)
+        self.assertNotIn(secret_config, body)
+        self.assertNotIn(secret_uuid, body)
+        self.assertNotIn(secret_phone, body)
+        self.assertNotIn(secret_email, body)
+
+    def test_revenue_control_center_get_does_not_call_live_integrations_or_scan(self):
+        self.login_admin()
+
+        with patch("store.revenue_engine.scheduler.run_revenue_scan") as scan_mock, patch(
+            "store.telegram_bot.client.BotClient.get_me"
+        ) as get_me_mock, patch("store.xui_api.login_to_panel") as login_mock:
+            response = self.client.get(self.revenue_url(), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        scan_mock.assert_not_called()
+        get_me_mock.assert_not_called()
+        login_mock.assert_not_called()
+
+    def test_enable_dry_run_action_only_accepts_post(self):
+        self.store.revenue_engine_dry_run = False
+        self.store.save(update_fields=["revenue_engine_dry_run", "updated_at"])
+        self.login_admin()
+
+        response = self.client.get(self.revenue_url(), {"store": self.store.pk, "action": "enable_dry_run"})
+        self.store.refresh_from_db()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(self.store.revenue_engine_dry_run)
+
+        response = self.client.post(self.revenue_url(), {"store": self.store.pk, "action": "enable_dry_run"})
+        self.store.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(self.store.revenue_engine_dry_run)
+
+    def test_disable_revenue_action_only_accepts_post(self):
+        self.store.revenue_engine_enabled = True
+        self.store.save(update_fields=["revenue_engine_enabled", "updated_at"])
+        self.login_admin()
+
+        response = self.client.get(
+            self.revenue_url(),
+            {"store": self.store.pk, "action": "disable_revenue", "confirmation": "DISABLE_REVENUE_ENGINE"},
+        )
+        self.store.refresh_from_db()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.store.revenue_engine_enabled)
+
+        response = self.client.post(
+            self.revenue_url(),
+            {"store": self.store.pk, "action": "disable_revenue", "confirmation": "DISABLE_REVENUE_ENGINE"},
+        )
+        self.store.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(self.store.revenue_engine_enabled)
+
+    def test_reset_safe_defaults_sets_dry_run_true(self):
+        self.store.revenue_engine_dry_run = False
+        self.store.revenue_max_total_offers_per_day = 500
+        self.store.revenue_min_ai_confidence = Decimal("0.10")
+        self.store.save(
+            update_fields=[
+                "revenue_engine_dry_run",
+                "revenue_max_total_offers_per_day",
+                "revenue_min_ai_confidence",
+                "updated_at",
+            ]
+        )
+        self.login_admin()
+
+        response = self.client.post(
+            self.revenue_url(),
+            {"store": self.store.pk, "action": "reset_safe_defaults", "confirmation": "RESET_REVENUE_SAFE_DEFAULTS"},
+        )
+        self.store.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(self.store.revenue_engine_enabled)
+        self.assertTrue(self.store.revenue_engine_dry_run)
+        self.assertEqual(self.store.revenue_max_total_offers_per_day, 100)
+        self.assertEqual(self.store.revenue_min_ai_confidence, Decimal("0.50"))
+
+    def test_enable_real_send_without_confirmation_does_not_activate(self):
+        self.login_admin()
+
+        response = self.client.post(
+            self.revenue_url(),
+            {"store": self.store.pk, "action": "enable_real_send", "confirmation": "WRONG"},
+        )
+        self.store.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(self.store.revenue_engine_dry_run)
+
+    def test_enable_real_send_with_unsafe_conditions_does_not_activate(self):
+        self.login_admin()
+
+        with patch(
+            "store.admin_views.get_real_send_safety",
+            return_value={"safe": False, "blocking": ["unsafe"], "warnings": [], "target_coverage": {}},
+        ):
+            response = self.client.post(
+                self.revenue_url(),
+                {
+                    "store": self.store.pk,
+                    "action": "enable_real_send",
+                    "confirmation": "ENABLE_REAL_REVENUE_SEND",
+                },
+            )
+        self.store.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(self.store.revenue_engine_dry_run)
+
+    def test_enable_real_send_with_safe_conditions_and_confirmation_sets_dry_run_false(self):
+        self.login_admin()
+
+        with patch(
+            "store.admin_views.get_real_send_safety",
+            return_value={"safe": True, "blocking": [], "warnings": [], "target_coverage": {}},
+        ):
+            response = self.client.post(
+                self.revenue_url(),
+                {
+                    "store": self.store.pk,
+                    "action": "enable_real_send",
+                    "confirmation": "ENABLE_REAL_REVENUE_SEND",
+                },
+            )
+        self.store.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(self.store.revenue_engine_enabled)
+        self.assertFalse(self.store.revenue_engine_dry_run)
+
+    def test_dashboard_links_to_revenue_control_center(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse("admin_store_revenue_control"))
+        self.assertContains(response, "کنترل درآمد هوشمند")
+
+    def test_store_admin_links_to_revenue_control_center(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin:store_store_change", args=[self.store.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse("admin_store_revenue_control"))
+        self.assertContains(response, "کنترل درآمد هوشمند")
+
+    def test_revenue_metrics_from_offer_logs_are_correct(self):
+        from .admin_revenue import get_revenue_metrics
+
+        self.create_offer_log(status=RevenueOfferLog.Status.DRY_RUN)
+        self.create_offer_log(status=RevenueOfferLog.Status.SENT)
+        self.create_offer_log(status=RevenueOfferLog.Status.CONVERTED)
+        self.create_offer_log(status=RevenueOfferLog.Status.FAILED)
+        self.create_offer_log(status=RevenueOfferLog.Status.SKIPPED)
+        self.create_offer_log(status=RevenueOfferLog.Status.SUPPRESSED)
+
+        metrics = get_revenue_metrics(store=self.store, days=7)
+
+        self.assertEqual(metrics["total"], 6)
+        self.assertEqual(metrics["dry_run"], 1)
+        self.assertEqual(metrics["sent"], 2)
+        self.assertEqual(metrics["failed"], 1)
+        self.assertEqual(metrics["skipped_suppressed"], 2)
+        self.assertEqual(metrics["conversions"], 1)
+        self.assertEqual(metrics["conversion_rate"], Decimal("50.0"))
+
+    def test_failed_logs_are_shown_in_action_items(self):
+        from .admin_revenue import get_revenue_action_items, get_revenue_metrics, get_real_send_safety
+
+        self.create_offer_log(status=RevenueOfferLog.Status.FAILED)
+
+        metrics = get_revenue_metrics(store=self.store, days=7)
+        safety = get_real_send_safety(self.store)
+        items = get_revenue_action_items(self.store, metrics=metrics, safety=safety)
+        titles = [item["title"] for item in items]
+
+        self.assertIn("failed logs نیاز به بررسی دارند", titles)
+
+
+@override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")
+class AdminOrderWorkbenchTests(TestCase):
+    def setUp(self):
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="orders-admin",
+            email="orders-admin@example.com",
+            password="secret",
+        )
+        self.store = Store.objects.create(
+            name="Orders Store",
+            english_name="Orders Store",
+            slug="orders-store",
+            card_number="621986" + "1234567890",
+            card_owner="Orders Owner",
+        )
+        self.plan = Plan.objects.create(
+            store=self.store,
+            name="Orders 1GB",
+            slug="orders-1gb",
+            volume_gb=Decimal("1.000"),
+            duration_days=30,
+            price=100000,
+            currency=Plan.Currency.TOMAN,
+            is_active=True,
+            is_public=True,
+        )
+        self.customer = Customer.objects.create(
+            display_name="Alice Buyer",
+            phone_number="+989121234567",
+        )
+
+    def login_admin(self):
+        self.client.force_login(self.admin_user)
+
+    def create_order(self, **kwargs):
+        data = {
+            "store": self.store,
+            "customer": self.customer,
+            "plan": self.plan,
+            "amount": 100000,
+            "original_amount": 100000,
+            "currency": Plan.Currency.TOMAN,
+            "payment_method": Order.PaymentMethod.MANUAL_CARD,
+            "status": Order.Status.PENDING_VERIFICATION,
+            "verification_status": Order.VerificationStatus.PENDING,
+            "is_paid": True,
+            "payment_submitted_at": timezone.now(),
+            "payment_receipt_image": "payment_receipts/safe-receipt.png",
+        }
+        data.update(kwargs)
+        return Order.objects.create(**data)
+
+    def create_inbound(self):
+        panel = Panel.objects.create(
+            store=self.store,
+            name="Order Panel",
+            url="https://panel.example.com/admin",
+            username="panel-admin",
+            password="panel-secret-password",
+            is_active=True,
+        )
+        return Inbound.objects.create(
+            panel=panel,
+            inbound_id=7,
+            remark="Main inbound",
+            server_ip="vpn.example.com",
+            port="443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+
+    def test_workbench_url_loads_for_superuser(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_order_workbench"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "میز کار سفارش‌ها")
+
+    def test_workbench_requires_staff_login(self):
+        response = self.client.get(reverse("admin_store_order_workbench"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        regular_user = get_user_model().objects.create_user(username="orders-regular", password="secret")
+        self.client.force_login(regular_user)
+
+        response = self.client.get(reverse("admin_store_order_workbench"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_fresh_install_without_orders_does_not_500(self):
+        Order.objects.all().delete()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_order_workbench"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "موردی در این صف نیست")
+
+    def test_pending_order_appears_in_needs_review_section(self):
+        order = self.create_order()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_order_workbench"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["summary_counts"]["needs_review"], 1)
+        self.assertContains(response, order.order_tracking_code)
+
+    def test_completed_order_counts_in_completed_section(self):
+        self.create_order(status=Order.Status.COMPLETED, verification_status=Order.VerificationStatus.VERIFIED)
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_order_workbench"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["summary_counts"]["completed"], 1)
+
+    def test_order_review_page_loads_for_superuser(self):
+        order = self.create_order()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_order_review", args=[order.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, order.order_tracking_code)
+        self.assertContains(response, "خلاصه سفارش")
+
+    def test_review_page_does_not_leak_sensitive_values(self):
+        order = self.create_order(
+            uuid="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            sub_link="https://example.com/sub/SECRET-SUB-TOKEN",
+            direct_link="vless://aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@vpn.example.com:443#Alice",
+            metadata={
+                "payment_destination_card_number": self.store.card_number,
+                "receipt_text": f"card {self.store.card_number} token SECRET-SUB-TOKEN",
+                "receipt_analysis": {"status": "matched", "matched_amount_irr": 1000000},
+            },
+        )
+        inbound = self.create_inbound()
+        VPNClient.objects.create(
+            store=self.store,
+            order=order,
+            plan=self.plan,
+            inbound=inbound,
+            username="alice-config",
+            xui_email="alice@example.com",
+            uuid=order.uuid,
+            sub_link=order.sub_link,
+            direct_link=order.direct_link,
+            status=VPNClient.Status.INACTIVE,
+        )
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_order_review", args=[order.pk]))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(self.store.card_number, body)
+        self.assertNotIn(self.customer.phone_number, body)
+        self.assertNotIn("SECRET-SUB-TOKEN", body)
+        self.assertNotIn("vless://", body)
+        self.assertNotIn("alice@example.com", body)
+        self.assertIn("+989***67", body)
+
+    def test_get_review_page_has_no_side_effects(self):
+        order = self.create_order()
+        self.login_admin()
+
+        with patch("store.admin_views.activate_order") as activate_mock, patch("store.admin_views.reject_order") as reject_mock:
+            response = self.client.get(reverse("admin_store_order_review", args=[order.pk]), {"action": "approve"})
+
+        self.assertEqual(response.status_code, 200)
+        activate_mock.assert_not_called()
+        reject_mock.assert_not_called()
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PENDING_VERIFICATION)
+
+    def test_approve_action_requires_post_and_confirmation(self):
+        order = self.create_order()
+        self.login_admin()
+
+        with patch("store.admin_views.activate_order") as activate_mock:
+            get_response = self.client.get(reverse("admin_store_order_review", args=[order.pk]), {"action": "approve"})
+            post_response = self.client.post(
+                reverse("admin_store_order_review", args=[order.pk]),
+                {"action": "approve"},
+            )
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(post_response.status_code, 302)
+        activate_mock.assert_not_called()
+
+    def test_reject_action_requires_post_confirmation_and_reason(self):
+        order = self.create_order()
+        self.login_admin()
+
+        with patch("store.admin_views.reject_order") as reject_mock:
+            get_response = self.client.get(reverse("admin_store_order_review", args=[order.pk]), {"action": "reject"})
+            missing_reason_response = self.client.post(
+                reverse("admin_store_order_review", args=[order.pk]),
+                {"action": "reject", "confirm_external": "1"},
+            )
+            ok_response = self.client.post(
+                reverse("admin_store_order_review", args=[order.pk]),
+                {"action": "reject", "confirm_external": "1", "reason": "receipt mismatch"},
+            )
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(missing_reason_response.status_code, 302)
+        self.assertEqual(ok_response.status_code, 302)
+        reject_mock.assert_called_once()
+
+    def test_approve_action_uses_existing_service_and_second_post_is_idempotent(self):
+        order = self.create_order()
+        self.login_admin()
+
+        def fake_activate(order_arg, *, user=None, notify=True):
+            Order.objects.filter(pk=order_arg.pk).update(
+                status=Order.Status.COMPLETED,
+                verification_status=Order.VerificationStatus.VERIFIED,
+                is_paid=True,
+            )
+            return SimpleNamespace(success=True, message="ok")
+
+        with patch("store.admin_views.activate_order", side_effect=fake_activate) as activate_mock:
+            for _index in range(2):
+                self.client.post(
+                    reverse("admin_store_order_review", args=[order.pk]),
+                    {"action": "approve", "confirm_external": "1"},
+                )
+
+        self.assertEqual(activate_mock.call_count, 1)
+
+    def test_delivery_failure_message_is_safe(self):
+        order = self.create_order()
+        self.login_admin()
+
+        with patch(
+            "store.admin_views.activate_order",
+            return_value=SimpleNamespace(success=False, message="failed for vless://SECRET-CONFIG-LINK"),
+        ):
+            response = self.client.post(
+                reverse("admin_store_order_review", args=[order.pk]),
+                {"action": "approve", "confirm_external": "1"},
+                follow=True,
+            )
+        body = response.content.decode()
+
+        self.assertNotIn("vless://SECRET-CONFIG-LINK", body)
+        self.assertContains(response, "مخفی")
+
+    def test_dashboard_links_to_order_workbench(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse("admin_store_order_workbench"))
+        self.assertTrue(any(reverse("admin_store_order_workbench") in link.url for link in response.context["quick_actions"] if link.url))
+
+    def test_order_admin_quick_review_link_exists(self):
+        from django.contrib import admin as django_admin
+
+        order = self.create_order()
+        order_admin = django_admin.site._registry[Order]
+
+        html = order_admin.quick_review_link(order)
+
+        self.assertIn(reverse("admin_store_order_review", args=[order.pk]), str(html))
+
+    def test_workbench_and_review_get_do_not_call_live_integrations(self):
+        order = self.create_order()
+        self.login_admin()
+
+        with (
+            patch("store.admin_views.activate_order") as activate_mock,
+            patch("store.admin_views.reject_order") as reject_mock,
+            patch("store.xui_api.login_to_panel") as login_mock,
+            patch("store.telegram_bot.notifications.notify_order_event") as notify_mock,
+        ):
+            workbench_response = self.client.get(reverse("admin_store_order_workbench"))
+            review_response = self.client.get(reverse("admin_store_order_review", args=[order.pk]))
+
+        self.assertEqual(workbench_response.status_code, 200)
+        self.assertEqual(review_response.status_code, 200)
+        activate_mock.assert_not_called()
+        reject_mock.assert_not_called()
+        login_mock.assert_not_called()
+        notify_mock.assert_not_called()
+
+
+@override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")
+class AdminServiceWorkbenchTests(TestCase):
+    def setUp(self):
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="services-admin",
+            email="services-admin@example.com",
+            password="secret",
+        )
+        self.store = Store.objects.create(
+            name="Services Store",
+            english_name="Services Store",
+            slug="services-store",
+            card_number="621986" + "1234567890",
+            card_owner="Services Owner",
+        )
+        self.plan = Plan.objects.create(
+            store=self.store,
+            name="Services 10GB",
+            slug="services-10gb",
+            volume_gb=Decimal("10.000"),
+            duration_days=30,
+            price=100000,
+            currency=Plan.Currency.TOMAN,
+            is_active=True,
+            is_public=True,
+        )
+        self.panel = Panel.objects.create(
+            store=self.store,
+            name="Services Panel",
+            url="https://panel.example.com/admin",
+            username="panel-admin",
+            password="panel-secret-password",
+            is_active=True,
+        )
+        self.inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=17,
+            remark="Services inbound",
+            server_ip="vpn.example.com",
+            port="443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        self.customer = Customer.objects.create(
+            display_name="Alice Service",
+            username="alice_service",
+            phone_number="+989121234567",
+        )
+        self.order = Order.objects.create(
+            store=self.store,
+            customer=self.customer,
+            plan=self.plan,
+            inbound=self.inbound,
+            amount=100000,
+            original_amount=100000,
+            currency=Plan.Currency.TOMAN,
+            payment_method=Order.PaymentMethod.MANUAL_CARD,
+            status=Order.Status.COMPLETED,
+            verification_status=Order.VerificationStatus.VERIFIED,
+            is_paid=True,
+        )
+
+    def login_admin(self):
+        self.client.force_login(self.admin_user)
+
+    def create_vpn_client(self, **kwargs):
+        data = {
+            "store": self.store,
+            "order": self.order,
+            "plan": self.plan,
+            "inbound": self.inbound,
+            "username": "alice-service-config",
+            "xui_email": "alice-service-config",
+            "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "sub_id": "private-sub-token",
+            "sub_link": "https://example.com/sub/SECRET-SUB-TOKEN",
+            "direct_link": "vless://aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@vpn.example.com:443#Alice",
+            "status": VPNClient.Status.ACTIVE,
+            "traffic_limit_bytes": 10 * (1024 ** 3),
+            "used_traffic_bytes": 2 * (1024 ** 3),
+            "duration_days": 30,
+            "expires_at": timezone.now() + timedelta(days=20),
+        }
+        data.update(kwargs)
+        return VPNClient.objects.create(**data)
+
+    def test_service_workbench_url_loads_for_superuser(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_service_workbench"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "میز کار سرویس‌ها")
+
+    def test_service_workbench_requires_staff_login(self):
+        response = self.client.get(reverse("admin_store_service_workbench"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        regular_user = get_user_model().objects.create_user(username="services-regular", password="secret")
+        self.client.force_login(regular_user)
+
+        response = self.client.get(reverse("admin_store_service_workbench"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_service_workbench_fresh_install_without_clients_does_not_500(self):
+        VPNClient.objects.all().delete()
+        Customer.objects.all().delete()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_service_workbench"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "موردی در این صف نیست")
+
+    def test_active_and_expiring_clients_appear_in_workbench_sections(self):
+        active_client = self.create_vpn_client(username="active-service")
+        expiring_client = self.create_vpn_client(
+            username="expiring-service",
+            uuid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            expires_at=timezone.now() + timedelta(days=2),
+        )
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_service_workbench"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["summary_counts"]["active"], 2)
+        self.assertEqual(response.context["summary_counts"]["expiring"], 1)
+        self.assertContains(response, f"#{active_client.pk}")
+        self.assertContains(response, f"#{expiring_client.pk}")
+
+    def test_client_review_page_loads_and_masks_secrets(self):
+        vpn_client = self.create_vpn_client()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_service_review", args=[vpn_client.pk]))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "خلاصه سرویس")
+        self.assertNotIn(self.customer.phone_number, body)
+        self.assertNotIn(vpn_client.uuid, body)
+        self.assertNotIn("SECRET-SUB-TOKEN", body)
+        self.assertNotIn("vless://", body)
+        self.assertIn("+989***67", body)
+
+    def test_customer_review_page_loads(self):
+        self.create_vpn_client()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_customer_review", args=[self.customer.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "بررسی مشتری")
+        self.assertContains(response, "سرویس‌های فعال")
+
+    def test_workbench_and_review_get_do_not_call_live_integrations(self):
+        vpn_client = self.create_vpn_client()
+        self.login_admin()
+
+        with (
+            patch("store.admin_views.sync_vpn_client_stats") as sync_mock,
+            patch("store.admin_views.refresh_vpn_client_link_by_admin") as refresh_mock,
+            patch("store.admin_views.set_vpn_client_enabled_by_admin") as enabled_mock,
+            patch("store.xui_api.login_to_panel") as login_mock,
+        ):
+            workbench_response = self.client.get(reverse("admin_store_service_workbench"))
+            review_response = self.client.get(reverse("admin_store_service_review", args=[vpn_client.pk]))
+
+        self.assertEqual(workbench_response.status_code, 200)
+        self.assertEqual(review_response.status_code, 200)
+        sync_mock.assert_not_called()
+        refresh_mock.assert_not_called()
+        enabled_mock.assert_not_called()
+        login_mock.assert_not_called()
+
+    def test_resend_config_requires_post_and_confirmation(self):
+        vpn_client = self.create_vpn_client()
+        self.login_admin()
+
+        with patch("store.admin_views.resend_vpn_client_config_to_telegram") as resend_mock:
+            get_response = self.client.get(reverse("admin_store_service_review", args=[vpn_client.pk]), {"action": "resend_config"})
+            post_response = self.client.post(
+                reverse("admin_store_service_review", args=[vpn_client.pk]),
+                {"action": "resend_config"},
+            )
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(post_response.status_code, 302)
+        resend_mock.assert_not_called()
+
+    def test_resend_config_without_telegram_target_returns_safe_error(self):
+        vpn_client = self.create_vpn_client()
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_service_review", args=[vpn_client.pk]),
+            {"action": "resend_config", "confirm_external": "1"},
+            follow=True,
+        )
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "مقصد تلگرام")
+        self.assertNotIn("SECRET-SUB-TOKEN", body)
+        self.assertNotIn("vless://", body)
+
+    def test_resend_config_success_uses_delivery_helper_and_does_not_leak_secret(self):
+        vpn_client = self.create_vpn_client()
+        bot_config = BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Service Telegram",
+            bot_token="123:service-secret-token",
+            admin_user_id="999",
+            is_active=True,
+        )
+        BotUser.objects.create(
+            bot_config=bot_config,
+            customer=self.customer,
+            provider_user_id="42",
+            chat_id="42",
+            is_active=True,
+        )
+        self.login_admin()
+
+        with patch("store.telegram_bot.services_flow.send_client_config_messages", return_value={"ok": True}) as send_mock:
+            response = self.client.post(
+                reverse("admin_store_service_review", args=[vpn_client.pk]),
+                {"action": "resend_config", "confirm_external": "1"},
+                follow=True,
+            )
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        send_mock.assert_called_once()
+        self.assertContains(response, "ارسال شد")
+        self.assertNotIn("SECRET-SUB-TOKEN", body)
+        self.assertNotIn("service-secret-token", body)
+
+    def test_update_usage_requires_post_and_confirmation(self):
+        vpn_client = self.create_vpn_client()
+        self.login_admin()
+
+        with patch("store.admin_views.sync_vpn_client_stats", return_value={"panel_available": True}) as sync_mock:
+            get_response = self.client.get(reverse("admin_store_service_review", args=[vpn_client.pk]), {"action": "update_usage"})
+            missing_confirm_response = self.client.post(
+                reverse("admin_store_service_review", args=[vpn_client.pk]),
+                {"action": "update_usage"},
+            )
+            ok_response = self.client.post(
+                reverse("admin_store_service_review", args=[vpn_client.pk]),
+                {"action": "update_usage", "confirm_external": "1"},
+            )
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(missing_confirm_response.status_code, 302)
+        self.assertEqual(ok_response.status_code, 302)
+        sync_mock.assert_called_once()
+
+    @patch("store.vpn_client_management_services.update_client_traffic_and_expiry")
+    def test_disable_enable_require_post_and_are_idempotent(self, update_mock):
+        vpn_client = self.create_vpn_client()
+        update_mock.return_value = {
+            "updated": True,
+            "new_total_bytes": vpn_client.traffic_limit_bytes,
+            "new_expiry_time": vpn_client.expires_at,
+            "enabled": False,
+            "raw": {"client": {"email": vpn_client.xui_email}},
+        }
+        self.login_admin()
+
+        get_response = self.client.get(reverse("admin_store_service_review", args=[vpn_client.pk]), {"action": "disable_client"})
+        first_disable = self.client.post(
+            reverse("admin_store_service_review", args=[vpn_client.pk]),
+            {"action": "disable_client", "confirm_external": "1"},
+        )
+        second_disable = self.client.post(
+            reverse("admin_store_service_review", args=[vpn_client.pk]),
+            {"action": "disable_client", "confirm_external": "1"},
+        )
+        vpn_client.refresh_from_db()
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(first_disable.status_code, 302)
+        self.assertEqual(second_disable.status_code, 302)
+        self.assertEqual(vpn_client.status, VPNClient.Status.INACTIVE)
+
+        update_mock.return_value = {
+            "updated": True,
+            "new_total_bytes": vpn_client.traffic_limit_bytes,
+            "new_expiry_time": vpn_client.expires_at,
+            "enabled": True,
+            "raw": {"client": {"email": vpn_client.xui_email}},
+        }
+        enable_response = self.client.post(
+            reverse("admin_store_service_review", args=[vpn_client.pk]),
+            {"action": "enable_client", "confirm_external": "1"},
+        )
+        vpn_client.refresh_from_db()
+
+        self.assertEqual(enable_response.status_code, 302)
+        self.assertEqual(vpn_client.status, VPNClient.Status.ACTIVE)
+        self.assertEqual(update_mock.call_count, 3)
+
+    def test_admin_quick_review_links_exist(self):
+        from django.contrib import admin as django_admin
+
+        vpn_client = self.create_vpn_client()
+        vpn_admin = django_admin.site._registry[VPNClient]
+        customer_admin = django_admin.site._registry[Customer]
+
+        self.assertIn(reverse("admin_store_service_review", args=[vpn_client.pk]), str(vpn_admin.quick_service_review_link(vpn_client)))
+        self.assertIn(reverse("admin_store_customer_review", args=[self.customer.pk]), str(customer_admin.customer_review_link(self.customer)))
+
+    def test_dashboard_links_to_service_workbench(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse("admin_store_service_workbench"))
+        self.assertTrue(any(reverse("admin_store_service_workbench") in link.url for link in response.context["quick_actions"] if link.url))
+
+    def test_order_review_links_to_service_review_when_client_exists(self):
+        vpn_client = self.create_vpn_client()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_order_review", args=[self.order.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse("admin_store_service_review", args=[vpn_client.pk]))
+
+
+@override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")
+class AdminSetupWizardTests(TestCase):
+    def setUp(self):
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="wizard-admin",
+            email="wizard-admin@example.com",
+            password="secret",
+        )
+        self.store = Store.objects.create(
+            name="Wizard Store",
+            english_name="Wizard Store",
+            slug="wizard-store",
+            card_number="0000000000000000",
+            card_owner="Configure Payment Owner",
+        )
+
+    def login_admin(self):
+        self.client.force_login(self.admin_user)
+
+    def step_url(self, step_name, store=None):
+        url = reverse(f"admin_store_setup_wizard_{step_name}")
+        store = self.store if store is None else store
+        if store:
+            return f"{url}?store={store.pk}"
+        return url
+
+    def create_panel(self, **kwargs):
+        data = {
+            "store": self.store,
+            "name": "Primary panel",
+            "url": "https://panel.example.com/admin",
+            "username": "panel-admin",
+            "password": "panel-super-secret",
+            "is_active": True,
+        }
+        data.update(kwargs)
+        return Panel.objects.create(**data)
+
+    def create_inbound(self, panel=None, **kwargs):
+        data = {
+            "panel": panel or self.create_panel(),
+            "inbound_id": 10,
+            "remark": "Main inbound",
+            "server_ip": "vpn.example.com",
+            "port": "443",
+            "config_params": "type=tcp&security=none",
+            "is_active": True,
+            "available_for_new_orders": True,
+            "health_monitor_enabled": True,
+        }
+        data.update(kwargs)
+        return Inbound.objects.create(**data)
+
+    def create_plan(self, **kwargs):
+        data = {
+            "store": self.store,
+            "name": "Starter",
+            "slug": "starter",
+            "volume_gb": Decimal("1.000"),
+            "duration_days": 30,
+            "price": 100000,
+            "currency": Plan.Currency.TOMAN,
+            "is_active": True,
+            "is_public": True,
+        }
+        data.update(kwargs)
+        return Plan.objects.create(**data)
+
+    def assert_response_has_no_secrets(self, response, secrets):
+        body = response.content.decode()
+        for secret in secrets:
+            self.assertNotIn(secret, body)
+
+    def test_wizard_index_loads_for_superuser(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_setup_wizard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "راه‌اندازی مرحله‌ای قاصدک")
+        self.assertContains(response, reverse("admin_store_setup_wizard_store"))
+
+    def test_wizard_requires_staff_login(self):
+        response = self.client.get(reverse("admin_store_setup_wizard"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        regular_user = get_user_model().objects.create_user(username="wizard-regular", password="secret")
+        self.client.force_login(regular_user)
+
+        response = self.client.get(reverse("admin_store_setup_wizard"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_fresh_minimal_wizard_pages_do_not_500(self):
+        Store.objects.all().delete()
+        self.login_admin()
+
+        urls = [
+            reverse("admin_store_setup_wizard"),
+            reverse("admin_store_setup_wizard_store"),
+            reverse("admin_store_setup_wizard_payment"),
+            reverse("admin_store_setup_wizard_telegram"),
+            reverse("admin_store_setup_wizard_telegram_proxy"),
+            reverse("admin_store_setup_wizard_panel"),
+            reverse("admin_store_setup_wizard_inbounds"),
+            reverse("admin_store_setup_wizard_plans"),
+            reverse("admin_store_setup_wizard_routes"),
+            reverse("admin_store_setup_wizard_review"),
+        ]
+        for url in urls:
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200, url)
+            self.assertNotContains(response, "Traceback")
+
+    def test_store_identity_get_and_post_updates_store(self):
+        self.login_admin()
+
+        get_response = self.client.get(self.step_url("store"))
+        post_response = self.client.post(
+            self.step_url("store"),
+            {
+                "name": "Wizard Updated",
+                "english_name": "Wizard Updated",
+                "domain": "wizard.example.com",
+            },
+        )
+
+        self.store.refresh_from_db()
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(post_response.status_code, 302)
+        self.assertIn(reverse("admin_store_setup_wizard_payment"), post_response["Location"])
+        self.assertEqual(self.store.name, "Wizard Updated")
+        self.assertEqual(self.store.domain, "wizard.example.com")
+
+    def test_payment_step_masks_card_and_token(self):
+        secret_card = "621986" + "1234567890"
+        secret_token = "123456" + ":" + "smsforwarder-secret-token"
+        self.store.card_number = secret_card
+        self.store.card_owner = "Wizard Owner"
+        self.store.set_smsforwarder_webhook_token(secret_token)
+        self.store.save()
+        self.login_admin()
+
+        response = self.client.get(self.step_url("payment"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assert_response_has_no_secrets(response, [secret_card, secret_token])
+        self.assertContains(response, "مقدار قبلی حفظ")
+
+    def test_telegram_step_masks_full_token(self):
+        secret_token = "123456" + ":" + "telegram-secret-token"
+        BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Telegram bot",
+            telegram_bot_username="wizard_bot",
+            bot_token=secret_token,
+            admin_user_id="999",
+            is_active=True,
+        )
+        self.login_admin()
+
+        response = self.client.get(self.step_url("telegram"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assert_response_has_no_secrets(response, [secret_token])
+        self.assertContains(response, "token کامل بعد از ذخیره نمایش داده نمی‌شود")
+
+    def test_telegram_blank_token_preserves_previous_value(self):
+        previous_token = "123456" + ":" + "telegram-secret-token"
+        config = BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Telegram bot",
+            telegram_bot_username="wizard_bot",
+            bot_token=previous_token,
+            admin_user_id="999",
+            is_active=True,
+        )
+        self.login_admin()
+
+        response = self.client.post(
+            self.step_url("telegram"),
+            {
+                "is_active": "on",
+                "name": "Telegram bot",
+                "telegram_bot_username": "wizard_bot",
+                "bot_token": "",
+                "admin_user_id": "1000",
+                "additional_admin_user_ids": "",
+            },
+        )
+
+        config.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("admin_store_setup_wizard_telegram_proxy"), response["Location"])
+        self.assertEqual(config.bot_token, previous_token)
+        self.assertEqual(config.admin_user_id, "1000")
+
+    def test_panel_step_masks_password_and_proxy(self):
+        secret_password = "panel-super-secret"
+        secret_proxy = "http://" + "proxy-user" + ":" + "proxy-secret" + "@proxy.example:8080"
+        self.create_panel(password=secret_password, proxy_url=secret_proxy)
+        self.login_admin()
+
+        response = self.client.get(self.step_url("panel"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assert_response_has_no_secrets(response, [secret_password, secret_proxy, "proxy-secret"])
+        self.assertContains(response, "password قبلی حفظ")
+
+    def test_panel_blank_password_preserves_previous_value(self):
+        previous_password = "panel-super-secret"
+        previous_proxy = "http://" + "proxy-user" + ":" + "proxy-secret" + "@proxy.example:8080"
+        panel = self.create_panel(password=previous_password, proxy_url=previous_proxy)
+        self.login_admin()
+
+        response = self.client.post(
+            self.step_url("panel"),
+            {
+                "name": "Primary panel",
+                "url": "https://panel.example.com/admin",
+                "username": "panel-admin",
+                "password": "",
+                "proxy_url": "",
+                "is_active": "on",
+            },
+        )
+
+        panel.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("admin_store_setup_wizard_inbounds"), response["Location"])
+        self.assertEqual(panel.password, previous_password)
+        self.assertEqual(panel.proxy_url, previous_proxy)
+
+    def test_plan_step_creates_plan(self):
+        self.login_admin()
+
+        response = self.client.post(
+            self.step_url("plans"),
+            {
+                "name": "Wizard 1GB",
+                "volume_gb": "1.000",
+                "duration_days": "30",
+                "price": "120000",
+                "currency": Plan.Currency.TOMAN,
+                "is_active": "on",
+                "is_public": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Plan.objects.filter(store=self.store, name="Wizard 1GB", price=120000).exists())
+
+    def test_route_step_creates_valid_route(self):
+        plan = self.create_plan()
+        inbound = self.create_inbound()
+        self.login_admin()
+
+        response = self.client.post(
+            self.step_url("routes"),
+            {
+                "plan": str(plan.pk),
+                "inbound": str(inbound.pk),
+                "is_active": "on",
+                "priority": "50",
+                "weight": "1",
+                "note": "Wizard route",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        route = PlanInboundRoute.objects.get(store=self.store, plan=plan)
+        self.assertEqual(route.inbound, inbound)
+        self.assertEqual(route.priority, 50)
+
+    def test_review_warns_when_active_plan_has_no_route(self):
+        self.create_plan()
+        self.login_admin()
+
+        response = self.client.get(self.step_url("review"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "route معتبر ندارد")
+        self.assertContains(response, "Revenue Engine")
+
+    def test_skip_marks_step_as_skipped(self):
+        self.login_admin()
+
+        response = self.client.post(self.step_url("telegram_proxy"), {"_skip": "1"})
+        index_response = self.client.get(reverse("admin_store_setup_wizard"), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("admin_store_setup_wizard_panel"), response["Location"])
+        self.assertContains(index_response, "بعداً انجام می‌دهم")
+
+    def test_wizard_does_not_call_live_integrations(self):
+        self.login_admin()
+
+        with patch("store.telegram_bot.client.BotClient.get_me") as get_me_mock, patch(
+            "store.xui_api.login_to_panel"
+        ) as login_mock:
+            responses = [
+                self.client.get(reverse("admin_store_setup_wizard")),
+                self.client.get(self.step_url("telegram")),
+                self.client.get(self.step_url("panel")),
+                self.client.get(self.step_url("review")),
+            ]
+
+        for response in responses:
+            self.assertEqual(response.status_code, 200)
+        get_me_mock.assert_not_called()
+        login_mock.assert_not_called()
+
+    def test_setup_center_links_to_wizard_steps(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_setup_center"), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "شروع راه‌اندازی مرحله‌ای")
+        self.assertContains(response, reverse("admin_store_setup_wizard"))
+        self.assertContains(response, reverse("admin_store_setup_wizard_payment"))
+
+    def test_dashboard_action_items_link_to_wizard_steps(self):
+        BotConfiguration.objects.all().delete()
+        Panel.objects.all().delete()
+        self.create_plan()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_owner_dashboard"), {"store": self.store.pk})
+        action_urls = [item.url for item in response.context["action_items"] if item.url]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(any(reverse("admin_store_setup_wizard_routes") in url for url in action_urls))
+        self.assertTrue(any(reverse("admin_store_setup_wizard_panel") in url for url in action_urls))
+        self.assertTrue(any(reverse("admin_store_setup_wizard_telegram") in url for url in action_urls))
+
+    def test_secrets_are_absent_from_wizard_responses(self):
+        secret_card = "621986" + "1234567890"
+        secret_token = "123456" + ":" + "telegram-secret-token"
+        secret_password = "panel-super-secret"
+        secret_proxy = "http://" + "proxy-user" + ":" + "proxy-secret" + "@proxy.example:8080"
+        self.store.card_number = secret_card
+        self.store.card_owner = "Wizard Owner"
+        self.store.set_smsforwarder_webhook_token(secret_token)
+        self.store.save()
+        BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Telegram bot",
+            telegram_bot_username="wizard_bot",
+            bot_token=secret_token,
+            admin_user_id="999",
+            is_active=True,
+        )
+        self.create_panel(password=secret_password, proxy_url=secret_proxy)
+        self.login_admin()
+
+        urls = [
+            reverse("admin_store_setup_wizard"),
+            self.step_url("payment"),
+            self.step_url("telegram"),
+            self.step_url("panel"),
+            self.step_url("review"),
+            reverse("admin_store_setup_center"),
+            reverse("admin_store_owner_dashboard"),
+        ]
+        for url in urls:
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200, url)
+            self.assert_response_has_no_secrets(
+                response,
+                [secret_card, secret_token, secret_password, secret_proxy, "proxy-secret"],
+            )
+
+
 class AdminNotificationTests(TestCase):
     def setUp(self):
         self.media_tmp = tempfile.TemporaryDirectory()
