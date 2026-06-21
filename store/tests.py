@@ -4192,6 +4192,289 @@ class PlanInboundRouteTests(TestCase):
         self.assertEqual(model_admin.active_plan_route_count(inbound), 1)
 
 
+class AdminCatalogTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="catalog-admin",
+            email="catalog-admin@example.com",
+            password="secret",
+        )
+        self.store = Store.objects.create(
+            name="Catalog Store",
+            english_name="Catalog Store",
+            slug="catalog-store",
+            card_number="0000000000000000",
+            card_owner="Catalog Owner",
+        )
+        self.plan = Plan.objects.create(
+            store=self.store,
+            name="Catalog 10GB",
+            slug="catalog-10gb",
+            volume_gb=Decimal("10.000"),
+            duration_days=30,
+            price=250000,
+            currency=Plan.Currency.TOMAN,
+            is_active=True,
+            is_public=True,
+        )
+        self.panel = Panel.objects.create(
+            store=self.store,
+            name="Catalog Panel",
+            url="https://catalog-panel.example.com/admin",
+            username="panel-admin",
+            password="panel-secret-password",
+            proxy_url="http://" + "proxy-user" + ":" + "proxy-secret" + "@proxy.example:8080",
+            is_active=True,
+        )
+        self.ready_inbound = self.create_inbound(1, remark="ready inbound")
+
+    def login_admin(self):
+        self.client.force_login(self.admin_user)
+
+    def create_inbound(self, inbound_id, **kwargs):
+        data = {
+            "panel": self.panel,
+            "inbound_id": inbound_id,
+            "remark": f"inbound {inbound_id}",
+            "server_ip": "vpn.example.com",
+            "port": "443",
+            "config_params": "type=tcp&security=none",
+            "is_active": True,
+            "available_for_new_orders": True,
+            "health_monitor_enabled": True,
+        }
+        data.update(kwargs)
+        return Inbound.objects.create(**data)
+
+    def create_route(self, plan=None, inbound=None, **kwargs):
+        data = {
+            "store": self.store,
+            "plan": plan or self.plan,
+            "inbound": inbound or self.ready_inbound,
+            "priority": 100,
+            "is_active": True,
+        }
+        data.update(kwargs)
+        return PlanInboundRoute.objects.create(**data)
+
+    def test_catalog_center_loads_for_superuser(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_catalog"), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "مدیریت محصولات و مسیر فروش")
+        self.assertContains(response, self.plan.name)
+
+    def test_catalog_center_requires_staff_login(self):
+        response = self.client.get(reverse("admin_store_catalog"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        regular_user = get_user_model().objects.create_user(username="catalog-regular", password="secret")
+        self.client.force_login(regular_user)
+        response = self.client.get(reverse("admin_store_catalog"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_catalog_minimal_install_without_plan_or_inbound_does_not_500(self):
+        Plan.objects.all().delete()
+        Inbound.objects.all().delete()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_catalog"), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Inbound آماده فروش وجود ندارد")
+
+    def test_route_status_ready_for_valid_route(self):
+        from .admin_catalog import get_plan_route_status
+
+        self.create_route()
+
+        status = get_plan_route_status(self.plan, self.store)
+
+        self.assertEqual(status["code"], "ready")
+
+    def test_route_status_missing_for_active_plan_without_route_when_fallback_disabled(self):
+        from .admin_catalog import get_plan_route_status
+
+        self.store.allow_global_inbound_fallback = False
+        self.store.save(update_fields=["allow_global_inbound_fallback", "updated_at"])
+
+        status = get_plan_route_status(self.plan, self.store)
+
+        self.assertEqual(status["code"], "missing")
+
+    def test_route_status_invalid_for_legacy_and_inactive_inbound(self):
+        from .admin_catalog import get_plan_route_status
+
+        route = self.create_route()
+        self.ready_inbound.available_for_new_orders = False
+        self.ready_inbound.legacy_note = "Legacy inbound kept for old clients."
+        self.ready_inbound.save(update_fields=["available_for_new_orders", "legacy_note", "updated_at"])
+
+        legacy_status = get_plan_route_status(self.plan, self.store)
+        self.assertEqual(legacy_status["code"], "legacy_inbound")
+
+        self.ready_inbound.legacy_note = ""
+        self.ready_inbound.available_for_new_orders = True
+        self.ready_inbound.is_active = False
+        self.ready_inbound.save(update_fields=["legacy_note", "available_for_new_orders", "is_active", "updated_at"])
+        route.refresh_from_db()
+
+        inactive_status = get_plan_route_status(self.plan, self.store)
+        self.assertEqual(inactive_status["code"], "inbound_inactive")
+
+    def test_plan_create_form_only_offers_sales_ready_inbounds(self):
+        legacy = self.create_inbound(2, remark="legacy dropdown")
+        legacy.available_for_new_orders = False
+        legacy.legacy_note = "Legacy"
+        legacy.save(update_fields=["available_for_new_orders", "legacy_note", "updated_at"])
+        inactive = self.create_inbound(3, remark="inactive dropdown")
+        inactive.is_active = False
+        inactive.save(update_fields=["is_active", "updated_at"])
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_catalog_plan_new"), {"store": self.store.pk})
+        choices = list(response.context["form"].fields["inbound"].queryset)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self.ready_inbound, choices)
+        self.assertNotIn(legacy, choices)
+        self.assertNotIn(inactive, choices)
+
+    def test_activate_plan_without_route_when_fallback_disabled_is_blocked(self):
+        self.store.allow_global_inbound_fallback = False
+        self.store.save(update_fields=["allow_global_inbound_fallback", "updated_at"])
+        self.plan.is_active = False
+        self.plan.save(update_fields=["is_active", "updated_at"])
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_catalog_plan_review", args=[self.plan.pk]),
+            {"action": "activate", "confirm_action": "1"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.plan.refresh_from_db()
+        self.assertFalse(self.plan.is_active)
+
+    def test_duplicate_plan_is_inactive_and_has_no_active_routes(self):
+        self.create_route()
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_catalog_plan_review", args=[self.plan.pk]),
+            {"action": "duplicate", "confirm_action": "1"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        copied = Plan.objects.exclude(pk=self.plan.pk).get(name__startswith="کپی ")
+        self.assertFalse(copied.is_active)
+        self.assertFalse(PlanInboundRoute.objects.filter(plan=copied, is_active=True).exists())
+
+    def test_deactivate_plan_is_idempotent(self):
+        self.login_admin()
+        url = reverse("admin_store_catalog_plan_review", args=[self.plan.pk])
+
+        self.client.post(url, {"action": "deactivate", "confirm_action": "1"})
+        self.client.post(url, {"action": "deactivate", "confirm_action": "1"})
+
+        self.plan.refresh_from_db()
+        self.assertFalse(self.plan.is_active)
+
+    def test_bulk_assign_existing_service_still_creates_route(self):
+        from .plan_route_services import BULK_ROUTE_STRATEGY_UPDATE_EXISTING, apply_bulk_plan_routes
+
+        result = apply_bulk_plan_routes(
+            store=self.store,
+            inbound=self.ready_inbound,
+            selected_plan_ids=[self.plan.pk],
+            all_active=False,
+            priority=100,
+            weight=1,
+            existing_strategy=BULK_ROUTE_STRATEGY_UPDATE_EXISTING,
+        )
+
+        self.assertEqual(result["created"], 1)
+        self.assertTrue(PlanInboundRoute.objects.filter(plan=self.plan, inbound=self.ready_inbound).exists())
+
+    def test_catalog_get_pages_do_not_call_live_xui(self):
+        self.login_admin()
+
+        with patch("store.xui_api.login_to_panel") as login_mock, patch("store.xui_api.sync_inbound_data") as sync_mock:
+            catalog_response = self.client.get(reverse("admin_store_catalog"), {"store": self.store.pk})
+            review_response = self.client.get(reverse("admin_store_catalog_plan_review", args=[self.plan.pk]))
+
+        self.assertEqual(catalog_response.status_code, 200)
+        self.assertEqual(review_response.status_code, 200)
+        login_mock.assert_not_called()
+        sync_mock.assert_not_called()
+
+    def test_catalog_does_not_leak_panel_or_config_secrets(self):
+        secret_uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        self.ready_inbound.config_params = f"type=tcp&link=vless://{secret_uuid}@vpn.example.com"
+        self.ready_inbound.remark = f"safe {secret_uuid}"
+        self.ready_inbound.save(update_fields=["config_params", "remark", "updated_at"])
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_catalog"), {"store": self.store.pk})
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("panel-secret-password", body)
+        self.assertNotIn("proxy-secret", body)
+        self.assertNotIn("vless://", body)
+        self.assertNotIn(secret_uuid, body)
+
+    def test_dashboard_and_setup_center_link_to_catalog(self):
+        self.login_admin()
+
+        dashboard_response = self.client.get(reverse("admin_store_owner_dashboard"), {"store": self.store.pk})
+        setup_response = self.client.get(reverse("admin_store_setup_center"), {"store": self.store.pk})
+        catalog_path = reverse("admin_store_catalog")
+
+        self.assertContains(dashboard_response, catalog_path)
+        self.assertContains(setup_response, catalog_path)
+
+    def test_plan_admin_changelist_has_quick_review_link(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin:store_plan_changelist"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse("admin_store_catalog_plan_review", args=[self.plan.pk]))
+
+    def test_custom_volume_plan_route_coverage_is_audited(self):
+        from .admin_catalog import get_catalog_context
+
+        self.store.allow_global_inbound_fallback = False
+        self.store.save(update_fields=["allow_global_inbound_fallback", "updated_at"])
+        custom_plan = Plan.objects.create(
+            store=self.store,
+            name="حجم دلخواه 7GB",
+            slug="custom-7gb",
+            volume_gb=Decimal("7.000"),
+            duration_days=30,
+            price=700000,
+            currency=Plan.Currency.TOMAN,
+            is_active=True,
+            is_public=False,
+            is_custom_volume=True,
+        )
+
+        context = get_catalog_context(self.store)
+        custom_item = next(item for item in context["plan_items"] if item["plan"].pk == custom_plan.pk)
+
+        self.assertEqual(custom_item["route_status"]["code"], "missing")
+        self.assertGreaterEqual(context["summary"]["missing_route_count"], 1)
+
+
 class FreeTrialServiceTests(TestCase):
     def setUp(self):
         cache.clear()

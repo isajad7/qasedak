@@ -5,6 +5,7 @@ import re
 
 import jdatetime
 from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
 from django.db.models import Count, Max, Q
 from django.shortcuts import get_object_or_404
 from django.shortcuts import redirect
@@ -16,6 +17,23 @@ from django.utils.http import urlencode
 from payments.models import IncomingPaymentSMS
 
 from .admin_dashboard import get_owner_dashboard_context
+from .admin_catalog import (
+    CatalogPlanForm,
+    catalog_plan_edit_url,
+    catalog_plan_review_url,
+    catalog_url,
+    deactivate_route_for_admin,
+    duplicate_plan_for_admin,
+    get_catalog_context,
+    get_plan_route_status,
+    get_route_overview_items,
+    money_label,
+    plan_duration_label,
+    plan_volume_label,
+    selected_store_from_id as selected_catalog_store_from_id,
+    set_plan_active_state,
+    validate_plan_sales_readiness,
+)
 from .admin_revenue import (
     REAL_SEND_CONFIRMATION,
     apply_revenue_safe_defaults,
@@ -57,6 +75,7 @@ from .models import (
     Customer,
     Order,
     Plan,
+    PlanInboundRoute,
     Store,
     SupportConversation,
     VPNClient,
@@ -713,6 +732,7 @@ def order_row(order):
         "phone_masked": mask_phone(phone),
         "telegram_status": "متصل" if bot_users else "بدون مقصد تلگرام",
         "plan": order.plan.name if order.plan_id else "-",
+        "plan_review_url": catalog_plan_review_url(order.plan) if order.plan_id else "",
         "operator": order.operator.name if order.operator_id else "",
         "amount": money_label(order.amount, order.currency),
         "status_label": order_status_label(order.status),
@@ -1587,6 +1607,139 @@ def order_review(request, order_id):
     return TemplateResponse(request, "admin/store/orders/review.html", context)
 
 
+def handle_catalog_post_action(request, *, selected_store=None, plan=None):
+    action = request.POST.get("action", "")
+    route_id = request.POST.get("route_id")
+    target_plan = plan
+    if not target_plan and request.POST.get("plan_id"):
+        target_plan = get_object_or_404(Plan.objects.select_related("store"), pk=request.POST.get("plan_id"))
+
+    if action not in {"activate", "deactivate", "duplicate", "deactivate_route"}:
+        messages.error(request, "Action معتبر نیست.")
+        return None
+    if request.POST.get("confirm_action") != "1":
+        messages.error(request, "برای انجام این عملیات باید تایید صریح ثبت شود.")
+        return None
+
+    if action == "deactivate_route":
+        route = get_object_or_404(PlanInboundRoute.objects.select_related("plan", "inbound", "inbound__panel"), pk=route_id)
+        changed = deactivate_route_for_admin(route)
+        if changed:
+            messages.success(request, "Route انتخاب‌شده غیرفعال شد.")
+        else:
+            messages.success(request, "Route قبلاً غیرفعال بود.")
+        return route.plan
+
+    if not target_plan:
+        messages.error(request, "پلن انتخاب نشده است.")
+        return None
+
+    if action == "activate":
+        try:
+            changed = set_plan_active_state(target_plan, True, actor=request.user)
+        except ValidationError as exc:
+            messages.error(request, "; ".join(exc.messages))
+        else:
+            messages.success(request, "پلن فعال شد." if changed else "پلن از قبل فعال بود.")
+        return target_plan
+
+    if action == "deactivate":
+        changed = set_plan_active_state(target_plan, False, actor=request.user)
+        messages.success(request, "پلن غیرفعال شد." if changed else "پلن از قبل غیرفعال بود.")
+        return target_plan
+
+    copied = duplicate_plan_for_admin(target_plan, actor=request.user)
+    messages.success(request, "کپی پلن به‌صورت غیرفعال و بدون route فعال ساخته شد.")
+    return copied
+
+
+def product_catalog(request):
+    stores, selected_store = selected_catalog_store_from_id(request.GET.get("store"))
+    if request.method == "POST":
+        target = handle_catalog_post_action(request, selected_store=selected_store)
+        if target and request.POST.get("action") == "duplicate":
+            return redirect(catalog_plan_review_url(target))
+        return redirect(catalog_url(selected_store))
+
+    context = {
+        **admin.site.each_context(request),
+        **get_catalog_context(selected_store),
+        "stores": stores,
+        "selected_store": selected_store,
+        "title": "مدیریت محصولات و مسیر فروش",
+        "subtitle": "کاتالوگ پلن‌ها، routeهای فروش و آمادگی inboundها بدون اجرای live call.",
+    }
+    return TemplateResponse(request, "admin/store/catalog/index.html", context)
+
+
+def catalog_plan_form(request, plan_id=None):
+    plan = None
+    if plan_id:
+        plan = get_object_or_404(Plan.objects.select_related("store").prefetch_related("operators"), pk=plan_id)
+        selected_store = plan.store
+    else:
+        _stores, selected_store = selected_catalog_store_from_id(request.GET.get("store"))
+
+    form = CatalogPlanForm(request.POST or None, store=selected_store, plan=plan)
+    if request.method == "POST":
+        if form.is_valid():
+            saved_plan = form.save()
+            messages.success(request, "پلن و تنظیمات مسیر فروش ذخیره شد.")
+            return redirect(catalog_plan_review_url(saved_plan))
+        messages.error(request, "لطفاً خطاهای فرم پلن را بررسی کن.")
+
+    context = {
+        **admin.site.each_context(request),
+        "title": "ویرایش پلن" if plan else "ساخت پلن جدید",
+        "subtitle": "فرم کوتاه owner-facing برای قیمت، حجم، مدت و route فروش.",
+        "form": form,
+        "plan": plan,
+        "selected_store": selected_store,
+        "catalog_url": catalog_url(selected_store),
+        "review_url": catalog_plan_review_url(plan) if plan else "",
+    }
+    return TemplateResponse(request, "admin/store/catalog/plan_form.html", context)
+
+
+def catalog_plan_review(request, plan_id):
+    plan = get_object_or_404(Plan.objects.select_related("store").prefetch_related("operators"), pk=plan_id)
+    selected_store = plan.store
+    if request.method == "POST":
+        target = handle_catalog_post_action(request, selected_store=selected_store, plan=plan)
+        if target:
+            return redirect(catalog_plan_review_url(target))
+        return redirect(catalog_plan_review_url(plan))
+
+    route_status = get_plan_route_status(plan, selected_store)
+    readiness = validate_plan_sales_readiness(plan, selected_store)
+    route_items = [item for item in get_route_overview_items(selected_store) if item["route"].plan_id == plan.pk]
+    recent_orders = Order.objects.filter(plan=plan).order_by("-created_at", "-pk")
+    vpn_clients = VPNClient.objects.filter(plan=plan)
+    context = {
+        **admin.site.each_context(request),
+        "title": f"بررسی پلن {plan.name}",
+        "subtitle": "نمای owner-facing پلن، routeها و آمادگی فروش.",
+        "plan": plan,
+        "selected_store": selected_store,
+        "route_status": route_status,
+        "readiness": readiness,
+        "route_items": route_items,
+        "recent_order_count": recent_orders.count(),
+        "recent_order_url": f"{reverse('admin:store_order_changelist')}?{urlencode({'plan__id__exact': plan.pk})}",
+        "vpn_client_count": vpn_clients.count(),
+        "vpn_client_url": f"{reverse('admin:store_vpnclient_changelist')}?{urlencode({'plan__id__exact': plan.pk})}",
+        "volume_label": plan_volume_label(plan),
+        "duration_label": plan_duration_label(plan),
+        "price_label": money_label(plan.price, plan.currency),
+        "bot_preview": f"{plan.name} - {plan_volume_label(plan)} - {plan_duration_label(plan)} - {money_label(plan.price, plan.currency)}",
+        "edit_url": catalog_plan_edit_url(plan),
+        "catalog_url": catalog_url(selected_store),
+        "bulk_assign_url": f"{reverse('admin:store_planinboundroute_bulk_assign')}?{urlencode({'store': getattr(selected_store, 'pk', ''), 'plan_ids': plan.pk, 'plan_selection_mode': 'manual'})}",
+        "admin_change_url": reverse("admin:store_plan_change", args=[plan.pk]),
+    }
+    return TemplateResponse(request, "admin/store/catalog/plan_review.html", context)
+
+
 def setup_center(request):
     setup_context = build_setup_center_context(request.GET.get("store"))
     context = {
@@ -1705,6 +1858,10 @@ def setup_wizard_step(request, step_slug):
                 selected_store = saved_object
             clear_step_skipped(request, step_slug)
             messages.success(request, "مرحله با موفقیت ذخیره شد.")
+            if step_slug == "plans" and isinstance(saved_object, Plan):
+                return redirect(catalog_plan_review_url(saved_object))
+            if step_slug == "routes":
+                return redirect(catalog_url(selected_store))
             next_slug = next_step_slug(step_slug)
             return redirect(wizard_step_url(next_slug, selected_store) if next_slug else "admin_store_owner_dashboard")
         messages.error(request, "لطفاً خطاهای فرم را بررسی کن.")

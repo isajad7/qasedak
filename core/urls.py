@@ -10,6 +10,9 @@ from store.admin_views import (
     order_review,
     order_workbench,
     owner_dashboard,
+    product_catalog,
+    catalog_plan_form,
+    catalog_plan_review,
     revenue_control_center,
     service_review,
     service_workbench,
@@ -35,6 +38,26 @@ urlpatterns = [
         'admin/store/dashboard/',
         admin.site.admin_view(owner_dashboard),
         name='admin_store_owner_dashboard',
+    ),
+    path(
+        'admin/store/catalog/',
+        admin.site.admin_view(product_catalog),
+        name='admin_store_catalog',
+    ),
+    path(
+        'admin/store/catalog/plans/new/',
+        admin.site.admin_view(catalog_plan_form),
+        name='admin_store_catalog_plan_new',
+    ),
+    path(
+        'admin/store/catalog/plans/<int:plan_id>/',
+        admin.site.admin_view(catalog_plan_review),
+        name='admin_store_catalog_plan_review',
+    ),
+    path(
+        'admin/store/catalog/plans/<int:plan_id>/edit/',
+        admin.site.admin_view(catalog_plan_form),
+        name='admin_store_catalog_plan_edit',
     ),
     path(
         'admin/store/revenue/control/',

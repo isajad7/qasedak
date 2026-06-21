@@ -30,6 +30,16 @@ from import_export.widgets import ForeignKeyWidget
 
 from payments.models import IncomingPaymentSMS
 
+from .admin_catalog import (
+    ROUTE_STATUS_FALLBACK,
+    ROUTE_STATUS_MISSING,
+    catalog_plan_review_url,
+    catalog_url,
+    get_inbound_sales_readiness,
+    get_plan_route_status,
+    set_plan_active_state,
+    duplicate_plan_for_admin,
+)
 from .models import (
     BotConfiguration,
     BotAdminOrderMessage,
@@ -1449,12 +1459,13 @@ class BulkPlanInboundRouteForm(forms.Form):
     existing_strategy = forms.ChoiceField(
         label=_("Existing routes"),
         choices=(
-            (BULK_ROUTE_STRATEGY_UPDATE_EXISTING, _("Update existing, create missing")),
-            (BULK_ROUTE_STRATEGY_SKIP_EXISTING, _("Skip plans with an active route")),
-            (BULK_ROUTE_STRATEGY_ADD_NEW, _("Add a new route and keep existing active routes")),
-            (BULK_ROUTE_STRATEGY_REPLACE_ACTIVE, _("Deactivate active routes and create/reuse one route")),
+            (BULK_ROUTE_STRATEGY_UPDATE_EXISTING, _("Route موجود آپدیت شود، برای پلن بدون route ساخته شود")),
+            (BULK_ROUTE_STRATEGY_SKIP_EXISTING, _("پلن‌هایی که route فعال دارند دست‌نخورده بمانند")),
+            (BULK_ROUTE_STRATEGY_ADD_NEW, _("Route جدید اضافه شود و routeهای فعال قبلی بمانند")),
+            (BULK_ROUTE_STRATEGY_REPLACE_ACTIVE, _("Routeهای فعال قبلی غیرفعال شوند و یک route مقصد فعال بماند")),
         ),
         initial=BULK_ROUTE_STRATEGY_UPDATE_EXISTING,
+        help_text=_("update_existing، skip_existing، add_new و replace_active همان رفتار قبلی سرویس bulk route هستند."),
     )
     note = forms.CharField(
         label=_("Note"),
@@ -1555,6 +1566,36 @@ class PlanInboundRouteInline(admin.TabularInline):
         return format_html('<span class="badge bg-success">{}</span>', _("Ready"))
 
 
+class PlanRouteReadinessFilter(admin.SimpleListFilter):
+    title = _("Route readiness")
+    parameter_name = "catalog_route"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("ready", _("Ready")),
+            ("missing", _("Missing explicit route")),
+            ("invalid", _("Invalid route")),
+            ("fallback", _("Using fallback")),
+        )
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if not value:
+            return queryset
+        matching_ids = []
+        for plan in queryset.select_related("store").prefetch_related("operators"):
+            status = get_plan_route_status(plan, plan.store)
+            if value == "ready" and status["is_ready"] and status["code"] != ROUTE_STATUS_FALLBACK:
+                matching_ids.append(plan.pk)
+            elif value == "missing" and status["code"] == ROUTE_STATUS_MISSING:
+                matching_ids.append(plan.pk)
+            elif value == "invalid" and status["is_invalid"]:
+                matching_ids.append(plan.pk)
+            elif value == "fallback" and status["code"] == ROUTE_STATUS_FALLBACK:
+                matching_ids.append(plan.pk)
+        return queryset.filter(pk__in=matching_ids)
+
+
 @admin.register(Plan)
 class PlanAdmin(ImportExportModelAdmin):
     import_export_change_list_template = "admin/store/plan/change_list.html"
@@ -1564,24 +1605,36 @@ class PlanAdmin(ImportExportModelAdmin):
         "store",
         "volume_gb",
         "duration_days",
-        "price",
-        "currency",
+        "price_with_currency",
+        "active_public_status",
+        "custom_volume_badge",
+        "catalog_route_status",
+        "catalog_inbound_destination",
+        "quick_review_link",
+    )
+    list_filter = (
+        "store",
         "is_active",
         "is_public",
-        "active_route_count",
-        "routes_link",
-        "operator_names",
         "is_custom_volume",
-        "sort_order",
+        "duration_days",
+        "volume_gb",
+        PlanRouteReadinessFilter,
+        ("operators", admin.RelatedOnlyFieldListFilter),
+        "currency",
     )
-    list_filter = ("store", ("operators", admin.RelatedOnlyFieldListFilter), "is_active", "is_public", "is_custom_volume", "currency")
     search_fields = ("name", "description", "operators__name", "operators__slug")
     date_hierarchy = "created_at"
     list_select_related = ("store",)
     prepopulated_fields = {"slug": ("name",)}
-    list_editable = ("is_active", "is_public", "sort_order")
+    list_editable = ()
     filter_horizontal = ("operators",)
-    actions = ["bulk_assign_inbound_routes"]
+    actions = [
+        "bulk_assign_inbound_routes",
+        "activate_selected_plans",
+        "deactivate_selected_plans",
+        "duplicate_selected_plans",
+    ]
 
     @admin.display(description=_("Operators"))
     def operator_names(self, obj):
@@ -1603,6 +1656,48 @@ class PlanAdmin(ImportExportModelAdmin):
     def routes_link(self, obj):
         url = f"{reverse('admin:store_planinboundroute_changelist')}?{urlencode({'plan__id__exact': obj.pk})}"
         return format_html('<a class="button" href="{}">{}</a>', url, _("View routes"))
+
+    @admin.display(description=_("Price"), ordering="price")
+    def price_with_currency(self, obj):
+        return f"{obj.price:,} {obj.currency}"
+
+    @admin.display(description=_("Active / public"))
+    def active_public_status(self, obj):
+        active = format_html(
+            '<span class="badge {}">{}</span>',
+            "bg-success" if obj.is_active else "bg-secondary",
+            _("Active") if obj.is_active else _("Inactive"),
+        )
+        public = format_html(
+            '<span class="badge {}">{}</span>',
+            "bg-success" if obj.is_public else "bg-secondary",
+            _("Public") if obj.is_public else _("Private"),
+        )
+        return format_html("{} {}", active, public)
+
+    @admin.display(description=_("Custom volume"), boolean=True, ordering="is_custom_volume")
+    def custom_volume_badge(self, obj):
+        return obj.is_custom_volume
+
+    @admin.display(description=_("Route status"))
+    def catalog_route_status(self, obj):
+        status = get_plan_route_status(obj, obj.store)
+        css = {
+            "success": "bg-success",
+            "warning": "bg-warning text-dark",
+            "danger": "bg-danger",
+            "info": "bg-info",
+        }.get(status["tone"], "bg-secondary")
+        return format_html('<span class="badge {}">{}</span>', css, status["label"])
+
+    @admin.display(description=_("Inbound"))
+    def catalog_inbound_destination(self, obj):
+        status = get_plan_route_status(obj, obj.store)
+        return status["destination"] or "-"
+
+    @admin.display(description=_("Review"))
+    def quick_review_link(self, obj):
+        return format_html('<a class="button" href="{}">{}</a>', catalog_plan_review_url(obj), _("Review"))
 
     def get_queryset(self, request):
         return (
@@ -1642,6 +1737,7 @@ class PlanAdmin(ImportExportModelAdmin):
             **(extra_context or {}),
             "bulk_price_per_gb_form": bulk_price_form,
             "bulk_route_assign_url": reverse("admin:store_planinboundroute_bulk_assign"),
+            "catalog_url": catalog_url(),
         }
         return super().changelist_view(request, context)
 
@@ -1677,12 +1773,42 @@ class PlanAdmin(ImportExportModelAdmin):
         )
         return HttpResponseRedirect(f"{reverse('admin:store_planinboundroute_bulk_assign')}?{params}")
 
+    @admin.action(description=_("Activate selected plans when sales route is ready"))
+    def activate_selected_plans(self, request, queryset):
+        activated = 0
+        blocked = 0
+        for plan in queryset.select_related("store"):
+            try:
+                if set_plan_active_state(plan, True, actor=request.user):
+                    activated += 1
+            except ValidationError as exc:
+                blocked += 1
+                messages.error(request, _("%(plan)s فعال نشد: %(error)s") % {"plan": plan.name, "error": "; ".join(exc.messages)})
+        if activated:
+            messages.success(request, _("%(count)s plan(s) activated.") % {"count": activated})
+        if blocked:
+            messages.warning(request, _("%(count)s plan(s) blocked by route readiness.") % {"count": blocked})
+
+    @admin.action(description=_("Deactivate selected plans"))
+    def deactivate_selected_plans(self, request, queryset):
+        updated = queryset.filter(is_active=True).update(is_active=False, updated_at=timezone.now())
+        messages.success(request, _("%(count)s plan(s) deactivated.") % {"count": updated})
+
+    @admin.action(description=_("Duplicate selected plans as inactive without active routes"))
+    def duplicate_selected_plans(self, request, queryset):
+        created = 0
+        for plan in queryset:
+            duplicate_plan_for_admin(plan, actor=request.user)
+            created += 1
+        messages.success(request, _("%(count)s inactive plan duplicate(s) created without active routes.") % {"count": created})
+
 
 @admin.register(PlanInboundRoute)
 class PlanInboundRouteAdmin(ImportExportModelAdmin):
     import_export_change_list_template = "admin/store/planinboundroute/change_list.html"
     list_display = (
         "plan",
+        "plan_review_link",
         "store",
         "operator",
         "inbound",
@@ -1734,6 +1860,7 @@ class PlanInboundRouteAdmin(ImportExportModelAdmin):
         context = {
             **(extra_context or {}),
             "bulk_route_assign_url": reverse("admin:store_planinboundroute_bulk_assign"),
+            "catalog_url": catalog_url(),
         }
         return super().changelist_view(request, context)
 
@@ -1849,6 +1976,12 @@ class PlanInboundRouteAdmin(ImportExportModelAdmin):
     @admin.display(description=_("Panel"), ordering="inbound__panel__name")
     def panel(self, obj):
         return obj.inbound.panel if obj.inbound_id else "-"
+
+    @admin.display(description=_("Plan review"))
+    def plan_review_link(self, obj):
+        if not obj.plan_id:
+            return "-"
+        return format_html('<a class="button" href="{}">{}</a>', catalog_plan_review_url(obj.plan), _("Review"))
 
     @admin.display(description=_("Available for new orders"), boolean=True, ordering="inbound__available_for_new_orders")
     def inbound_available_for_new_orders(self, obj):
@@ -2990,35 +3123,56 @@ class OrderAdmin(ImportExportModelAdmin):
             messages.success(request, _("%(count)s order(s) verified and activated.") % {"count": success_count})
 
 
+class InboundAdminForm(forms.ModelForm):
+    config_params = forms.CharField(
+        label=_("configuration parameters"),
+        required=False,
+        widget=forms.PasswordInput(render_value=False),
+        help_text=_("مقدار کامل config نمایش داده نمی‌شود. برای تغییر، مقدار جدید را وارد کن."),
+    )
+
+    class Meta:
+        model = Inbound
+        fields = "__all__"
+
+    def clean(self):
+        cleaned_data = super().clean()
+        config_params = (cleaned_data.get("config_params") or "").strip()
+        if config_params:
+            cleaned_data["config_params"] = config_params
+        elif self.instance and self.instance.pk:
+            cleaned_data["config_params"] = self.instance.config_params
+        else:
+            self.add_error("config_params", _("Configuration parameters برای inbound جدید لازم است."))
+        return cleaned_data
+
+
 @admin.register(Inbound)
 class InboundAdmin(ImportExportModelAdmin):
     legacy_default_note = "Legacy inbound kept for old orders/clients; not present in current X-UI."
+    form = InboundAdminForm
 
     list_display = (
-        "panel",
+        "display_name",
+        "panel_status",
         "xui_inbound_id",
-        "remark",
         "protocol",
-        "network_type",
-        "security",
-        "current_users",
-        "max_clients",
         "is_active",
         "available_for_new_orders",
         "health_monitor_enabled",
-        "legacy_status",
         "active_plan_route_count",
-        "active_route_warning",
+        "sales_readiness",
+        "catalog_link",
     )
     list_filter = (
-        "panel",
-        "panel__store",
-        "protocol",
-        "network_type",
-        "security",
         "is_active",
         "available_for_new_orders",
         "health_monitor_enabled",
+        "panel",
+        "protocol",
+        "panel__store",
+        "network_type",
+        "security",
     )
     search_fields = (
         "remark",
@@ -3034,6 +3188,74 @@ class InboundAdmin(ImportExportModelAdmin):
     date_hierarchy = "created_at"
     list_select_related = ("panel", "panel__store")
     autocomplete_fields = ("panel",)
+    readonly_fields = (
+        "sales_readiness",
+        "active_plan_route_count",
+        "active_route_warning",
+        "created_at",
+        "updated_at",
+    )
+    fieldsets = (
+        (
+            _("Summary"),
+            {
+                "fields": (
+                    "panel",
+                    "inbound_id",
+                    "remark",
+                    "protocol",
+                    "sales_readiness",
+                    "active_plan_route_count",
+                    "is_active",
+                )
+            },
+        ),
+        (
+            _("Sales availability"),
+            {
+                "fields": (
+                    "available_for_new_orders",
+                    "max_clients",
+                    "current_users",
+                    "active_route_warning",
+                )
+            },
+        ),
+        (
+            _("Health monitoring"),
+            {
+                "fields": ("health_monitor_enabled", "last_synced_at"),
+            },
+        ),
+        (
+            _("Technical details"),
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "server_ip",
+                    "port",
+                    "config_params",
+                    "network_type",
+                    "security",
+                    "sni",
+                    "fingerprint",
+                    "pbk",
+                    "sid",
+                    "ws_path",
+                    "ws_host",
+                    "created_at",
+                    "updated_at",
+                ),
+            },
+        ),
+        (
+            _("Legacy"),
+            {
+                "classes": ("collapse",),
+                "fields": ("legacy_note",),
+            },
+        ),
+    )
     actions = ["sync_from_panel", "mark_as_legacy", "enable_for_new_orders_and_health"]
 
     @admin.display(description=_("Name"))
@@ -3075,6 +3297,8 @@ class InboundAdmin(ImportExportModelAdmin):
 
     @admin.display(description=_("Active plan routes"), ordering="admin_active_plan_route_count")
     def active_plan_route_count(self, obj):
+        if not obj or not obj.pk:
+            return 0
         value = getattr(obj, "admin_active_plan_route_count", None)
         if value is None:
             value = obj.plan_routes.filter(is_active=True).count()
@@ -3082,6 +3306,8 @@ class InboundAdmin(ImportExportModelAdmin):
 
     @admin.display(description=_("Route warning"))
     def active_route_warning(self, obj):
+        if not obj or not obj.pk:
+            return "-"
         active_routes = self.active_plan_route_count(obj)
         if active_routes and not obj.available_for_new_orders:
             return format_html('<span class="badge bg-danger">{}</span>', _("Active route on legacy inbound"))
@@ -3090,6 +3316,24 @@ class InboundAdmin(ImportExportModelAdmin):
         if active_routes and obj.panel_id and not obj.panel.is_active:
             return format_html('<span class="badge bg-danger">{}</span>', _("Active route on inactive panel"))
         return "-"
+
+    @admin.display(description=_("Sales readiness"))
+    def sales_readiness(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        readiness = get_inbound_sales_readiness(obj, getattr(getattr(obj, "panel", None), "store", None))
+        css = {
+            "success": "bg-success",
+            "warning": "bg-warning text-dark",
+            "danger": "bg-danger",
+            "info": "bg-info",
+        }.get(readiness["tone"], "bg-secondary")
+        return format_html('<span class="badge {}">{}</span>', css, readiness["label"])
+
+    @admin.display(description=_("Catalog"))
+    def catalog_link(self, obj):
+        store = getattr(getattr(obj, "panel", None), "store", None)
+        return format_html('<a class="button" href="{}">{}</a>', catalog_url(store), _("Catalog"))
 
     @admin.action(description=_("Mark as legacy / exclude from sales and health monitor"))
     def mark_as_legacy(self, request, queryset):

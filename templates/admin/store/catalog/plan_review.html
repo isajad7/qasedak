@@ -1,0 +1,153 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{{ catalog_url }}">مدیریت محصولات و مسیر فروش</a>
+    &rsaquo; {{ plan.name }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-catalog qadmin-plan-review" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Plan Review</p>
+            <h1>{{ plan.name }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ edit_url }}" class="qadmin-action">Edit</a>
+            <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">Assign/change route</a>
+            <a href="{{ catalog_url }}" class="qadmin-action qadmin-action-secondary">برگشت به catalog</a>
+        </div>
+    </section>
+
+    <section class="qadmin-review-layout">
+        <div class="qadmin-review-main">
+            <section class="qadmin-catalog-section qadmin-status-{{ route_status.tone }}">
+                <header class="qadmin-section-header">
+                    <div>
+                        <h2>مشخصات پلن</h2>
+                        <p>{{ volume_label }} / {{ duration_label }} / {{ price_label }}</p>
+                    </div>
+                    <span class="qadmin-badge qadmin-badge-{{ route_status.tone }}">{{ route_status.label }}</span>
+                </header>
+                <div class="qadmin-summary qadmin-plan-summary">
+                    <span class="qadmin-count qadmin-count-{% if plan.is_active %}done{% else %}warning{% endif %}">{% if plan.is_active %}فعال{% else %}غیرفعال{% endif %}</span>
+                    <span class="qadmin-count qadmin-count-{% if plan.is_public %}done{% else %}safe{% endif %}">{% if plan.is_public %}عمومی{% else %}غیرعمومی{% endif %}</span>
+                    {% if plan.is_custom_volume %}<span class="qadmin-count qadmin-count-safe">حجم دلخواه</span>{% endif %}
+                    <span class="qadmin-count qadmin-count-safe">Device {{ plan.device_limit }}</span>
+                </div>
+                {% if readiness.warnings %}
+                    <ul class="qadmin-warning-list">
+                        {% for warning in readiness.warnings %}
+                            <li>{{ warning }}</li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+                <div class="qadmin-preview-box">
+                    <strong>Preview ربات</strong>
+                    <span>{{ bot_preview }}</span>
+                </div>
+            </section>
+
+            <section class="qadmin-catalog-section">
+                <header class="qadmin-section-header">
+                    <div>
+                        <h2>Routeهای پلن</h2>
+                        <p>Route عمومی و routeهای operator-specific.</p>
+                    </div>
+                </header>
+                <div class="qadmin-table-wrap">
+                    <table class="qadmin-catalog-table">
+                        <thead>
+                            <tr>
+                                <th>Operator</th>
+                                <th>Inbound</th>
+                                <th>Priority</th>
+                                <th>Active</th>
+                                <th>Status</th>
+                                <th>Warning</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in route_items %}
+                                <tr class="{% if item.readiness.is_invalid and item.is_active %}qadmin-row-danger{% endif %}">
+                                    <td>{{ item.operator_label }}</td>
+                                    <td>{% if item.inbound_admin_url %}<a href="{{ item.inbound_admin_url }}">{{ item.inbound_label }}</a>{% else %}{{ item.inbound_label }}{% endif %}</td>
+                                    <td>{{ item.priority }}</td>
+                                    <td>{% if item.is_active %}بله{% else %}خیر{% endif %}</td>
+                                    <td><span class="qadmin-badge qadmin-badge-{{ item.readiness.tone }}">{{ item.readiness.label }}</span></td>
+                                    <td>
+                                        {% for warning in item.readiness.warnings|slice:":3" %}
+                                            <small>{{ warning }}</small>
+                                        {% empty %}
+                                            -
+                                        {% endfor %}
+                                    </td>
+                                    <td>
+                                        {% if item.is_active %}
+                                            <form method="post">
+                                                {% csrf_token %}
+                                                <input type="hidden" name="confirm_action" value="1">
+                                                <input type="hidden" name="route_id" value="{{ item.route.pk }}">
+                                                <button type="submit" name="action" value="deactivate_route" class="qadmin-action qadmin-action-warning" onclick="return confirm('این route غیرفعال شود؟');">Deactivate route</button>
+                                            </form>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% empty %}
+                                <tr><td colspan="7" class="qadmin-empty-cell">Routeای برای این پلن ثبت نشده است.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+        <aside class="qadmin-review-side">
+            <section class="qadmin-side-panel">
+                <h2>آمار مرتبط</h2>
+                <ul class="qadmin-detail-list">
+                    <li><a href="{{ recent_order_url }}">{{ recent_order_count }} سفارش اخیر/مرتبط</a></li>
+                    <li><a href="{{ vpn_client_url }}">{{ vpn_client_count }} VPNClient مرتبط</a></li>
+                </ul>
+            </section>
+
+            <section class="qadmin-side-panel">
+                <h2>Actionها</h2>
+                <div class="qadmin-action-list">
+                    <a href="{{ edit_url }}" class="qadmin-action">Edit</a>
+                    <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">Bulk routing center</a>
+                    <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-secondary">Django Admin</a>
+                    <form method="post">
+                        {% csrf_token %}
+                        <input type="hidden" name="confirm_action" value="1">
+                        {% if plan.is_active %}
+                            <button type="submit" name="action" value="deactivate" class="qadmin-action qadmin-action-warning" onclick="return confirm('پلن غیرفعال شود؟');">Deactivate</button>
+                        {% else %}
+                            <button type="submit" name="action" value="activate" class="qadmin-action qadmin-action-success" onclick="return confirm('پلن فعال شود؟');">Activate</button>
+                        {% endif %}
+                    </form>
+                    <form method="post">
+                        {% csrf_token %}
+                        <input type="hidden" name="confirm_action" value="1">
+                        <button type="submit" name="action" value="duplicate" class="qadmin-action qadmin-action-secondary" onclick="return confirm('کپی غیرفعال و بدون route فعال ساخته شود؟');">Duplicate</button>
+                    </form>
+                    <a href="{{ catalog_url }}" class="qadmin-action qadmin-action-secondary">Catalog</a>
+                </div>
+            </section>
+        </aside>
+    </section>
+</div>
+{% endblock %}

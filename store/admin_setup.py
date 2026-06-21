@@ -4,6 +4,7 @@ from urllib.parse import urlencode
 from django.db.models import Q
 from django.urls import reverse
 
+from .admin_catalog import catalog_url
 from .bot_proxy import sanitized_telegram_proxy_url, telegram_proxy_url
 from .models import BotConfiguration, Inbound, Panel, Plan, PlanInboundRoute, RevenueOfferLog, Store
 
@@ -463,7 +464,14 @@ def setup_plans_card(store):
         "پلن‌های عمومی فعال و فروش حجم دلخواه.",
         status,
         details,
-        with_wizard_action("plans", store, [SetupAction("برو به Plans", changelist_url("store_plan_changelist", store))]),
+        with_wizard_action(
+            "plans",
+            store,
+            [
+                SetupAction("مدیریت محصولات", catalog_url(store), "primary"),
+                SetupAction("برو به Plans", changelist_url("store_plan_changelist", store)),
+            ],
+        ),
     )
 
 
@@ -496,7 +504,10 @@ def setup_routes_card(store):
         with_wizard_action(
             "plan_routes",
             store,
-            [SetupAction("برو به Routes", changelist_url("store_planinboundroute_changelist", store))],
+            [
+                SetupAction("مدیریت محصولات و route", catalog_url(store), "primary"),
+                SetupAction("برو به Routes", changelist_url("store_planinboundroute_changelist", store)),
+            ],
         ),
     )
 

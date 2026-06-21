@@ -1,0 +1,309 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{{ dashboard_url }}">داشبورد قاصدک</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-catalog" dir="rtl">
+    <section class="qadmin-hero qadmin-catalog-hero">
+        <div>
+            <p class="qadmin-eyebrow">Product Catalog</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ new_plan_url }}" class="qadmin-action">ساخت پلن جدید</a>
+            <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">Bulk assign route</a>
+            <a href="{{ dashboard_url }}" class="qadmin-action qadmin-action-secondary">داشبورد</a>
+        </div>
+    </section>
+
+    <section class="qadmin-toolbar">
+        <div>
+            <strong>فروشگاه:</strong>
+            {% if selected_store %}{{ selected_store.name }}{% else %}هنوز فروشگاهی ساخته نشده است{% endif %}
+        </div>
+        {% if stores|length > 1 %}
+            <form method="get" class="qadmin-store-switcher">
+                <label for="qadmin-store">Store</label>
+                <select id="qadmin-store" name="store" onchange="this.form.submit()">
+                    {% for store in stores %}
+                        <option value="{{ store.pk }}" {% if selected_store and selected_store.pk == store.pk %}selected{% endif %}>
+                            {{ store.name }}{% if not store.is_active %} - غیرفعال{% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </form>
+        {% endif %}
+    </section>
+
+    <section class="qadmin-catalog-summary qadmin-card-grid">
+        <article class="qadmin-card qadmin-status-{{ summary.overall_tone }}">
+            <header>
+                <div>
+                    <h2>وضعیت فروشگاه</h2>
+                    <p>آمادگی فروش بر اساس پلن، route، inbound و fallback.</p>
+                </div>
+                <span class="qadmin-badge qadmin-badge-{{ summary.overall_tone }}">{{ summary.overall_label }}</span>
+            </header>
+            <ul class="qadmin-detail-list">
+                <li>پلن فعال: {{ summary.active_plan_count }}</li>
+                <li>پلن غیرفعال: {{ summary.inactive_plan_count }}</li>
+                <li>پلن فاقد route: {{ summary.missing_route_count }}</li>
+                <li>Route نامعتبر: {{ summary.invalid_route_count }}</li>
+                <li>Inbound آماده فروش: {{ summary.sales_ready_inbound_count }}</li>
+                <li>Fallback: {% if summary.fallback_enabled %}روشن{% else %}خاموش{% endif %}</li>
+            </ul>
+        </article>
+
+        <article class="qadmin-card qadmin-status-info">
+            <header>
+                <div>
+                    <h2>Quick Actions</h2>
+                    <p>مسیرهای پرتکرار مدیریت محصول.</p>
+                </div>
+            </header>
+            <div class="qadmin-actions qadmin-catalog-actions">
+                <a href="{{ new_plan_url }}" class="qadmin-action">ساخت پلن جدید</a>
+                <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">تنظیم گروهی route</a>
+                <a href="{{ inbound_admin_url }}" class="qadmin-action qadmin-action-secondary">مدیریت inboundها</a>
+                <a href="{{ panel_admin_url }}" class="qadmin-action qadmin-action-secondary">مدیریت panelها</a>
+                <a href="{{ setup_wizard_url }}" class="qadmin-action qadmin-action-secondary">Setup Wizard</a>
+                <a href="{{ dashboard_url }}" class="qadmin-action qadmin-action-secondary">Dashboard</a>
+            </div>
+            <code class="qadmin-command">{{ audit_command }}</code>
+        </article>
+
+        <article class="qadmin-card qadmin-status-{% if action_items %}warning{% else %}success{% endif %}">
+            <header>
+                <div>
+                    <h2>نیازمند اقدام</h2>
+                    <p>موردهایی که فروش را کند یا متوقف می‌کنند.</p>
+                </div>
+                <span class="qadmin-badge qadmin-badge-{% if action_items %}warning{% else %}success{% endif %}">{{ action_items|length }}</span>
+            </header>
+            <div class="qadmin-action-list">
+                {% for item in action_items %}
+                    <article class="qadmin-action-item qadmin-action-item-{{ item.tone }}">
+                        <h3>{{ item.title }}</h3>
+                        <p>{{ item.description }}</p>
+                        {% if item.url %}<a href="{{ item.url }}" class="qadmin-action qadmin-action-{{ item.tone }}">باز کردن</a>{% endif %}
+                    </article>
+                {% empty %}
+                    <p class="qadmin-empty">مورد فوری برای کاتالوگ ثبت نشده است.</p>
+                {% endfor %}
+            </div>
+        </article>
+    </section>
+
+    <section class="qadmin-catalog-section">
+        <header class="qadmin-section-header">
+            <div>
+                <h2>پلن‌های فعال</h2>
+                <p>قیمت، حجم، وضعیت فروش و مقصد route.</p>
+            </div>
+        </header>
+        <div class="qadmin-table-wrap">
+            <table class="qadmin-catalog-table">
+                <thead>
+                    <tr>
+                        <th>پلن</th>
+                        <th>حجم / مدت</th>
+                        <th>قیمت</th>
+                        <th>نمایش</th>
+                        <th>Route</th>
+                        <th>Inbound مقصد</th>
+                        <th>اقدام</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in active_plan_items %}
+                        <tr class="{% if item.route_status.is_invalid %}qadmin-row-danger{% endif %}">
+                            <td>
+                                <a href="{{ item.review_url }}"><strong>{{ item.name }}</strong></a>
+                                {% if item.plan.is_custom_volume %}<span class="qadmin-badge qadmin-badge-info">حجم دلخواه</span>{% endif %}
+                            </td>
+                            <td>{{ item.volume }}<small>{{ item.duration }}</small></td>
+                            <td>{{ item.price }}</td>
+                            <td>
+                                <span class="qadmin-badge qadmin-badge-{% if item.plan.is_public %}success{% else %}secondary{% endif %}">
+                                    {% if item.plan.is_public %}عمومی{% else %}غیرعمومی{% endif %}
+                                </span>
+                            </td>
+                            <td>
+                                <span class="qadmin-badge qadmin-badge-{{ item.route_status.tone }}">{{ item.route_status.label }}</span>
+                                {% if item.route_status.operators %}<small>{{ item.route_status.operators|join:"، " }}</small>{% endif %}
+                            </td>
+                            <td>{{ item.destination }}</td>
+                            <td>
+                                <div class="qadmin-inline-actions">
+                                    <a href="{{ item.review_url }}" class="qadmin-action">مشاهده</a>
+                                    <a href="{{ item.edit_url }}" class="qadmin-action qadmin-action-info">تنظیم route</a>
+                                    <form method="post">
+                                        {% csrf_token %}
+                                        <input type="hidden" name="confirm_action" value="1">
+                                        <input type="hidden" name="plan_id" value="{{ item.plan.pk }}">
+                                        <button type="submit" name="action" value="deactivate" class="qadmin-action qadmin-action-warning" onclick="return confirm('پلن غیرفعال شود؟');">غیرفعال</button>
+                                    </form>
+                                    <form method="post">
+                                        {% csrf_token %}
+                                        <input type="hidden" name="confirm_action" value="1">
+                                        <input type="hidden" name="plan_id" value="{{ item.plan.pk }}">
+                                        <button type="submit" name="action" value="duplicate" class="qadmin-action qadmin-action-secondary" onclick="return confirm('کپی غیرفعال و بدون route فعال ساخته شود؟');">Duplicate</button>
+                                    </form>
+                                </div>
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="7" class="qadmin-empty-cell">پلن فعالی وجود ندارد.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="qadmin-catalog-section qadmin-status-warning">
+        <header class="qadmin-section-header">
+            <div>
+                <h2>پلن‌های نیازمند اقدام</h2>
+                <p>Route missing، invalid، legacy، panel/inbound غیرفعال یا fallback هشداردهنده.</p>
+            </div>
+            <span class="qadmin-badge qadmin-badge-warning">{{ action_plan_items|length }}</span>
+        </header>
+        <div class="qadmin-plan-grid">
+            {% for item in action_plan_items %}
+                <article class="qadmin-plan-card qadmin-status-{{ item.route_status.tone }}">
+                    <header>
+                        <h3><a href="{{ item.review_url }}">{{ item.name }}</a></h3>
+                        <span class="qadmin-badge qadmin-badge-{{ item.route_status.tone }}">{{ item.route_status.label }}</span>
+                    </header>
+                    <p>{{ item.volume }} / {{ item.duration }} / {{ item.price }}</p>
+                    {% if item.route_status.warnings %}
+                        <ul class="qadmin-warning-list">
+                            {% for warning in item.route_status.warnings|slice:":3" %}
+                                <li>{{ warning }}</li>
+                            {% endfor %}
+                        </ul>
+                    {% endif %}
+                    <div class="qadmin-actions">
+                        <a href="{{ item.edit_url }}" class="qadmin-action qadmin-action-warning">اصلاح route</a>
+                        <a href="{{ item.bulk_assign_url }}" class="qadmin-action qadmin-action-info">Bulk assign</a>
+                    </div>
+                </article>
+            {% empty %}
+                <p class="qadmin-empty">پلن نیازمند اقدام ثبت نشده است.</p>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="qadmin-catalog-section">
+        <header class="qadmin-section-header">
+            <div>
+                <h2>Inboundهای آماده فروش</h2>
+                <p>فقط inboundهای فعال، قابل فروش، غیر legacy و متصل به پنل فعال.</p>
+            </div>
+        </header>
+        <div class="qadmin-table-wrap">
+            <table class="qadmin-catalog-table">
+                <thead>
+                    <tr>
+                        <th>Panel</th>
+                        <th>Inbound</th>
+                        <th>Protocol</th>
+                        <th>Active</th>
+                        <th>New orders</th>
+                        <th>Health</th>
+                        <th>Routes</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in inbound_items %}
+                        <tr>
+                            <td>{{ item.panel }}</td>
+                            <td><a href="{{ item.admin_url }}">#{{ item.xui_inbound_id }} / {{ item.remark }}</a></td>
+                            <td>{{ item.protocol }}</td>
+                            <td>{% if item.is_active %}بله{% else %}خیر{% endif %}</td>
+                            <td>{% if item.available_for_new_orders %}بله{% else %}خیر{% endif %}</td>
+                            <td>{% if item.health_monitor_enabled %}فعال{% else %}خاموش{% endif %}</td>
+                            <td>{{ item.active_route_count }}</td>
+                            <td><span class="qadmin-badge qadmin-badge-{{ item.readiness.tone }}">{{ item.readiness.label }}</span></td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="8" class="qadmin-empty-cell">Inbound آماده فروش وجود ندارد.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section id="routes" class="qadmin-catalog-section">
+        <header class="qadmin-section-header">
+            <div>
+                <h2>Route overview</h2>
+                <p>وضعیت routeهای پلن به inbound.</p>
+            </div>
+        </header>
+        <div class="qadmin-table-wrap">
+            <table class="qadmin-catalog-table">
+                <thead>
+                    <tr>
+                        <th>Plan</th>
+                        <th>Operator</th>
+                        <th>Inbound</th>
+                        <th>Priority</th>
+                        <th>Active</th>
+                        <th>Status</th>
+                        <th>Warning</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in route_items %}
+                        <tr class="{% if item.readiness.is_invalid and item.is_active %}qadmin-row-danger{% endif %}">
+                            <td><a href="{{ item.review_url }}">{{ item.plan_label }}</a></td>
+                            <td>{{ item.operator_label }}</td>
+                            <td>{% if item.inbound_admin_url %}<a href="{{ item.inbound_admin_url }}">{{ item.inbound_label }}</a>{% else %}{{ item.inbound_label }}{% endif %}</td>
+                            <td>{{ item.priority }}</td>
+                            <td>{% if item.is_active %}بله{% else %}خیر{% endif %}</td>
+                            <td><span class="qadmin-badge qadmin-badge-{{ item.readiness.tone }}">{{ item.readiness.label }}</span></td>
+                            <td>
+                                {% for warning in item.readiness.warnings|slice:":2" %}
+                                    <small>{{ warning }}</small>
+                                {% empty %}
+                                    -
+                                {% endfor %}
+                            </td>
+                            <td>
+                                {% if item.is_active %}
+                                    <form method="post">
+                                        {% csrf_token %}
+                                        <input type="hidden" name="confirm_action" value="1">
+                                        <input type="hidden" name="route_id" value="{{ item.route.pk }}">
+                                        <button type="submit" name="action" value="deactivate_route" class="qadmin-action qadmin-action-warning" onclick="return confirm('این route غیرفعال شود؟');">غیرفعال کردن route</button>
+                                    </form>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="8" class="qadmin-empty-cell">Routeای ثبت نشده است.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+{% endblock %}

@@ -112,7 +112,11 @@
                                     <small>{{ item.telegram_status }}</small>
                                 </td>
                                 <td>
-                                    {{ item.plan }}
+                                    {% if item.plan_review_url %}
+                                        <a href="{{ item.plan_review_url }}">{{ item.plan }}</a>
+                                    {% else %}
+                                        {{ item.plan }}
+                                    {% endif %}
                                     {% if item.operator %}<small>{{ item.operator }}</small>{% endif %}
                                 </td>
                                 <td>{{ item.amount }}</td>

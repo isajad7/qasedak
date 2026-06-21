@@ -248,9 +248,11 @@
     align-items: center;
     justify-content: center;
     min-height: 34px;
+    border: 0;
     border-radius: 6px;
     background: #216c5c;
     color: #fff !important;
+    cursor: pointer;
     font-size: 13px;
     font-weight: 800;
     padding: 7px 12px;
@@ -268,6 +270,14 @@
 
 .qadmin-action-warning:hover {
     background: #805015;
+}
+
+.qadmin-action-success {
+    background: #2f7d4f;
+}
+
+.qadmin-action-success:hover {
+    background: #235f3b;
 }
 
 .qadmin-action-error,
@@ -1351,6 +1361,211 @@
     text-align: left;
 }
 
+.qadmin-catalog-section,
+.qadmin-form-section,
+.qadmin-preview-box {
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #fff;
+    padding: 14px;
+}
+
+.qadmin-catalog-section,
+.qadmin-catalog-form {
+    display: grid;
+    gap: 14px;
+}
+
+.qadmin-section-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.qadmin-section-header h2,
+.qadmin-form-section h2 {
+    margin: 0;
+    color: #172033;
+    font-size: 17px;
+    font-weight: 900;
+}
+
+.qadmin-section-header p,
+.qadmin-form-section p {
+    margin: 5px 0 0;
+    color: #5f6f85;
+    font-size: 13px;
+    line-height: 1.7;
+}
+
+.qadmin-catalog-table {
+    width: 100%;
+    min-width: 860px;
+    border-collapse: collapse;
+}
+
+.qadmin-catalog-table th,
+.qadmin-catalog-table td {
+    border-bottom: 1px solid #e4e9f0;
+    padding: 10px 8px;
+    text-align: right;
+    vertical-align: top;
+}
+
+.qadmin-catalog-table th {
+    color: #5f6f85;
+    font-size: 12px;
+    font-weight: 900;
+}
+
+.qadmin-catalog-table td {
+    color: #172033;
+    font-size: 13px;
+    line-height: 1.7;
+}
+
+.qadmin-catalog-table small {
+    display: block;
+    color: #5f6f85;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.qadmin-row-danger {
+    background: #fff7f6;
+}
+
+.qadmin-inline-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.qadmin-inline-actions form,
+.qadmin-action-list form {
+    margin: 0;
+}
+
+.qadmin-catalog-actions {
+    margin-top: 0;
+}
+
+.qadmin-plan-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 12px;
+}
+
+.qadmin-plan-card {
+    display: grid;
+    gap: 10px;
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #fff;
+    padding: 12px;
+    border-top-width: 4px;
+}
+
+.qadmin-plan-card header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.qadmin-plan-card h3 {
+    margin: 0;
+    color: #172033;
+    font-size: 15px;
+    font-weight: 900;
+}
+
+.qadmin-plan-card p {
+    margin: 0;
+    color: #5f6f85;
+    font-size: 13px;
+}
+
+.qadmin-form-section {
+    display: grid;
+    gap: 12px;
+    border-top-width: 4px;
+}
+
+.qadmin-form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 12px;
+}
+
+.qadmin-form-field {
+    display: grid;
+    gap: 6px;
+}
+
+.qadmin-form-field label {
+    margin: 0;
+    color: #344154;
+    font-size: 13px;
+    font-weight: 900;
+}
+
+.qadmin-form-field input,
+.qadmin-form-field select,
+.qadmin-form-field textarea {
+    width: 100%;
+    min-height: 38px;
+    border: 1px solid #c4ceda;
+    border-radius: 6px;
+    background: #fff;
+    color: #172033;
+    padding: 7px 10px;
+}
+
+.qadmin-form-field input[type="checkbox"] {
+    width: 18px;
+    min-height: 18px;
+    justify-self: start;
+}
+
+.qadmin-form-field .help,
+.qadmin-catalog-form .help {
+    margin: 0;
+    color: #5f6f85;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.qadmin-catalog-form .errorlist {
+    margin: 0;
+    color: #9c2b21;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.qadmin-plan-summary {
+    justify-content: flex-start;
+}
+
+.qadmin-preview-box {
+    display: grid;
+    gap: 6px;
+    background: #f8fafc;
+}
+
+.qadmin-preview-box strong {
+    color: #344154;
+    font-size: 12px;
+    font-weight: 900;
+}
+
+.qadmin-preview-box span {
+    color: #172033;
+    font-size: 14px;
+    font-weight: 800;
+}
+
 @media (max-width: 960px) {
     .qadmin-dashboard-layout,
     .qadmin-wizard-layout,
@@ -1365,6 +1580,7 @@
     }
 
     .qadmin-order-section-header,
+    .qadmin-section-header,
     .qadmin-hero,
     .qadmin-toolbar {
         align-items: stretch;
@@ -1372,12 +1588,14 @@
     }
 
     .qadmin-order-section-actions,
+    .qadmin-inline-actions,
     .qadmin-hero-actions {
         align-items: stretch;
         width: 100%;
     }
 
     .qadmin-order-section-actions .qadmin-action,
+    .qadmin-inline-actions .qadmin-action,
     .qadmin-hero-actions .qadmin-action {
         width: 100%;
     }

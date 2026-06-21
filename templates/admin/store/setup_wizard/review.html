@@ -29,6 +29,7 @@
             {% endif %}
         </div>
         <div class="qadmin-hero-actions">
+            <a href="{% url 'admin_store_catalog' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action">مدیریت محصولات</a>
             <a href="{{ dashboard_url }}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action">داشبورد</a>
             <a href="{{ setup_center_url }}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-info">Setup Center</a>
         </div>
@@ -92,6 +93,7 @@
     <div class="qadmin-form-actions">
         <a href="{{ previous_url }}" class="qadmin-action qadmin-action-secondary">قبلی</a>
         <a href="{% url 'admin_store_setup_wizard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-info">همه مراحل</a>
+        <a href="{% url 'admin_store_catalog' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-secondary">مدیریت محصولات</a>
         <a href="{{ dashboard_url }}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action">پایان و رفتن به داشبورد</a>
     </div>
 </div>

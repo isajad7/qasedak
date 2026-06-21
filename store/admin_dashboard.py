@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from payments.models import IncomingPaymentSMS
 
+from .admin_catalog import catalog_url
 from .admin_setup import (
     active_panels,
     active_sales_inbounds,
@@ -579,7 +580,7 @@ def get_action_items(store, setup_summary, order_metrics, payment_metrics, clien
                 "Route پلن‌ها ناقص است",
                 f"{len(missing_routes):,} پلن/اپراتور route معتبر ندارد.",
                 "error",
-                setup_wizard_step_url("routes", store),
+                catalog_url(store),
             )
         )
     if not panel_summary["panel_count"]:
@@ -658,6 +659,7 @@ def get_quick_actions(store=None):
         DashboardLink("بررسی رسیدها", order_workbench_url("needs-review", store), tone="warning"),
         DashboardLink("Setup Wizard", setup_wizard_index_url(store)),
         DashboardLink("Setup Center", add_query(reverse("admin_store_setup_center"), {"store": getattr(store, "pk", None)})),
+        DashboardLink("مدیریت محصولات", catalog_url(store)),
         DashboardLink("مدیریت پلن‌ها", changelist_url("store_plan_changelist", store)),
         DashboardLink("مدیریت routeها", changelist_url("store_planinboundroute_changelist", store)),
         DashboardLink("BotConfiguration", changelist_url("store_botconfiguration_changelist", store)),

@@ -7,5 +7,10 @@
             {% trans "Bulk assign routes" %}
         </a>
     {% endif %}
+    {% if catalog_url %}
+        <a href="{{ catalog_url }}" class="btn btn-secondary float-end">
+            مدیریت محصولات و مسیر فروش
+        </a>
+    {% endif %}
     {{ block.super }}
 {% endblock %}

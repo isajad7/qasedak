@@ -24,6 +24,7 @@
             <p>{{ subtitle }} سفارش‌ها، پرداخت‌ها، سرویس‌ها و وضعیت تنظیمات را از داده‌های موجود ببین.</p>
         </div>
         <div class="qadmin-hero-actions">
+            <a href="{% url 'admin_store_catalog' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action">مدیریت محصولات</a>
             <a href="{% url 'admin_store_order_workbench' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-warning">میز کار سفارش‌ها</a>
             <a href="{% url 'admin_store_setup_wizard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action">Setup Wizard</a>
             <a href="{% url 'admin_store_setup_center' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action">Setup Center</a>

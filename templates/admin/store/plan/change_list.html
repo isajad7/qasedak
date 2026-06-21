@@ -55,6 +55,11 @@
                     تنظیم گروهی routeها
                 </a>
             {% endif %}
+            {% if catalog_url %}
+                <a href="{{ catalog_url }}" class="button">
+                    مدیریت محصولات و مسیر فروش
+                </a>
+            {% endif %}
         </div>
         <form method="post" onsubmit="return confirm('قیمت همه پلن‌ها بر اساس این عدد تغییر می‌کند. ادامه می‌دهی؟');">
             {% csrf_token %}
