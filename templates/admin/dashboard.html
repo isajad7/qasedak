@@ -1,107 +1,204 @@
 {% extends "admin/index.html" %}
-{% load i18n admin_metrics %}
+{% load i18n static jazzmin admin_metrics admin_access_tags store_formatters %}
+
+{% block content_title %}{% trans "داشبورد قاصدک" %}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin_tailwind.css' %}">
+{% endblock %}
 
 {% block content %}
-    {% admin_dashboard_stats as dashboard_stats %}
-    <div class="col-12">
-        <div class="card mb-3">
-            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
-                <div>
-                    <h3 class="h5 mb-1">داشبورد قاصدک</h3>
-                    <p class="mb-0 text-muted">امروز چه خبر است؟ سفارش‌ها، درآمد، رسیدها، سرویس‌ها و اقدام‌های فوری.</p>
-                </div>
-                <a href="{% url 'admin_store_owner_dashboard' %}" class="btn btn-primary mt-3 mt-sm-0">
-                    مشاهده داشبورد
-                </a>
-            </div>
-        </div>
-    </div>
-    <div class="col-12">
-        <div class="card mb-3">
-            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
-                <div>
-                    <h3 class="h5 mb-1">میز کار سفارش‌ها</h3>
-                    <p class="mb-0 text-muted">بررسی رسید، تایید یا رد پرداخت، و پیگیری تحویل کانفیگ از یک صفحه owner-facing.</p>
-                </div>
-                <a href="{% url 'admin_store_order_workbench' %}" class="btn btn-warning mt-3 mt-sm-0">
-                    باز کردن میز کار
-                </a>
-            </div>
-        </div>
-    </div>
-    <div class="col-12">
-        <div class="card mb-3">
-            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
-                <div>
-                    <h3 class="h5 mb-1">میز کار سرویس‌ها</h3>
-                    <p class="mb-0 text-muted">مشتری، سرویس فعال/منقضی، مصرف، انقضا و actionهای explicit از یک صفحه owner-facing.</p>
-                </div>
-                <a href="{% url 'admin_store_service_workbench' %}" class="btn btn-info mt-3 mt-sm-0">
-                    باز کردن میز کار سرویس‌ها
-                </a>
-            </div>
-        </div>
-    </div>
-    <div class="col-12">
-        <div class="card mb-3">
-            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
-                <div>
-                    <h3 class="h5 mb-1">کنترل درآمد هوشمند</h3>
-                    <p class="mb-0 text-muted">وضعیت dry-run/real-send، guardrailها، metricهای RevenueOfferLog و actionهای امن.</p>
-                </div>
-                <a href="{% url 'admin_store_revenue_control' %}" class="btn btn-danger mt-3 mt-sm-0">
-                    باز کردن کنترل درآمد
-                </a>
-            </div>
-        </div>
-    </div>
-    <div class="col-12">
-        <div class="card mb-3">
-            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
-                <div>
-                    <h3 class="h5 mb-1">راه‌اندازی قاصدک</h3>
-                    <p class="mb-0 text-muted">وضعیت نصب و تنظیمات اولیه Store، تلگرام، پنل، پلن‌ها، پرداخت و Revenue Engine.</p>
-                </div>
-                <div class="d-flex flex-wrap gap-2 mt-3 mt-sm-0">
-                    <a href="{% url 'admin_store_setup_wizard' %}" class="btn btn-success">
-                        راه‌اندازی مرحله‌ای
-                    </a>
-                    <a href="{% url 'admin_store_setup_center' %}" class="btn btn-outline-success">
-                        وضعیت نصب
-                    </a>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div class="col-12">
-        <div class="card mb-3">
-            <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
-                <div>
-                    <h3 class="h5 mb-1">گزارش دریافتی کارت‌ها</h3>
-                    <p class="mb-0 text-muted">جمع رسیدهای ثبت شده برای هر شماره کارت را با فیلتر بازه زمانی ببین.</p>
-                </div>
-                <a href="{% url 'admin_card_receipts_report' %}" class="btn btn-primary mt-3 mt-sm-0">
-                    مشاهده گزارش
-                </a>
-            </div>
-        </div>
-    </div>
-    <div class="col-12">
-        <div class="row admin-metric-row">
-            {% for stat in dashboard_stats %}
-                <div class="col-xl-3 col-md-6 col-12">
-                    <div class="small-box bg-{{ stat.tone }} admin-metric-card">
-                        <div class="inner">
-                            <h3>{{ stat.value }}</h3>
-                            <p>{{ stat.label }}</p>
-                        </div>
-                        <div class="icon">
-                            <i class="{{ stat.icon }}"></i>
-                        </div>
+{% admin_home_context as admin_home %}
+{% get_side_menu using="app_list" as dashboard_list %}
+<div class="col-12">
+    <div class="tw-admin-home tw-bg-slate-50 tw-p-4 sm:tw-p-5 lg:tw-p-6" dir="rtl">
+        <section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+            <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+                <div class="tw-min-w-0">
+                    <div class="tw-mb-3 tw-flex tw-flex-wrap tw-items-center tw-gap-2">
+                        {% include "admin/components/status_badge.html" with tone=admin_home.admin_home_status.tone label=admin_home.admin_home_status.label icon="fas fa-circle" %}
+                        {% if admin_home.admin_home_today %}
+                            <span class="tw-inline-flex tw-items-center tw-gap-2 tw-rounded-full tw-border tw-border-slate-200 tw-bg-slate-50 tw-px-3 tw-py-1 tw-text-xs tw-font-bold tw-text-slate-600">
+                                <i class="far fa-calendar" aria-hidden="true"></i>
+                                امروز {{ admin_home.admin_home_today }}
+                            </span>
+                        {% endif %}
                     </div>
+                    <h1 class="tw-m-0 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">داشبورد قاصدک</h1>
+                    <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+                        وضعیت فروشگاه، سفارش‌ها و اقدامات مهم امروز
+                    </p>
                 </div>
-            {% endfor %}
-        </div>
+                <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row lg:tw-shrink-0">
+                    {% if request.user|has_admin_capability:"dashboard.view" %}
+                        <a href="{% url 'admin_store_owner_dashboard' %}{% if admin_home.selected_store %}?store={{ admin_home.selected_store.pk }}{% endif %}" class="tw-button tw-button-primary">
+                            <i class="fas fa-chart-line" aria-hidden="true"></i>
+                            مشاهده جزئیات داشبورد
+                        </a>
+                    {% endif %}
+                    {% if request.user|has_admin_capability:"setup.manage" %}
+                        <a href="{% url 'admin_store_setup_wizard' %}{% if admin_home.selected_store %}?store={{ admin_home.selected_store.pk }}{% endif %}" class="tw-button tw-button-secondary">
+                            <i class="fas fa-tasks" aria-hidden="true"></i>
+                            راه‌اندازی فروشگاه
+                        </a>
+                    {% endif %}
+                    {% if request.user|has_admin_capability:"backup.view" %}
+                        <a href="{% url 'admin_store_backup_center' %}" class="tw-button tw-button-secondary">
+                            <i class="fas fa-database" aria-hidden="true"></i>
+                            پشتیبان‌گیری و انتقال
+                        </a>
+                    {% endif %}
+                </div>
+            </div>
+        </section>
+
+        {% if admin_home.admin_home_kpis %}
+            <section class="tw-section">
+                <div class="tw-section-heading">
+                    <h2>شاخص‌های امروز</h2>
+                </div>
+                <div class="tw-grid tw-gap-3 sm:tw-grid-cols-2 xl:tw-grid-cols-4">
+                    {% for card in admin_home.admin_home_kpis %}
+                        {% include "admin/components/metric_card.html" with card=card only %}
+                    {% endfor %}
+                </div>
+            </section>
+        {% endif %}
+
+        {% for group in admin_home.admin_home_workspace_groups %}
+            <section class="tw-section">
+                <div class="tw-section-heading">
+                    <h2>{{ group.title }}</h2>
+                </div>
+                <div class="tw-grid tw-gap-3 md:tw-grid-cols-2 xl:tw-grid-cols-4">
+                    {% for card in group.cards %}
+                        {% include "admin/components/workspace_card.html" with card=card only %}
+                    {% endfor %}
+                </div>
+            </section>
+        {% endfor %}
+
+        <section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
+            <div class="tw-admin-card">
+                <div class="tw-section-heading tw-mb-4">
+                    <h2>نیازمند اقدام</h2>
+                </div>
+                {% if admin_home.action_items %}
+                    <div class="tw-space-y-3">
+                        {% for item in admin_home.action_items %}
+                            <div class="tw-action-item tw-tone-{{ item.tone|default:'blue' }}">
+                                <div class="tw-action-icon">
+                                    {% if item.tone == "error" or item.tone == "danger" %}
+                                        <i class="fas fa-exclamation" aria-hidden="true"></i>
+                                    {% elif item.tone == "warning" %}
+                                        <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+                                    {% else %}
+                                        <i class="fas fa-info" aria-hidden="true"></i>
+                                    {% endif %}
+                                </div>
+                                <div class="tw-min-w-0 tw-flex-1">
+                                    <h3>{{ item.title }}</h3>
+                                    <p>{{ item.description }}</p>
+                                    {% if item.command %}
+                                        <code class="tw-safe-command">{{ item.command }}</code>
+                                    {% endif %}
+                                </div>
+                                {% if item.url %}
+                                    <a href="{{ item.url }}" class="tw-mini-button">اقدام</a>
+                                {% endif %}
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <div class="tw-empty-state">
+                        <i class="fas fa-check-circle" aria-hidden="true"></i>
+                        <span>همه‌چیز مرتب است؛ اقدام فوری ندارید.</span>
+                    </div>
+                {% endif %}
+            </div>
+
+            <div class="tw-admin-card">
+                <div class="tw-section-heading tw-mb-4">
+                    <h2>فعالیت‌های اخیر</h2>
+                </div>
+                {% if admin_home.admin_home_recent_actions %}
+                    <div class="tw-space-y-3">
+                        {% for entry in admin_home.admin_home_recent_actions %}
+                            <div class="tw-recent-item tw-tone-{{ entry.tone }}">
+                                <div class="tw-action-icon">
+                                    <i class="{{ entry.icon }}" aria-hidden="true"></i>
+                                </div>
+                                <div class="tw-min-w-0 tw-flex-1">
+                                    <div class="tw-flex tw-flex-wrap tw-items-center tw-gap-2">
+                                        <strong>{{ entry.label }}</strong>
+                                        {% if entry.model %}<span>{{ entry.model }}</span>{% endif %}
+                                    </div>
+                                    {% if entry.url %}
+                                        <a href="{{ entry.url }}">{{ entry.object }}</a>
+                                    {% else %}
+                                        <span>{{ entry.object }}</span>
+                                    {% endif %}
+                                    <small>{{ entry.actor }} · {{ entry.time }}</small>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <div class="tw-empty-state">
+                        <i class="far fa-clock" aria-hidden="true"></i>
+                        <span>فعالیت تازه‌ای برای نمایش وجود ندارد.</span>
+                    </div>
+                {% endif %}
+            </div>
+        </section>
+
+        <section class="tw-section">
+            <details class="tw-admin-card tw-advanced-panel">
+                <summary>
+                    <span>
+                        <i class="fas fa-database" aria-hidden="true"></i>
+                        مدیریت پیشرفته
+                    </span>
+                    <small>مدل‌های Django برای کاربران حرفه‌ای</small>
+                </summary>
+                {% if dashboard_list %}
+                    <div class="tw-model-grid">
+                        {% for app in dashboard_list %}
+                            <section class="tw-model-group">
+                                <h3>{{ app.name }}</h3>
+                                <div class="tw-model-list">
+                                    {% for model in app.models %}
+                                        <div class="tw-model-row">
+                                            <div class="tw-min-w-0">
+                                                {% if model.url %}
+                                                    <a href="{{ model.url }}">{{ model.name }}</a>
+                                                {% else %}
+                                                    <span>{{ model.name }}</span>
+                                                {% endif %}
+                                            </div>
+                                            <div class="tw-model-actions">
+                                                {% if model.add_url %}
+                                                    <a href="{{ model.add_url }}" class="tw-mini-button tw-mini-button-success">{% trans "Add" %}</a>
+                                                {% endif %}
+                                                {% if model.url %}
+                                                    <a href="{{ model.url }}" class="tw-mini-button">{% if model.view_only %}{% trans "View" %}{% else %}{% trans "Change" %}{% endif %}</a>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    {% endfor %}
+                                </div>
+                            </section>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <div class="tw-empty-state">
+                        <i class="fas fa-lock" aria-hidden="true"></i>
+                        <span>مدلی برای دسترسی فعلی شما نمایش داده نمی‌شود.</span>
+                    </div>
+                {% endif %}
+            </details>
+        </section>
     </div>
-    {{ block.super }}
+</div>
 {% endblock %}

@@ -26,6 +26,7 @@
         </div>
         <div class="qadmin-hero-actions">
             <a href="{% url 'admin_store_owner_dashboard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-secondary">داشبورد</a>
+            <a href="{% url 'admin_store_reports_center' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}#sales" class="qadmin-action qadmin-action-info">گزارش فروش</a>
             <a href="{% url 'admin:store_order_changelist' %}" class="qadmin-action qadmin-action-info">جدول ادمین</a>
         </div>
     </section>

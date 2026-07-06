@@ -6,10 +6,11 @@ from django.db import models, transaction
 from django.db.models import F
 from django.utils import timezone
 
+from .db_locking import select_for_update_self
 from .models import Inbound, Order, VPNClient
 from .naming import build_client_display_name
 from .referral_services import create_referral_reward_for_order
-from .xui_api import delete_client, enable_client, renew_client
+from .xui_api import delete_client, enable_client, mask_xui_value, renew_client
 
 logger = logging.getLogger(__name__)
 PANEL_LINK_ADMIN_MESSAGE = "این کانفیگ به اینباند و پنل معتبر وصل نیست. لطفاً تنظیمات اینباند و پنل را در ادمین بررسی کن."
@@ -47,6 +48,8 @@ def create_order_vpn_client(order, *, inbound, username, client_result, status=V
         traffic_limit_bytes=order.plan.traffic_limit_bytes,
         duration_days=order.plan.duration_days,
         device_limit=order.plan.device_limit,
+        xui_node_id=client_result.get("xui_node_id") or getattr(inbound, "xui_node_id", "") or "",
+        remote_client_key=client_result.get("remote_client_key") or "",
         xui_raw=client_result.get("raw", {}),
     )
 
@@ -225,123 +228,10 @@ def provision_missing_panel_client(order):
 
 
 def activate_order(order, *, user=None, notify=True):
-    logger.info("activate_order started order_id=%s tracking=%s", order.pk, order.order_tracking_code)
-    with transaction.atomic():
-        order = (
-            Order.objects.select_for_update()
-            .select_related("plan", "store", "inbound", "inbound__panel")
-            .get(pk=order.pk)
-        )
-        if order.status == Order.Status.COMPLETED and order.verification_status == Order.VerificationStatus.VERIFIED:
-            logger.info("activate_order skipped already completed order_id=%s tracking=%s", order.pk, order.order_tracking_code)
-            return OrderActionResult(True, "سفارش قبلاً تکمیل شده است.")
+    from .provisioning_services import approve_and_provision_order
 
-        if (order.metadata or {}).get("renewal_client_pk"):
-            renewal_result = activate_renewal_order(order, user=user)
-            if not renewal_result.success:
-                return renewal_result
-            action_message = renewal_result.message
-        else:
-            ensure_legacy_order_client(order)
-            missing_count = required_client_count(order) - order.vpn_clients.count()
-            if missing_count > 0:
-                logger.info(
-                    "activate_order provisioning missing panel clients order_id=%s tracking=%s missing=%s",
-                    order.pk,
-                    order.order_tracking_code,
-                    missing_count,
-                )
-                provision_result = provision_missing_panel_client(order)
-                if not provision_result.success:
-                    logger.warning(
-                        "activate_order failed provisioning order_id=%s tracking=%s message=%s",
-                        order.pk,
-                        order.order_tracking_code,
-                        provision_result.message,
-                    )
-                    return provision_result
-
-            clients = list(
-                order.vpn_clients.select_for_update().select_related("plan", "inbound", "inbound__panel").order_by("created_at", "pk")
-            )
-            if len(clients) < required_client_count(order):
-                return OrderActionResult(False, "همه کانفیگ‌های VPN هنوز آماده نیستند. فعال‌سازی را دوباره امتحان کن.")
-
-            for vpn_client in clients:
-                if vpn_client.status == VPNClient.Status.ACTIVE:
-                    continue
-                panel_error = vpn_client_panel_error(vpn_client)
-                if panel_error:
-                    log_panel_link_error(
-                        "activate_order invalid VPN client panel link",
-                        order=order,
-                        vpn_client=vpn_client,
-                        reason=panel_error,
-                    )
-                    return OrderActionResult(False, PANEL_LINK_ADMIN_MESSAGE)
-                logger.info(
-                    "Calling 3xUI enable_client order_id=%s tracking=%s client_id=%s uuid=%s",
-                    order.pk,
-                    order.order_tracking_code,
-                    vpn_client.pk,
-                    vpn_client.uuid,
-                )
-                if not enable_client(vpn_client):
-                    logger.warning(
-                        "3xUI enable_client failed order_id=%s tracking=%s client_id=%s uuid=%s",
-                        order.pk,
-                        order.order_tracking_code,
-                        vpn_client.pk,
-                        vpn_client.uuid,
-                    )
-                    return OrderActionResult(False, "فعال‌سازی روی پنل X-UI ناموفق بود.")
-                logger.info(
-                    "3xUI enable_client succeeded order_id=%s tracking=%s client_id=%s uuid=%s",
-                    order.pk,
-                    order.order_tracking_code,
-                    vpn_client.pk,
-                    vpn_client.uuid,
-                )
-
-            order.mark_payment_verified(user=user)
-            changed_fields = sync_order_primary_client_fields(order, clients[0] if clients else None)
-            order.save(
-                update_fields=[
-                    "is_paid",
-                    "verification_status",
-                    "verified_by",
-                    "verified_at",
-                    "status",
-                    *changed_fields,
-                    "updated_at",
-                ]
-            )
-
-            for vpn_client in clients:
-                vpn_client.mark_active(duration_days=order.plan.duration_days)
-                vpn_client.save(
-                    update_fields=[
-                        "status",
-                        "activated_at",
-                        "expires_at",
-                        "disabled_at",
-                        "updated_at",
-                    ]
-                )
-            action_message = "سفارش تایید شد و کانفیگ VPN فعال شد."
-
-    try:
-        create_referral_reward_for_order(order)
-    except Exception:
-        logger.exception("Could not create referral GB reward for order_id=%s", order.pk)
-
-    if notify:
-        from .telegram_bot.notifications import notify_order_event
-
-        notify_order_event(order, event_type="approved")
-
-    logger.info("activate_order completed order_id=%s tracking=%s", order.pk, order.order_tracking_code)
-    return OrderActionResult(True, action_message)
+    result = approve_and_provision_order(order, actor=user, source="activate_order", notify=notify)
+    return OrderActionResult(result.ok, result.message)
 
 
 def activate_renewal_order(order, *, user=None):
@@ -350,8 +240,7 @@ def activate_renewal_order(order, *, user=None):
         return OrderActionResult(False, "سفارش تمدید به کانفیگ مقصد وصل نیست.")
 
     vpn_client = (
-        VPNClient.objects.select_for_update()
-        .select_related("plan", "order", "inbound", "inbound__panel")
+        select_for_update_self(VPNClient.objects.select_related("plan", "order", "inbound", "inbound__panel"))
         .filter(pk=client_pk)
         .first()
     )
@@ -449,8 +338,7 @@ def reject_order(order, *, reason="", user=None, notify=True):
     logger.info("reject_order started order_id=%s tracking=%s", order.pk, order.order_tracking_code)
     with transaction.atomic():
         order = (
-            Order.objects.select_for_update()
-            .select_related("plan", "store", "inbound", "inbound__panel")
+            select_for_update_self(Order.objects.select_related("plan", "store", "inbound", "inbound__panel"))
             .prefetch_related("vpn_clients")
             .get(pk=order.pk)
         )
@@ -464,24 +352,26 @@ def reject_order(order, *, reason="", user=None, notify=True):
                 "Calling 3xUI delete_client order_id=%s tracking=%s uuid=%s",
                 order.pk,
                 order.order_tracking_code,
-                target.uuid,
+                mask_xui_value(target.uuid),
             )
             if not delete_client(target):
                 logger.warning(
                     "3xUI delete_client failed order_id=%s tracking=%s uuid=%s",
                     order.pk,
                     order.order_tracking_code,
-                    target.uuid,
+                    mask_xui_value(target.uuid),
                 )
                 return OrderActionResult(False, "Sanaei/X-UI client deletion failed.")
             logger.info(
                 "3xUI delete_client succeeded order_id=%s tracking=%s uuid=%s",
                 order.pk,
                 order.order_tracking_code,
-                target.uuid,
+                mask_xui_value(target.uuid),
             )
 
         order.mark_payment_rejected(reason=reason, user=user)
+        order.provisioning_status = Order.ProvisioningStatus.NOT_REQUIRED
+        order.last_provisioning_error = ""
         metadata = dict(order.metadata or {})
         metadata["panel_client_deleted_on_reject"] = bool(delete_targets)
         metadata["panel_clients_deleted_on_reject"] = len(delete_targets)
@@ -493,6 +383,8 @@ def reject_order(order, *, reason="", user=None, notify=True):
                 "verified_at",
                 "rejection_reason",
                 "status",
+                "provisioning_status",
+                "last_provisioning_error",
                 "metadata",
                 "updated_at",
             ]
@@ -520,8 +412,7 @@ def cancel_order(order, *, user=None, hide_from_customer=True):
     logger.info("cancel_order started order_id=%s tracking=%s", order.pk, order.order_tracking_code)
     with transaction.atomic():
         order = (
-            Order.objects.select_for_update()
-            .select_related("plan", "store", "inbound", "inbound__panel")
+            select_for_update_self(Order.objects.select_related("plan", "store", "inbound", "inbound__panel"))
             .prefetch_related("vpn_clients")
             .get(pk=order.pk)
         )
@@ -533,14 +424,14 @@ def cancel_order(order, *, user=None, hide_from_customer=True):
                 "Calling 3xUI delete_client for cancel order_id=%s tracking=%s uuid=%s",
                 order.pk,
                 order.order_tracking_code,
-                target.uuid,
+                mask_xui_value(target.uuid),
             )
             if not delete_client(target):
                 logger.warning(
                     "3xUI delete_client failed for cancel order_id=%s tracking=%s uuid=%s",
                     order.pk,
                     order.order_tracking_code,
-                    target.uuid,
+                    mask_xui_value(target.uuid),
                 )
                 return OrderActionResult(False, "Sanaei/X-UI client deletion failed.")
 
@@ -551,7 +442,9 @@ def cancel_order(order, *, user=None, hide_from_customer=True):
         metadata["panel_clients_deleted_on_cancel"] = len(delete_targets)
         order.metadata = metadata
         order.status = Order.Status.CANCELLED
-        order.save(update_fields=["status", "metadata", "updated_at"])
+        order.provisioning_status = Order.ProvisioningStatus.NOT_REQUIRED
+        order.last_provisioning_error = ""
+        order.save(update_fields=["status", "provisioning_status", "last_provisioning_error", "metadata", "updated_at"])
 
         for vpn_client in order.vpn_clients.all():
             vpn_client.mark_suspended()

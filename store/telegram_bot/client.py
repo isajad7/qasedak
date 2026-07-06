@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import PurePosixPath
 
 import requests
@@ -10,6 +11,14 @@ from store.models import BotConfiguration
 
 class BotDeliveryError(Exception):
     pass
+
+
+def runtime_bot_token(config):
+    if config.provider == BotConfiguration.Provider.TELEGRAM:
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        if token:
+            return token
+    return str(config.bot_token or "")
 
 
 def bot_api_timeout():
@@ -31,12 +40,15 @@ class BotClient:
 
     def __init__(self, config):
         self.config = config
-        self.base_url = self.BASE_URLS[config.provider].format(token=config.bot_token).rstrip("/")
+        self.bot_token = runtime_bot_token(config)
+        self.base_url = self.BASE_URLS[config.provider].format(token=self.bot_token).rstrip("/")
 
     def sanitized_error(self, exc):
         message = str(exc)
-        token = str(self.config.bot_token or "")
-        if token:
+        tokens = {str(self.config.bot_token or ""), str(self.bot_token or "")}
+        for token in tokens:
+            if not token:
+                continue
             message = message.replace(token, "<redacted-token>")
         return message
 
@@ -211,7 +223,7 @@ class BotClient:
     def download_file(self, file_path):
         if not file_path:
             return None
-        file_base = self.FILE_BASE_URLS[self.config.provider].format(token=self.config.bot_token).rstrip("/")
+        file_base = self.FILE_BASE_URLS[self.config.provider].format(token=self.bot_token).rstrip("/")
         file_url = f"{file_base}/{file_path.lstrip('/')}"
         try:
             response = requests.get(

@@ -4,10 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "tailwindcss -i ./static/src/input.css -o ./static/css/output.css --watch",
-    "build": "tailwindcss -i ./static/src/input.css -o ./static/css/output.css --minify",
-    "build:prod": "npm run build && python manage.py collectstatic --noinput",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "node ./node_modules/@tailwindcss/cli/dist/index.mjs -i ./static/src/input.css -o ./static/css/output.css --watch",
+    "build": "node ./node_modules/@tailwindcss/cli/dist/index.mjs -i ./static/src/input.css -o ./static/css/output.css --minify",
+    "build:admin-css": "node ./node_modules/@tailwindcss/cli/dist/index.mjs -i ./static_src/admin/qasedak_admin_tailwind.css -o ./static/admin/qasedak_admin_tailwind.css --minify",
+    "build:prod": "npm run build && npm run build:admin-css && python manage.py collectstatic --noinput",
+    "test": "npm run test:css-build",
+    "test:css-build": "node ./node_modules/@tailwindcss/cli/dist/index.mjs -i ./static/src/input.css -o /tmp/vpn-store-output.css --minify && node ./node_modules/@tailwindcss/cli/dist/index.mjs -i ./static_src/admin/qasedak_admin_tailwind.css -o /tmp/vpn-store-admin-output.css --minify"
   },
   "keywords": [],
   "author": "",

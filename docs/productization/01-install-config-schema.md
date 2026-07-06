@@ -1,12 +1,12 @@
 # Productization P1 - Install Config Schema
 
-This document defines the proposed input schema for the future P2 management command:
+This document defines the input schema for the bootstrap management command:
 
 ```bash
 python manage.py bootstrap_install --config install.config.json
 ```
 
-P1 is design-only. No executable installer or destructive bootstrap command is introduced in this phase.
+The schema is non-destructive. It can describe either PostgreSQL or SQLite runtime settings, but it never stores a raw database password.
 
 ## Goals
 
@@ -21,7 +21,7 @@ P1 is design-only. No executable installer or destructive bootstrap command is i
 ```json
 {
   "app": {
-    "install_dir": "/opt/vpn-store",
+    "install_dir": "/opt/qasedak",
     "domain": "example.com",
     "enable_tls": true,
     "timezone": "Asia/Tehran",
@@ -30,11 +30,18 @@ P1 is design-only. No executable installer or destructive bootstrap command is i
   "admin": {
     "username": "admin",
     "email": "admin@example.com",
-    "password_mode": "generate"
+    "password_env": "QASEDAK_ADMIN_PASSWORD"
   },
   "database": {
-    "engine": "sqlite",
-    "sqlite_path": "/opt/vpn-store/data/db.sqlite3"
+    "engine": "postgres",
+    "postgres": {
+      "database": "qasedak",
+      "user": "qasedak",
+      "password_env": "QASEDAK_DB_PASSWORD",
+      "host": "127.0.0.1",
+      "port": 5432
+    },
+    "sqlite_path": "/opt/qasedak/data/db.sqlite3"
   },
   "store": {
     "name": "VPN Store",
@@ -43,7 +50,7 @@ P1 is design-only. No executable installer or destructive bootstrap command is i
   },
   "telegram": {
     "enabled": true,
-    "bot_token": "SECRET",
+    "bot_token_env": "QASEDAK_TELEGRAM_BOT_TOKEN",
     "bot_username": "your_bot",
     "admin_ids": ["123456789"],
     "proxy_enabled": false
@@ -69,7 +76,7 @@ The sample uses placeholders only. A real config file must not be committed if i
 | --- | --- | --- |
 | `app` | Install path, domain/TLS mode, language, timezone. | `.env`, service/nginx templates, Store defaults. |
 | `admin` | Initial Django admin account. | `auth.User`. |
-| `database` | Database mode and path. | `.env` for SQLite; future Postgres env later. |
+| `database` | Database mode and connection metadata. | `.env` for SQLite/PostgreSQL. |
 | `store` | Store identity and payment mode. | `Store`. |
 | `telegram` | Telegram bot bootstrap. | `BotConfiguration`; optional proxy env. |
 | `xui` | Optional panel bootstrap. | `Panel`; later optional `Inbound`. |
@@ -89,15 +96,17 @@ If no domain is provided, P2 should support an IP/localhost install and generate
 
 ### `admin`
 
-- `password_mode=generate` means P2 generates a password and prints it once.
-- Future allowed values can be `generate`, `prompt`, or `disabled`.
-- Admin passwords must never be written to docs or logs.
+- P2 accepts either `password` or `password_env`; prefer `password_env` so private configs do not contain raw passwords.
+- `password_mode=generate` is reserved for a later one-time password generation phase and is rejected by the P2 bootstrap command.
+- Admin passwords must never be written to docs, sample configs, or logs.
 
 ### `database`
 
-- `engine=sqlite` is the only supported P1/P2 target.
-- `sqlite_path` should default to `<install_dir>/data/db.sqlite3`.
-- PostgreSQL is a future extension and should not appear as supported until settings, dependencies, backup, and upgrade docs exist.
+- `engine` may be `postgres`, `postgresql`, or `sqlite`.
+- PostgreSQL is recommended for production installs.
+- `database.postgres.password_env` is required for PostgreSQL and must point to a runtime environment variable; do not put the password itself in JSON.
+- `sqlite_path` should default to `<install_dir>/data/db.sqlite3` and remains useful for SQLite installs/fallback.
+- Existing production SQLite databases are not migrated automatically by this schema.
 
 ### `store`
 
@@ -105,7 +114,7 @@ P2 should create or update an active Store with product-neutral names. Payment d
 
 ### `telegram`
 
-- `bot_token` is a secret placeholder in the sample.
+- `bot_token_env` is preferred for sample and shared configs. `bot_token` is accepted only in private configs that are never committed.
 - `bot_username` should be stored without `@`.
 - `admin_ids` are needed for admin notifications.
 - `proxy_enabled=false` means Telegram proxy fields are ignored.

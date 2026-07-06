@@ -25,11 +25,12 @@ from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 from django.utils.translation import gettext_lazy as _
 from import_export import fields, resources
-from import_export.admin import ImportExportModelAdmin
+from import_export.admin import ImportExportModelAdmin as BaseImportExportModelAdmin
 from import_export.widgets import ForeignKeyWidget
 
 from payments.models import IncomingPaymentSMS
 
+from .admin_access import get_user_product_roles, mask_staff_email, user_has_capability
 from .admin_catalog import (
     ROUTE_STATUS_FALLBACK,
     ROUTE_STATUS_MISSING,
@@ -68,6 +69,8 @@ from .models import (
     PanelUsageSnapshot,
     Plan,
     PlanInboundRoute,
+    QasedakBackupJob,
+    QasedakRestoreJob,
     Referral,
     ReferralRewardLedger,
     RevenueOfferLog,
@@ -82,6 +85,7 @@ from .models import (
     WebTelegramLinkToken,
     DailyAdminReportLog,
 )
+from .orchestrator_v2.models import ServerNode, TenantInstance
 from .admin_setup import (
     active_sales_inbounds,
     active_sellable_plans,
@@ -91,9 +95,11 @@ from .admin_setup import (
     missing_route_labels,
     setup_wizard_index_url,
 )
+from .deployment.owner_toolkit import OwnerToolkitError, TenantOwnerToolkit
 from .admin_revenue import revenue_control_url
+from .admin_campaigns import campaign_review_url, masked_target_label, recipient_error_label
 from .admin_support_services import customer_message_url, sanitize_support_message, support_review_url
-from .broadcast_services import create_campaign_recipients, resolve_campaign_recipients, send_campaign
+from .broadcast_services import create_campaign_recipients, resolve_campaign_recipients
 from .legacy_wizwiz_import_services import (
     analyze_wizwiz_import_job,
     apply_wizwiz_import_job,
@@ -143,7 +149,7 @@ from .plan_route_services import (
     normalize_plan_ids,
     preview_bulk_plan_routes,
 )
-from .xui_api import sync_inbound_data
+from .xui_api import mask_xui_value, sync_inbound_data
 
 
 User = get_user_model()
@@ -152,6 +158,20 @@ admin.site.site_header = _("VPN Store Administration")
 admin.site.site_title = _("VPN Store Admin")
 admin.site.index_title = _("Operations dashboard")
 admin.site.index_template = "admin/dashboard.html"
+
+
+class ImportExportModelAdmin(BaseImportExportModelAdmin):
+    """Keep raw import/export surfaces for superusers only."""
+
+    def has_import_permission(self, request):
+        parent = getattr(super(), "has_import_permission", None)
+        allowed = parent(request) if parent else True
+        return bool(getattr(request.user, "is_superuser", False) and allowed)
+
+    def has_export_permission(self, request):
+        parent = getattr(super(), "has_export_permission", None)
+        allowed = parent(request) if parent else True
+        return bool(getattr(request.user, "is_superuser", False) and allowed)
 
 
 def format_usage_bytes(value):
@@ -254,17 +274,113 @@ class UserAdmin(ImportExportModelAdmin, DjangoUserAdmin):
     resource_class = UserResource
     list_display = (
         "username",
-        "email",
-        "first_name",
-        "last_name",
+        "staff_display_name",
+        "masked_staff_email",
+        "staff_role_display",
         "is_staff",
         "is_active",
         "last_login",
+        "quick_staff_review",
     )
     list_filter = ("is_staff", "is_superuser", "is_active", "groups")
     search_fields = ("username", "email", "first_name", "last_name")
     date_hierarchy = "date_joined"
     ordering = ("username",)
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("groups")
+
+    def has_module_permission(self, request):
+        if request.user.is_superuser:
+            return True
+        return user_has_capability(request.user, "staff.view") or user_has_capability(request.user, "staff.manage")
+
+    def has_view_permission(self, request, obj=None):
+        if request.user.is_superuser:
+            return True
+        return user_has_capability(request.user, "staff.view") or user_has_capability(request.user, "staff.manage")
+
+    def has_add_permission(self, request):
+        return bool(request.user.is_superuser)
+
+    def has_change_permission(self, request, obj=None):
+        return bool(request.user.is_superuser)
+
+    def has_delete_permission(self, request, obj=None):
+        return bool(request.user.is_superuser)
+
+    def get_fieldsets(self, request, obj=None):
+        if request.user.is_superuser:
+            return super().get_fieldsets(request, obj)
+        return (
+            (
+                _("Profile"),
+                {
+                    "fields": (
+                        "username",
+                        "staff_display_name",
+                        "masked_staff_email",
+                        "is_active",
+                        "is_staff",
+                        "last_login",
+                        "date_joined",
+                    )
+                },
+            ),
+            (
+                _("Qasedak access"),
+                {
+                    "fields": (
+                        "staff_role_display",
+                        "quick_staff_review",
+                    )
+                },
+            ),
+        )
+
+    def get_readonly_fields(self, request, obj=None):
+        if request.user.is_superuser:
+            return super().get_readonly_fields(request, obj)
+        return (
+            "username",
+            "staff_display_name",
+            "masked_staff_email",
+            "is_active",
+            "is_staff",
+            "last_login",
+            "date_joined",
+            "staff_role_display",
+            "quick_staff_review",
+        )
+
+    @admin.display(description=_("Display name"), ordering="first_name")
+    def staff_display_name(self, obj):
+        name = obj.get_full_name().strip()
+        return name or obj.username
+
+    @admin.display(description=_("Email"))
+    def masked_staff_email(self, obj):
+        return mask_staff_email(obj.email) or "-"
+
+    @admin.display(description=_("Qasedak role"))
+    def staff_role_display(self, obj):
+        if obj.is_superuser:
+            return format_html('<span class="badge bg-danger">{}</span>', _("superuser"))
+        roles = get_user_product_roles(obj)
+        if not roles:
+            return format_html('<span class="badge bg-warning text-dark">{}</span>', _("No product role"))
+        return format_html_join(
+            " ",
+            '<span class="badge bg-info text-dark">{}</span>',
+            ((role["label"],) for role in roles),
+        )
+
+    @admin.display(description=_("Staff Center"))
+    def quick_staff_review(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        url = reverse("admin_store_staff_review", args=[obj.pk])
+        return format_html('<a class="button" href="{}">{}</a>', url, _("Review"))
 
 
 @admin.register(Group)
@@ -274,6 +390,21 @@ class GroupAdmin(ImportExportModelAdmin, DjangoGroupAdmin):
     list_filter = ("permissions__content_type__app_label",)
     search_fields = ("name",)
     ordering = ("name",)
+
+    def has_module_permission(self, request):
+        return bool(request.user.is_superuser)
+
+    def has_view_permission(self, request, obj=None):
+        return bool(request.user.is_superuser)
+
+    def has_add_permission(self, request):
+        return bool(request.user.is_superuser)
+
+    def has_change_permission(self, request, obj=None):
+        return bool(request.user.is_superuser)
+
+    def has_delete_permission(self, request, obj=None):
+        return bool(request.user.is_superuser)
 
 
 class StoreAdminForm(forms.ModelForm):
@@ -373,6 +504,30 @@ class StoreAdmin(ImportExportModelAdmin):
 
     def get_fieldsets(self, request, obj=None):
         revenue_url = revenue_control_url(obj)
+        if self.has_change_permission(request, obj):
+            payment_fields = (
+                "card_number_status",
+                "card_number",
+                "card_owner",
+                "bank_name",
+                "sheba_number",
+                "receipt_image_only_payment",
+                "payment_sms_time_zone",
+                "new_smsforwarder_webhook_token",
+                "sms_webhook_token_status",
+                "sms_webhook_token_rotation_help",
+            )
+        else:
+            payment_fields = (
+                "card_number_status",
+                "card_owner",
+                "bank_name",
+                "sheba_number",
+                "receipt_image_only_payment",
+                "payment_sms_time_zone",
+                "sms_webhook_token_status",
+                "sms_webhook_token_rotation_help",
+            )
         return (
             (
                 _("Quick Setup / وضعیت کلی"),
@@ -397,18 +552,7 @@ class StoreAdmin(ImportExportModelAdmin):
             (
                 _("Payment"),
                 {
-                    "fields": (
-                        "card_number_status",
-                        "card_number",
-                        "card_owner",
-                        "bank_name",
-                        "sheba_number",
-                        "receipt_image_only_payment",
-                        "payment_sms_time_zone",
-                        "new_smsforwarder_webhook_token",
-                        "sms_webhook_token_status",
-                        "sms_webhook_token_rotation_help",
-                    ),
+                    "fields": payment_fields,
                     "description": _("شماره کارت و توکن‌ها کامل نمایش داده نمی‌شوند؛ برای تغییر، مقدار جدید را وارد کن."),
                 },
             ),
@@ -928,6 +1072,61 @@ class BotConfigurationAdmin(ImportExportModelAdmin):
         ),
     )
     actions = ("send_test_message", "send_sales_report_now")
+
+    def get_fieldsets(self, request, obj=None):
+        if self.has_change_permission(request, obj):
+            return super().get_fieldsets(request, obj)
+        return (
+            (
+                _("Connection"),
+                {
+                    "fields": (
+                        "name",
+                        "store",
+                        "provider",
+                        "telegram_bot_username",
+                        "token_status",
+                        "is_active",
+                    )
+                },
+            ),
+            (
+                _("Telegram force join"),
+                {
+                    "fields": (
+                        "force_telegram_channel_join",
+                        "telegram_required_channel_username",
+                        "force_join_configuration_warning",
+                    )
+                },
+            ),
+            (
+                _("Notifications"),
+                {
+                    "fields": (
+                        "notify_new_orders",
+                        "notify_order_updates",
+                        "send_sales_reports",
+                        "report_interval_hours",
+                        "last_report_sent_at",
+                    )
+                },
+            ),
+            (
+                _("Webhook"),
+                {
+                    "classes": ("collapse",),
+                    "fields": ("masked_webhook_secret", "webhook_path_hint"),
+                },
+            ),
+            (
+                _("Diagnostics"),
+                {
+                    "classes": ("collapse",),
+                    "fields": ("event_logs_link", "last_error", "created_at", "updated_at"),
+                },
+            ),
+        )
 
     @admin.display(description=_("Bot token"))
     def token_status(self, obj):
@@ -2061,16 +2260,25 @@ class PanelAdmin(ImportExportModelAdmin):
         "masked_url",
         "is_active",
         "panel_health_status",
+        "compatibility_profile_status",
         "credential_status",
         "uses_proxy",
         "inbounds_link",
         "last_sync_at",
     )
-    list_filter = ("store", "is_active")
+    list_filter = ("store", "is_active", "capability_profile")
     search_fields = ("name", "url", "username", "proxy_url")
     date_hierarchy = "created_at"
     list_select_related = ("store",)
-    readonly_fields = ("credential_status", "proxy_status", "inbounds_link", "created_at", "updated_at")
+    readonly_fields = (
+        "masked_url",
+        "credential_status",
+        "proxy_status",
+        "inbounds_link",
+        "compatibility_metadata_summary",
+        "created_at",
+        "updated_at",
+    )
     fieldsets = (
         (
             _("Connection"),
@@ -2099,8 +2307,50 @@ class PanelAdmin(ImportExportModelAdmin):
                 "fields": ("inbounds_link", "last_sync_at", "created_at", "updated_at"),
             },
         ),
+        (
+            _("X-UI compatibility"),
+            {
+                "fields": (
+                    "detected_xui_version",
+                    "capability_profile",
+                    "last_capability_check_at",
+                    "compatibility_metadata_summary",
+                ),
+            },
+        ),
     )
     actions = ("run_health_check",)
+
+    def get_fieldsets(self, request, obj=None):
+        if self.has_change_permission(request, obj):
+            return super().get_fieldsets(request, obj)
+        return (
+            (
+                _("Connection"),
+                {
+                    "fields": (
+                        "name",
+                        "store",
+                        "masked_url",
+                        "credential_status",
+                        "is_active",
+                    )
+                },
+            ),
+            (
+                _("Proxy"),
+                {
+                    "classes": ("collapse",),
+                    "fields": ("proxy_status",),
+                },
+            ),
+            (
+                _("Operations"),
+                {
+                    "fields": ("inbounds_link", "last_sync_at", "created_at", "updated_at"),
+                },
+            ),
+        )
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("health_status").annotate(admin_inbound_count=Count("inbounds"))
@@ -2150,6 +2400,33 @@ class PanelAdmin(ImportExportModelAdmin):
             PanelHealthStatus.Status.DISABLED: "bg-secondary",
         }.get(health_status.status, "bg-secondary")
         return format_html('<span class="badge {}">{}</span>', tone, health_status.get_status_display())
+
+    @admin.display(description=_("Compatibility"), ordering="capability_profile")
+    def compatibility_profile_status(self, obj):
+        profile = obj.capability_profile or _("Legacy/undetected")
+        tone = {
+            Panel.CapabilityProfile.LEGACY_SINGLE_NODE: "bg-success",
+            Panel.CapabilityProfile.MODERN_SINGLE_NODE: "bg-warning text-dark",
+            Panel.CapabilityProfile.MODERN_MULTI_NODE: "bg-warning text-dark",
+            Panel.CapabilityProfile.UNKNOWN_SAFE: "bg-danger",
+        }.get(obj.capability_profile, "bg-secondary")
+        version = obj.detected_xui_version or "-"
+        return format_html('<span class="badge {}">{}</span> <span>{}</span>', tone, profile, version)
+
+    @admin.display(description=_("Compatibility metadata"))
+    def compatibility_metadata_summary(self, obj):
+        metadata = obj.capability_metadata or {}
+        if not metadata:
+            return "-"
+        return _(
+            "nodes=%(nodes)s hosts=%(hosts)s inbounds=%(inbounds)s source=%(source)s checked_at=%(checked_at)s"
+        ) % {
+            "nodes": metadata.get("node_count", 0),
+            "hosts": metadata.get("host_count", 0),
+            "inbounds": metadata.get("inbound_count", 0),
+            "source": metadata.get("source", "-"),
+            "checked_at": metadata.get("checked_at", "-"),
+        }
 
     @admin.display(description=_("Latest daily usage"))
     def latest_daily_usage(self, obj):
@@ -2512,7 +2789,10 @@ class OrderDeliveryStatusFilter(admin.SimpleListFilter):
     def queryset(self, request, queryset):
         value = self.value()
         if value == "pending":
-            return queryset.filter(status__in=[Order.Status.PENDING_PAYMENT, Order.Status.PENDING_VERIFICATION])
+            return queryset.filter(
+                Q(status__in=[Order.Status.PENDING_PAYMENT, Order.Status.PENDING_VERIFICATION])
+                | Q(provisioning_status__in=[Order.ProvisioningStatus.PENDING, Order.ProvisioningStatus.PROVISIONING])
+            )
         if value == "ready":
             return queryset.filter(vpn_clients__status__in=[VPNClient.Status.CREATED, VPNClient.Status.INACTIVE]).distinct()
         if value == "active":
@@ -2521,6 +2801,7 @@ class OrderDeliveryStatusFilter(admin.SimpleListFilter):
             return queryset.filter(
                 Q(metadata__panel_provisioning_deferred=True)
                 | Q(metadata__panel_provisioning_last_failed_at__isnull=False)
+                | Q(provisioning_status=Order.ProvisioningStatus.FAILED)
                 | Q(vpn_clients__status=VPNClient.Status.ERROR)
                 | Q(status__in=[Order.Status.CONFIRMED, Order.Status.COMPLETED], inbound__isnull=True)
                 | Q(status=Order.Status.COMPLETED, vpn_clients__isnull=True)
@@ -2661,6 +2942,7 @@ class OrderAdmin(ImportExportModelAdmin):
     list_filter = (
         "status",
         "verification_status",
+        "provisioning_status",
         OrderDeliveryStatusFilter,
         "store",
         ("plan", admin.RelatedOnlyFieldListFilter),
@@ -2710,6 +2992,11 @@ class OrderAdmin(ImportExportModelAdmin):
         "owner_customer",
         "payment_status_badge",
         "delivery_status_badge",
+        "provisioning_status",
+        "provisioning_attempts",
+        "last_provisioning_error",
+        "provisioned_at",
+        "provisioning_idempotency_key",
         "quick_review_link",
         "verified_at",
     )
@@ -2782,6 +3069,10 @@ class OrderAdmin(ImportExportModelAdmin):
             {
                 "fields": (
                     "delivery_status_badge",
+                    "provisioning_status",
+                    "provisioning_attempts",
+                    "last_provisioning_error",
+                    "provisioned_at",
                     "inbound",
                     "username",
                     "masked_config_links",
@@ -2798,6 +3089,7 @@ class OrderAdmin(ImportExportModelAdmin):
                     "payment_gateway",
                     "gateway_authority",
                     "gateway_reference_id",
+                    "provisioning_idempotency_key",
                     "metadata_safe_summary",
                 ),
             },
@@ -2879,6 +3171,10 @@ class OrderAdmin(ImportExportModelAdmin):
         metadata = obj.metadata or {}
         if obj.status in {Order.Status.REJECTED, Order.Status.CANCELLED}:
             return _("Stopped"), "secondary"
+        if obj.provisioning_status == Order.ProvisioningStatus.FAILED:
+            return _("Provisioning failed"), "danger"
+        if obj.provisioning_status in {Order.ProvisioningStatus.PENDING, Order.ProvisioningStatus.PROVISIONING} and obj.is_paid:
+            return _("Awaiting provisioning"), "warning"
         if metadata.get("panel_provisioning_deferred") or metadata.get("panel_provisioning_last_failed_at"):
             return _("Provisioning failed"), "danger"
         clients = list(obj.vpn_clients.all())
@@ -2933,6 +3229,7 @@ class OrderAdmin(ImportExportModelAdmin):
             "panel_provisioning_deferred",
             "panel_provisioning_reason",
             "panel_provisioning_missing_clients",
+            "provisioning_strategy",
             "renewed_at",
         )
         rows = [(key, metadata.get(key)) for key in safe_keys if metadata.get(key) not in (None, "", False)]
@@ -3156,6 +3453,7 @@ class InboundAdmin(ImportExportModelAdmin):
         "display_name",
         "panel_status",
         "xui_inbound_id",
+        "xui_node_scope",
         "protocol",
         "is_active",
         "available_for_new_orders",
@@ -3169,6 +3467,8 @@ class InboundAdmin(ImportExportModelAdmin):
         "available_for_new_orders",
         "health_monitor_enabled",
         "panel",
+        "xui_source",
+        "xui_node_id",
         "protocol",
         "panel__store",
         "network_type",
@@ -3179,6 +3479,9 @@ class InboundAdmin(ImportExportModelAdmin):
         "legacy_note",
         "server_ip",
         "port",
+        "xui_node_name",
+        "xui_node_id",
+        "xui_remote_key",
         "=inbound_id",
         "panel__name",
         "panel__url",
@@ -3192,6 +3495,7 @@ class InboundAdmin(ImportExportModelAdmin):
         "sales_readiness",
         "active_plan_route_count",
         "active_route_warning",
+        "xui_remote_scope",
         "created_at",
         "updated_at",
     )
@@ -3228,6 +3532,19 @@ class InboundAdmin(ImportExportModelAdmin):
             },
         ),
         (
+            _("X-UI scope"),
+            {
+                "fields": (
+                    "xui_source",
+                    "xui_node_id",
+                    "xui_node_name",
+                    "xui_remote_key",
+                    "xui_remote_scope",
+                    "is_synced_from_node",
+                ),
+            },
+        ),
+        (
             _("Technical details"),
             {
                 "classes": ("collapse",),
@@ -3258,6 +3575,64 @@ class InboundAdmin(ImportExportModelAdmin):
     )
     actions = ["sync_from_panel", "mark_as_legacy", "enable_for_new_orders_and_health"]
 
+    def get_fieldsets(self, request, obj=None):
+        if self.has_change_permission(request, obj):
+            return super().get_fieldsets(request, obj)
+        return (
+            (
+                _("Summary"),
+                {
+                    "fields": (
+                        "panel",
+                        "inbound_id",
+                        "remark",
+                        "protocol",
+                        "sales_readiness",
+                        "active_plan_route_count",
+                        "is_active",
+                    )
+                },
+            ),
+            (
+                _("Sales availability"),
+                {
+                    "fields": (
+                        "available_for_new_orders",
+                        "max_clients",
+                        "current_users",
+                        "active_route_warning",
+                    )
+                },
+            ),
+            (
+                _("Health monitoring"),
+                {
+                    "fields": ("health_monitor_enabled", "last_synced_at"),
+                },
+            ),
+            (
+                _("Technical details"),
+                {
+                    "classes": ("collapse",),
+                    "fields": (
+                        "server_ip",
+                        "port",
+                        "network_type",
+                        "security",
+                        "created_at",
+                        "updated_at",
+                    ),
+                },
+            ),
+            (
+                _("Legacy"),
+                {
+                    "classes": ("collapse",),
+                    "fields": ("legacy_note",),
+                },
+            ),
+        )
+
     @admin.display(description=_("Name"))
     def display_name(self, obj):
         label = obj.remark or f"Inbound {obj.inbound_id}"
@@ -3281,6 +3656,17 @@ class InboundAdmin(ImportExportModelAdmin):
     @admin.display(description=_("X-UI inbound ID"), ordering="inbound_id")
     def xui_inbound_id(self, obj):
         return obj.inbound_id
+
+    @admin.display(description=_("Node"), ordering="xui_node_id")
+    def xui_node_scope(self, obj):
+        node = obj.xui_node_name or obj.xui_node_id
+        if not node:
+            return format_html('<span class="badge bg-secondary">{}</span>', _("local"))
+        return format_html('<span class="badge bg-info">{}</span>', mask_xui_value(node))
+
+    @admin.display(description=_("X-UI remote scope"))
+    def xui_remote_scope(self, obj):
+        return mask_xui_value(obj.xui_remote_scope_key)
 
     def get_queryset(self, request):
         return (
@@ -4541,6 +4927,9 @@ class LegacyWizWizImportJobAdmin(ImportExportModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return False
 
+    def has_delete_permission(self, request, obj=None):
+        return False
+
     def get_fieldsets(self, request, obj=None):
         file_field = "uploaded_file" if obj is None else "private_file_display"
         return (
@@ -4685,6 +5074,7 @@ class LegacyWizWizImportJobAdmin(ImportExportModelAdmin):
                 "legacy_apply_url": reverse("admin:store_legacywizwizimportjob_apply", args=[object_id]),
                 "legacy_export_csv_url": reverse("admin:store_legacywizwizimportjob_export_csv", args=[object_id]),
                 "legacy_message_url": reverse("admin:store_legacywizwizimportjob_message", args=[object_id]),
+                "legacy_campaign_url": f"{reverse('admin_store_campaign_new')}?{urlencode({'audience': BroadcastMessage.AudienceType.LEGACY_WIZWIZ_IMPORTED})}",
                 "legacy_message_form": LegacyWizWizImportMessageForm(),
             }
         )
@@ -4934,6 +5324,9 @@ class LegacyWizWizImportRowAdmin(ImportExportModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return False
 
+    def has_delete_permission(self, request, obj=None):
+        return False
+
 
 class LegacyWizWizImportMessageRecipientInline(admin.TabularInline):
     model = LegacyWizWizImportMessageRecipient
@@ -5072,29 +5465,36 @@ class BroadcastRecipientInline(admin.TabularInline):
     model = BroadcastRecipient
     extra = 0
     can_delete = False
-    fields = ("customer", "channel", "target_identifier", "status", "error_message", "sent_at", "created_at")
+    fields = ("customer", "channel", "masked_target", "status", "safe_error", "sent_at", "created_at")
     readonly_fields = fields
     ordering = ("created_at", "pk")
 
     def has_add_permission(self, request, obj=None):
         return False
 
+    @admin.display(description=_("Target"))
+    def masked_target(self, obj):
+        return masked_target_label(obj)
+
+    @admin.display(description=_("Safe error"))
+    def safe_error(self, obj):
+        return recipient_error_label(obj)
+
 
 @admin.register(BroadcastMessage)
 class BroadcastMessageAdmin(ImportExportModelAdmin):
     list_display = (
         "title",
-        "audience_type",
-        "channel",
+        "audience_label",
         "status",
         "recipients_total",
-        "success_count",
+        "sent_count",
         "failed_count",
-        "sent_at",
         "created_at",
+        "quick_review",
     )
-    list_filter = ("status", "audience_type", "channel", "created_at", "sent_at")
-    search_fields = ("title", "message_text", "metadata")
+    list_filter = ("status", "audience_type", "created_at")
+    search_fields = ("title", "=id")
     date_hierarchy = "created_at"
     autocomplete_fields = ("store",)
     readonly_fields = (
@@ -5103,6 +5503,7 @@ class BroadcastMessageAdmin(ImportExportModelAdmin):
         "success_count",
         "failed_count",
         "sent_at",
+        "metadata",
         "created_at",
         "updated_at",
     )
@@ -5113,7 +5514,6 @@ class BroadcastMessageAdmin(ImportExportModelAdmin):
                 "fields": (
                     "store",
                     "title",
-                    "message_text",
                     "audience_type",
                     "channel",
                     "status",
@@ -5123,6 +5523,10 @@ class BroadcastMessageAdmin(ImportExportModelAdmin):
             },
         ),
         (
+            _("Message"),
+            {"fields": ("message_text",)},
+        ),
+        (
             _("Delivery"),
             {
                 "fields": (
@@ -5130,9 +5534,12 @@ class BroadcastMessageAdmin(ImportExportModelAdmin):
                     "success_count",
                     "failed_count",
                     "sent_at",
-                    "metadata",
                 )
             },
+        ),
+        (
+            _("Advanced"),
+            {"classes": ("collapse",), "fields": ("metadata",)},
         ),
         (
             _("Timestamps"),
@@ -5140,11 +5547,23 @@ class BroadcastMessageAdmin(ImportExportModelAdmin):
         ),
     )
     inlines = (BroadcastRecipientInline,)
-    actions = ("queue_selected", "send_selected", "cancel_selected")
+    actions = ()
 
     @admin.display(description=_("Recipients"))
     def recipients_total(self, obj):
         return obj.total_recipients or obj.recipients.count()
+
+    @admin.display(description=_("Audience"))
+    def audience_label(self, obj):
+        return obj.get_audience_type_display()
+
+    @admin.display(description=_("Sent"))
+    def sent_count(self, obj):
+        return obj.success_count
+
+    @admin.display(description=_("Review"))
+    def quick_review(self, obj):
+        return format_html('<a href="{}">{}</a>', campaign_review_url(obj), _("Review"))
 
     @admin.display(description=_("Audience preview"))
     def audience_preview(self, obj):
@@ -5175,31 +5594,6 @@ class BroadcastMessageAdmin(ImportExportModelAdmin):
                 queued += 1
         messages.success(request, _("%(count)s campaign(s) queued.") % {"count": queued})
 
-    @admin.action(description=_("Send selected campaigns"))
-    def send_selected(self, request, queryset):
-        sent = 0
-        for campaign in queryset:
-            try:
-                campaign.full_clean()
-                send_campaign(campaign)
-            except ValidationError as exc:
-                messages.error(request, _("%(title)s was not sent: %(error)s") % {
-                    "title": campaign.title,
-                    "error": "; ".join(exc.messages),
-                })
-                continue
-            campaign.refresh_from_db()
-            sent += 1
-            messages.info(
-                request,
-                _("%(title)s: %(success)s sent, %(failed)s failed.") % {
-                    "title": campaign.title,
-                    "success": campaign.success_count,
-                    "failed": campaign.failed_count,
-                },
-            )
-        messages.success(request, _("%(count)s campaign(s) processed.") % {"count": sent})
-
     @admin.action(description=_("Cancel selected campaigns"))
     def cancel_selected(self, request, queryset):
         updated = queryset.exclude(status=BroadcastMessage.Status.SENT).update(
@@ -5213,33 +5607,49 @@ class BroadcastMessageAdmin(ImportExportModelAdmin):
 class BroadcastRecipientAdmin(ImportExportModelAdmin):
     list_display = (
         "campaign",
-        "customer",
-        "channel",
-        "target_identifier",
+        "target_summary",
         "status",
-        "error_summary",
+        "safe_error",
         "sent_at",
-        "created_at",
+        "campaign_review",
     )
     list_filter = ("status", "channel", "campaign__status", "created_at", "sent_at")
     search_fields = (
         "campaign__title",
-        "customer__display_name",
-        "customer__username",
-        "customer__phone_number",
-        "target_identifier",
-        "error_message",
+        "=id",
+        "=campaign__id",
+        "=customer__id",
     )
     autocomplete_fields = ("campaign", "customer")
-    readonly_fields = ("created_at", "updated_at", "sent_at")
+    readonly_fields = (
+        "campaign",
+        "customer",
+        "channel",
+        "target_summary",
+        "status",
+        "safe_error",
+        "sent_at",
+        "created_at",
+        "updated_at",
+    )
+    fields = readonly_fields
     date_hierarchy = "created_at"
     list_select_related = ("campaign", "customer")
 
-    @admin.display(description=_("Error"))
-    def error_summary(self, obj):
-        if not obj.error_message:
-            return "-"
-        return obj.error_message[:120]
+    def has_add_permission(self, request):
+        return False
+
+    @admin.display(description=_("Target"))
+    def target_summary(self, obj):
+        return f"Customer #{obj.customer_id or '-'} / {masked_target_label(obj)}"
+
+    @admin.display(description=_("Safe error"))
+    def safe_error(self, obj):
+        return recipient_error_label(obj)
+
+    @admin.display(description=_("Review"))
+    def campaign_review(self, obj):
+        return format_html('<a href="{}">{}</a>', campaign_review_url(obj.campaign), _("Review"))
 
 
 @admin.register(Referral)
@@ -5667,3 +6077,209 @@ class DailyAdminReportLogAdmin(ImportExportModelAdmin):
         "created_at",
         "sent_at",
     )
+
+
+@admin.register(QasedakBackupJob)
+class QasedakBackupJobAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "created_at",
+        "backup_type",
+        "status",
+        "file_name",
+        "file_size",
+        "includes_media",
+        "includes_env",
+        "created_by",
+    )
+    list_filter = ("status", "backup_type", "includes_media", "includes_env", "created_at")
+    search_fields = ("file_name", "sha256", "created_by__username")
+    readonly_fields = (
+        "created_by",
+        "created_at",
+        "backup_type",
+        "status",
+        "file_path",
+        "file_name",
+        "file_size",
+        "sha256",
+        "includes_media",
+        "includes_env",
+        "includes_system",
+        "safe_summary",
+        "error_message",
+        "completed_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(QasedakRestoreJob)
+class QasedakRestoreJobAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "created_at",
+        "uploaded_file_name",
+        "status",
+        "includes_media",
+        "includes_env",
+        "created_by",
+    )
+    list_filter = ("status", "includes_media", "includes_env", "created_at")
+    search_fields = ("uploaded_file_name", "uploaded_sha256", "created_by__username")
+    readonly_fields = (
+        "created_by",
+        "created_at",
+        "uploaded_file_path",
+        "uploaded_file_name",
+        "uploaded_sha256",
+        "status",
+        "validation_summary",
+        "restore_plan",
+        "pre_restore_backup_path",
+        "error_message",
+        "includes_env",
+        "includes_media",
+        "requires_service_restart",
+        "validated_at",
+        "restored_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ServerNode)
+class ServerNodeAdmin(admin.ModelAdmin):
+    list_display = ("name", "ip", "ssh_user", "ssh_port", "status", "max_instances", "current_instances", "updated_at")
+    list_filter = ("status", "credential_mode")
+    search_fields = ("name", "ip", "ssh_user")
+    readonly_fields = ("current_instances", "last_checked_at", "safe_metadata", "created_at", "updated_at")
+
+
+@admin.register(TenantInstance)
+class TenantInstanceAdmin(admin.ModelAdmin):
+    list_display = (
+        "tenant_id",
+        "status",
+        "deployment_status",
+        "subdomain",
+        "port",
+        "container_name",
+        "admin_url_link",
+        "updated_at",
+    )
+    list_filter = ("status", "deployment_status", "customer_domain_dns_status", "server_node")
+    search_fields = ("tenant_id", "subdomain", "container_name", "instance_url")
+    readonly_fields = (
+        "tenant_id",
+        "server_node",
+        "container_name",
+        "port",
+        "domain",
+        "subdomain",
+        "customer_domain",
+        "customer_domain_dns_status",
+        "status",
+        "deployment_status",
+        "instance_url",
+        "admin_url_link",
+        "credential_file_path",
+        "nginx_config_path",
+        "container_id",
+        "docker_image_version",
+        "last_deployed_at",
+        "last_health",
+        "runtime_state",
+        "error_message",
+        "created_by",
+        "created_at",
+        "updated_at",
+    )
+    actions = ("status_action", "restart_action", "suspend_action", "resume_action", "enable_https_action")
+
+    def has_add_permission(self, request):
+        return False
+
+    def admin_url_link(self, obj):
+        if not obj or not obj.instance_url:
+            return "-"
+        url = f"{obj.instance_url.rstrip('/')}/admin/"
+        return format_html('<a href="{}" target="_blank" rel="noopener">Open admin</a>', url)
+
+    admin_url_link.short_description = "Tenant admin"
+
+    def credential_file_path(self, obj):
+        return (obj.runtime_state or {}).get("admin_credentials_path", "-")
+
+    credential_file_path.short_description = "Credential file path"
+
+    def _toolkit(self):
+        return TenantOwnerToolkit()
+
+    def _run_for_queryset(self, request, queryset, action, label):
+        ok = 0
+        for tenant in queryset:
+            try:
+                action(tenant)
+                ok += 1
+            except OwnerToolkitError as exc:
+                self.message_user(request, f"{tenant.tenant_id}: {exc}", level=messages.ERROR)
+        if ok:
+            self.message_user(request, f"{label}: {ok} tenant(s) processed.", level=messages.SUCCESS)
+
+    @admin.action(description="Status")
+    def status_action(self, request, queryset):
+        toolkit = self._toolkit()
+
+        def run(tenant):
+            result = toolkit.tenant_status(tenant_id=tenant.tenant_id).safe_dict()
+            self.message_user(
+                request,
+                (
+                    f"{tenant.tenant_id}: status={result.get('status')} "
+                    f"container={result.get('container_status')} health={result.get('health_status')} "
+                    f"bot={result.get('bot_worker_status')} webhook={result.get('webhook_status')} "
+                    f"setup={result.get('setup_status')} https={result.get('https_status')}"
+                ),
+                level=messages.INFO,
+            )
+
+        self._run_for_queryset(request, queryset, run, "Status")
+
+    @admin.action(description="Restart")
+    def restart_action(self, request, queryset):
+        toolkit = self._toolkit()
+        self._run_for_queryset(request, queryset, lambda tenant: toolkit.restart_tenant(tenant_id=tenant.tenant_id), "Restart")
+
+    @admin.action(description="Suspend")
+    def suspend_action(self, request, queryset):
+        toolkit = self._toolkit()
+        self._run_for_queryset(
+            request,
+            queryset,
+            lambda tenant: toolkit.suspend_tenant(tenant_id=tenant.tenant_id, reason="Suspended from Django Admin"),
+            "Suspend",
+        )
+
+    @admin.action(description="Resume")
+    def resume_action(self, request, queryset):
+        toolkit = self._toolkit()
+        self._run_for_queryset(request, queryset, lambda tenant: toolkit.resume_tenant(tenant_id=tenant.tenant_id), "Resume")
+
+    @admin.action(description="Enable HTTPS")
+    def enable_https_action(self, request, queryset):
+        toolkit = self._toolkit()
+        self._run_for_queryset(
+            request,
+            queryset,
+            lambda tenant: toolkit.enable_https(tenant_id=tenant.tenant_id, email="admin@panelwpvideo.ir"),
+            "Enable HTTPS",
+        )

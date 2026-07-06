@@ -10,11 +10,21 @@ OUTPUT_DIR=""
 DRY_RUN=0
 YES=0
 INCLUDE_MEDIA=0
+INCLUDE_ENV=0
+INCLUDE_SYSTEM=0
 COMPRESS=1
 KEEP_LAST=""
 VERBOSE=0
-BACKUP_PREFIX="vpn-store-backup"
+BACKUP_PREFIX="qasedak-backup"
 TEMP_STAGE=""
+DATABASE_ENGINE=""
+DB_PATH=""
+POSTGRES_DB=""
+POSTGRES_USER=""
+POSTGRES_PASSWORD=""
+POSTGRES_HOST=""
+POSTGRES_PORT=""
+POSTGRES_SSLMODE=""
 
 on_error() {
   local line="$1"
@@ -35,8 +45,12 @@ Options:
   --yes               Accept confirmation prompts.
   --include-media     Include <install-dir>/media in the archive.
   --exclude-media     Exclude media files. Default.
+  --include-env       Include .env and install.config.json under env/. Off by default.
+  --exclude-env       Exclude env files. Default.
+  --include-system    Include generated systemd/nginx reference files. Off by default.
+  --exclude-system    Exclude system reference files. Default.
   --compress          Write a gzip-compressed tar archive. Default.
-  --keep-last N       Keep only the newest N vpn-store-backup-*.tar.gz files.
+  --keep-last N       Keep only the newest N qasedak-backup-*.tar.gz files.
   --verbose           Print extra non-secret diagnostic detail.
   -h, --help          Show this help.
 EOF
@@ -97,6 +111,18 @@ parse_args() {
       --exclude-media)
         INCLUDE_MEDIA=0
         ;;
+      --include-env)
+        INCLUDE_ENV=1
+        ;;
+      --exclude-env)
+        INCLUDE_ENV=0
+        ;;
+      --include-system)
+        INCLUDE_SYSTEM=1
+        ;;
+      --exclude-system)
+        INCLUDE_SYSTEM=0
+        ;;
       --compress)
         COMPRESS=1
         ;;
@@ -151,6 +177,38 @@ for line in lines:
 PY
 }
 
+env_or_file() {
+  local key="$1"
+  local env_path="$2"
+  local value="${!key:-}"
+  if [[ -z "$value" ]]; then
+    value="$(env_value "$env_path" "$key")"
+  fi
+  printf '%s' "$value"
+}
+
+normalize_database_engine() {
+  local engine="${1:-sqlite}"
+  engine="${engine,,}"
+  case "$engine" in
+    sqlite|sqlite3)
+      printf 'sqlite'
+      ;;
+    postgres|postgresql)
+      printf 'postgres'
+      ;;
+    *)
+      die "Unsupported DATABASE_ENGINE: $engine"
+      ;;
+  esac
+}
+
+validate_pg_identifier() {
+  local label="$1"
+  local value="$2"
+  [[ "$value" =~ ^[a-zA-Z0-9_]+$ ]] || die "$label may contain only letters, numbers, and underscores."
+}
+
 absolute_path() {
   local path="$1"
   local base="$2"
@@ -164,17 +222,43 @@ absolute_path() {
 resolve_paths() {
   OUTPUT_DIR="${OUTPUT_DIR:-$INSTALL_DIR/backups}"
   local env_path="$INSTALL_DIR/.env"
-  local db_path="${SQLITE_DATABASE_PATH:-}"
-  if [[ -z "$db_path" ]]; then
-    db_path="$(env_value "$env_path" SQLITE_DATABASE_PATH)"
+  DATABASE_ENGINE="$(normalize_database_engine "$(env_or_file DATABASE_ENGINE "$env_path")")"
+  if [[ "$DATABASE_ENGINE" == "sqlite" ]]; then
+    local db_path
+    db_path="$(env_or_file SQLITE_DATABASE_PATH "$env_path")"
+    db_path="${db_path:-$INSTALL_DIR/data/db.sqlite3}"
+    DB_PATH="$(absolute_path "$db_path" "$INSTALL_DIR")"
+    return 0
   fi
-  db_path="${db_path:-$INSTALL_DIR/data/db.sqlite3}"
-  DB_PATH="$(absolute_path "$db_path" "$INSTALL_DIR")"
+  POSTGRES_DB="$(env_or_file POSTGRES_DB "$env_path")"
+  POSTGRES_USER="$(env_or_file POSTGRES_USER "$env_path")"
+  POSTGRES_PASSWORD="$(env_or_file POSTGRES_PASSWORD "$env_path")"
+  POSTGRES_HOST="$(env_or_file POSTGRES_HOST "$env_path")"
+  POSTGRES_PORT="$(env_or_file POSTGRES_PORT "$env_path")"
+  POSTGRES_SSLMODE="$(env_or_file POSTGRES_SSLMODE "$env_path")"
+  POSTGRES_DB="${POSTGRES_DB:-qasedak}"
+  POSTGRES_USER="${POSTGRES_USER:-qasedak}"
+  POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"
+  POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+  POSTGRES_SSLMODE="${POSTGRES_SSLMODE:-prefer}"
 }
 
 validate_inputs() {
   [[ -d "$INSTALL_DIR" ]] || die "Install directory not found: $INSTALL_DIR"
-  [[ -f "$DB_PATH" ]] || die "SQLite database not found: $DB_PATH"
+  if [[ "$DATABASE_ENGINE" == "sqlite" ]]; then
+    [[ -f "$DB_PATH" ]] || die "SQLite database not found: $DB_PATH"
+  else
+    validate_pg_identifier "PostgreSQL database name" "$POSTGRES_DB"
+    validate_pg_identifier "PostgreSQL user name" "$POSTGRES_USER"
+    [[ "$POSTGRES_PORT" =~ ^[0-9]+$ ]] || die "PostgreSQL port must be numeric."
+    if (( DRY_RUN )); then
+      [[ -n "$POSTGRES_PASSWORD" ]] || warn "POSTGRES_PASSWORD is not set; a real PostgreSQL backup would fail."
+      command -v pg_dump >/dev/null 2>&1 || warn "pg_dump is not installed; a real PostgreSQL backup would fail."
+    else
+      [[ -n "$POSTGRES_PASSWORD" ]] || die "POSTGRES_PASSWORD is required for PostgreSQL backups."
+      command -v pg_dump >/dev/null 2>&1 || die "pg_dump is required for PostgreSQL backups."
+    fi
+  fi
   if [[ -n "$KEEP_LAST" && "$KEEP_LAST" == "0" ]]; then
     warn "--keep-last 0 would remove all matching backup archives after this run."
   fi
@@ -184,12 +268,18 @@ print_plan() {
   log "Backup plan:"
   log "  install dir: $INSTALL_DIR"
   log "  output dir: $OUTPUT_DIR"
-  log "  database: $DB_PATH"
-  log "  include .env: $([[ -f "$INSTALL_DIR/.env" ]] && printf yes || printf no)"
-  log "  include install.config.json: $([[ -f "$INSTALL_DIR/install.config.json" ]] && printf yes || printf no)"
+  log "  database engine: $DATABASE_ENGINE"
+  if [[ "$DATABASE_ENGINE" == "sqlite" ]]; then
+    log "  database: $DB_PATH"
+  else
+    log "  database: postgres $POSTGRES_USER@$POSTGRES_HOST:$POSTGRES_PORT/$POSTGRES_DB"
+    log "  database dump: pg_dump -Fc to database/db.postgres.dump"
+  fi
+  log "  .env available: $([[ -f "$INSTALL_DIR/.env" ]] && printf yes || printf no)"
+  log "  include env files: $([[ "$INCLUDE_ENV" == "1" ]] && printf yes || printf no)"
   log "  include media: $([[ "$INCLUDE_MEDIA" == "1" ]] && printf yes || printf no)"
   log "  include static_root: no (rebuildable by collectstatic)"
-  log "  include generated systemd/nginx configs when present: yes"
+  log "  include generated systemd/nginx configs when present: $([[ "$INCLUDE_SYSTEM" == "1" ]] && printf yes || printf no)"
   if [[ -n "$KEEP_LAST" ]]; then
     log "  retention: keep newest $KEEP_LAST archives"
   fi
@@ -242,13 +332,26 @@ backup_sqlite() {
   fi
 }
 
+backup_postgres() {
+  local target="$1"
+  mkdir -p "$(dirname "$target")"
+  PGPASSWORD="$POSTGRES_PASSWORD" pg_dump \
+    -Fc \
+    -h "$POSTGRES_HOST" \
+    -p "$POSTGRES_PORT" \
+    -U "$POSTGRES_USER" \
+    -d "$POSTGRES_DB" \
+    -f "$target"
+  chmod 600 "$target"
+}
+
 collect_systemd_files() {
   local payload="$1"
   local found=0
   local unit=""
   shopt -s nullglob
   for unit in /etc/systemd/system/vpn-store*.service /etc/systemd/system/vpn-store*.timer; do
-    copy_file_into_payload "$unit" "systemd/$(basename "$unit")" "$payload"
+    copy_file_into_payload "$unit" "system/systemd/$(basename "$unit")" "$payload"
     found=1
   done
   shopt -u nullglob
@@ -263,7 +366,7 @@ collect_nginx_files() {
   local conf=""
   shopt -s nullglob
   for conf in /etc/nginx/sites-available/vpn-store*.conf /etc/nginx/sites-enabled/vpn-store*.conf; do
-    copy_file_into_payload "$conf" "nginx/${conf#/etc/nginx/}" "$payload"
+    copy_file_into_payload "$conf" "system/nginx/${conf#/etc/nginx/}" "$payload"
     found=1
   done
   shopt -u nullglob
@@ -281,7 +384,12 @@ write_manifest() {
   fi
   MANIFEST_TIMESTAMP="$BACKUP_TIMESTAMP" \
   MANIFEST_INSTALL_DIR="$INSTALL_DIR" \
+  MANIFEST_DB_ENGINE="$DATABASE_ENGINE" \
   MANIFEST_DB_PATH="$DB_PATH" \
+  MANIFEST_POSTGRES_DB="$POSTGRES_DB" \
+  MANIFEST_POSTGRES_USER="$POSTGRES_USER" \
+  MANIFEST_POSTGRES_HOST="$POSTGRES_HOST" \
+  MANIFEST_POSTGRES_PORT="$POSTGRES_PORT" \
   MANIFEST_GIT_COMMIT="$git_commit" \
   MANIFEST_INCLUDED_SECTIONS="$INCLUDED_SECTIONS" \
   python3 - "$payload" "$manifest" <<'PY'
@@ -295,7 +403,18 @@ from pathlib import Path
 
 payload = Path(sys.argv[1])
 manifest_path = Path(sys.argv[2])
-secret_re = re.compile(r"(secret|token|password|credential|api[_-]?key|private|webhook|card)", re.I)
+secret_re = re.compile(
+    r"(secret|token|password|credential|api[_-]?key|private|webhook|card|uuid|config|sub_?link|phone|email|chat)",
+    re.I,
+)
+secret_value_re = re.compile(
+    r"(?i)(vless|vmess|trojan)://|"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|"
+    r"\b\d{6,}:[A-Za-z0-9_-]{16,}\b|"
+    r"(?:\d[ -]?){16,19}|"
+    r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|"
+    r"\+?\d[\d\s().-]{7,}\d"
+)
 
 def sha256(path):
     h = hashlib.sha256()
@@ -307,6 +426,8 @@ def sha256(path):
 def redact_value(key, value):
     if secret_re.search(str(key)):
         return "[REDACTED]" if value not in ("", None) else ""
+    if isinstance(value, str) and secret_value_re.search(value):
+        return "[REDACTED]"
     return value
 
 def parse_env(path):
@@ -343,27 +464,87 @@ def parse_config(path):
         return {"error": f"could not parse config: {exc.__class__.__name__}"}
 
 checksums = {}
+db_size = 0
+media_count = 0
 for path in sorted(payload.rglob("*")):
-    if path == manifest_path or not path.is_file() or path.is_symlink():
+    if path == manifest_path or path.name == "checksums.sha256" or not path.is_file() or path.is_symlink():
         continue
-    checksums[str(path.relative_to(payload))] = sha256(path)
+    rel = str(path.relative_to(payload))
+    checksums[rel] = sha256(path)
+    if rel.startswith("database/"):
+        db_size += path.stat().st_size
+    if rel.startswith("media/"):
+        media_count += 1
+
+runtime_env = payload / "env" / "production.env"
+legacy_runtime_env = payload / "runtime" / ".env"
+env_preview = parse_env(runtime_env if runtime_env.exists() else legacy_runtime_env)
+engine = os.environ.get("MANIFEST_DB_ENGINE") or "sqlite"
+included_sections = [item for item in os.environ.get("MANIFEST_INCLUDED_SECTIONS", "").split(",") if item]
 
 manifest = {
+    "qasedak_backup_version": "1",
+    "created_at": os.environ["MANIFEST_TIMESTAMP"],
+    "app_version": "",
+    "git_commit": os.environ.get("MANIFEST_GIT_COMMIT") or None,
+    "django_settings_module": os.environ.get("DJANGO_SETTINGS_MODULE") or "",
+    "database_engine": engine,
+    "database_vendor": "postgresql" if engine == "postgres" else "sqlite",
+    "postgres_dump_format": "custom" if engine == "postgres" else "",
+    "database_name_redacted": os.environ.get("MANIFEST_POSTGRES_DB") and "[configured]",
+    "database_schema_migrations": {},
+    "backup_type": "full_transfer" if any(item in included_sections for item in ("env", "systemd", "nginx")) else ("db_and_media" if "media" in included_sections else "db_only"),
+    "includes_media": "media" in included_sections,
+    "includes_env": "env" in included_sections,
+    "includes_system": any(item in included_sections for item in ("systemd", "nginx")),
+    "media_file_count": media_count,
+    "db_size_bytes": db_size,
+    "archive_size_bytes": 0,
+    "created_by": os.environ.get("USER") or "",
+    "hostname": os.uname().nodename if hasattr(os, "uname") else "",
+    "install_dir": os.environ["MANIFEST_INSTALL_DIR"],
+    "revenue_engine_dry_run": None,
+    "allow_global_inbound_fallback": None,
+    "warnings": [],
+    "checksums": checksums,
+    "redaction_policy": "Manifest redacts secrets, credentials, card data, UUIDs, config links, subscription links, and direct contact identifiers.",
     "timestamp": os.environ["MANIFEST_TIMESTAMP"],
     "project": {
         "git_commit": os.environ.get("MANIFEST_GIT_COMMIT") or None,
     },
     "install_dir": os.environ["MANIFEST_INSTALL_DIR"],
+    "database": {
+        "engine": engine,
+        "path": os.environ.get("MANIFEST_DB_PATH") or None,
+        "postgres": {
+            "database": os.environ.get("MANIFEST_POSTGRES_DB") or None,
+            "user": os.environ.get("MANIFEST_POSTGRES_USER") or None,
+            "host": os.environ.get("MANIFEST_POSTGRES_HOST") or None,
+            "port": os.environ.get("MANIFEST_POSTGRES_PORT") or None,
+            "dump_file": "database/db.postgres.dump",
+            "dump_format": "custom",
+        } if engine == "postgres" else None,
+    },
     "database_path": os.environ["MANIFEST_DB_PATH"],
-    "included_sections": [item for item in os.environ.get("MANIFEST_INCLUDED_SECTIONS", "").split(",") if item],
+    "included_sections": included_sections,
     "file_checksums_sha256": checksums,
     "redacted_runtime": {
-        ".env": parse_env(payload / "runtime" / ".env"),
-        "install.config.json": parse_config(payload / "runtime" / "install.config.json"),
+        ".env": env_preview,
+        "install.config.json": parse_config(payload / "env" / "install.config.json"),
     },
 }
 manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
 PY
+}
+
+write_checksums() {
+  local payload="$1"
+  (
+    cd "$payload"
+    find . -type f ! -name checksums.sha256 -printf '%P\n' | sort | while IFS= read -r relative; do
+      sha256sum "$relative"
+    done > checksums.sha256
+  )
 }
 
 create_backup() {
@@ -379,25 +560,31 @@ create_backup() {
   install -d -m 0700 "$OUTPUT_DIR"
   stage="$(mktemp -d)"
   TEMP_STAGE="$stage"
-  payload="$stage/$archive_name"
+  payload="$stage/payload"
   mkdir -p "$payload"
 
   INCLUDED_SECTIONS=""
-  backup_sqlite "$DB_PATH" "$payload/database/db.sqlite3"
+  if [[ "$DATABASE_ENGINE" == "postgres" ]]; then
+    backup_postgres "$payload/database/db.postgres.dump"
+  else
+    backup_sqlite "$DB_PATH" "$payload/database/db.sqlite3"
+  fi
   add_section "database"
 
-  if [[ -f "$INSTALL_DIR/.env" ]]; then
-    copy_file_into_payload "$INSTALL_DIR/.env" "runtime/.env" "$payload"
-    add_section "env"
-  else
-    warn ".env not found; continuing without it."
-  fi
+  if (( INCLUDE_ENV )); then
+    if [[ -f "$INSTALL_DIR/.env" ]]; then
+      copy_file_into_payload "$INSTALL_DIR/.env" "env/production.env" "$payload"
+      add_section "env"
+    else
+      warn ".env not found; continuing without it."
+    fi
 
-  if [[ -f "$INSTALL_DIR/install.config.json" ]]; then
-    copy_file_into_payload "$INSTALL_DIR/install.config.json" "runtime/install.config.json" "$payload"
-    add_section "install_config"
-  else
-    warn "install.config.json not found; continuing without it."
+    if [[ -f "$INSTALL_DIR/install.config.json" ]]; then
+      copy_file_into_payload "$INSTALL_DIR/install.config.json" "env/install.config.json" "$payload"
+      add_section "install_config"
+    else
+      warn "install.config.json not found; continuing without it."
+    fi
   fi
 
   if (( INCLUDE_MEDIA )); then
@@ -409,12 +596,15 @@ create_backup() {
     fi
   fi
 
-  collect_systemd_files "$payload"
-  collect_nginx_files "$payload"
+  if (( INCLUDE_SYSTEM )); then
+    collect_systemd_files "$payload"
+    collect_nginx_files "$payload"
+  fi
   add_section "manifest"
   write_manifest "$payload"
+  write_checksums "$payload"
 
-  tar -C "$stage" -czf "$tmp_archive" "$archive_name"
+  find "$payload" -mindepth 1 -maxdepth 1 -printf '%P\0' | sort -z | tar -C "$payload" --null --files-from=- -czf "$tmp_archive"
   chmod 600 "$tmp_archive"
   mv "$tmp_archive" "$archive_path"
   chmod 600 "$archive_path"
@@ -440,7 +630,7 @@ from pathlib import Path
 directory = Path(sys.argv[1])
 keep = int(sys.argv[2])
 backups = sorted(
-    directory.glob("vpn-store-backup-*.tar.gz"),
+    list(directory.glob("qasedak-backup-*.tar.gz")) + list(directory.glob("vpn-store-backup-*.tar.gz")),
     key=lambda path: path.stat().st_mtime,
     reverse=True,
 )

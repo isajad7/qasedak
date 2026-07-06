@@ -1,6 +1,7 @@
 from django.urls import path
 from . import views
 from . import bot_views
+from .orchestrator_v2 import api as orchestrator_v2_api
 
 urlpatterns = [
     path('', views.home, name='home'),
@@ -23,5 +24,12 @@ urlpatterns = [
     path('config/<str:tracking_code>/<uuid:config_id>/', views.config_detail, name='legacy_config_detail'),
     path('config/<str:tracking_code>/<uuid:config_id>/usage/', views.config_usage, name='legacy_config_usage'),
     path('api/discount/preview/', views.discount_preview, name='discount_preview'),
+    path('orchestrator/v2/server/register', orchestrator_v2_api.register_server, name='orchestrator_v2_server_register'),
+    path('orchestrator/v2/instance/create', orchestrator_v2_api.create_instance, name='orchestrator_v2_instance_create'),
+    path('orchestrator/v2/instance/deploy', orchestrator_v2_api.deploy_instance, name='orchestrator_v2_instance_deploy'),
+    path('orchestrator/v2/instance/stop', orchestrator_v2_api.stop_instance, name='orchestrator_v2_instance_stop'),
+    path('orchestrator/v2/instance/restart', orchestrator_v2_api.restart_instance, name='orchestrator_v2_instance_restart'),
+    path('orchestrator/v2/instance/delete', orchestrator_v2_api.delete_instance, name='orchestrator_v2_instance_delete'),
+    path('orchestrator/v2/instance/status', orchestrator_v2_api.instance_status, name='orchestrator_v2_instance_status'),
     path('bot/<str:provider>/<str:webhook_secret>/webhook/', bot_views.bot_webhook, name='bot_webhook'),
 ]

@@ -1,0 +1,103 @@
+{
+  "legacy_2_9_inbound": {
+    "success": true,
+    "obj": {
+      "id": 1,
+      "remark": "legacy-main",
+      "protocol": "vless",
+      "port": 443,
+      "settings": "{\"clients\":[{\"id\":\"client-alpha-redacted\",\"email\":\"alice@example.test\",\"enable\":true}]}",
+      "clientStats": [
+        {
+          "email": "alice@example.test",
+          "up": 100,
+          "down": 200,
+          "total": 1000,
+          "enable": true
+        }
+      ]
+    }
+  },
+  "modern_3_3_node_inbound": {
+    "success": true,
+    "obj": {
+      "id": 1,
+      "remark": "node-main",
+      "protocol": "vless",
+      "nodeId": "node-alpha-redacted",
+      "shareAddrStrategy": "custom",
+      "shareAddr": "vpn.example.test",
+      "settings": "{\"clients\":[{\"id\":\"client-alpha-redacted\",\"email\":\"alice@example.test\",\"subId\":\"sub-alpha-redacted\",\"enable\":true}]}"
+    }
+  },
+  "modern_3_4_hosts": {
+    "success": true,
+    "obj": [
+      {
+        "inboundId": 1,
+        "address": "edge.example.test",
+        "port": 443,
+        "security": "tls",
+        "sni": "edge.example.test",
+        "hostHeader": "edge.example.test",
+        "path": "/ws",
+        "nodeGuids": ["node-alpha-redacted"],
+        "isDisabled": false,
+        "isHidden": false
+      }
+    ]
+  },
+  "offline_node": {
+    "success": true,
+    "obj": [
+      {
+        "guid": "node-alpha-redacted",
+        "name": "Node A",
+        "status": "offline",
+        "lastHeartbeat": 0,
+        "panelVersion": "3.4.0",
+        "xrayVersion": "unknown"
+      }
+    ]
+  },
+  "duplicate_inbound_ids": {
+    "local": [
+      {
+        "panel_id": 1,
+        "inbound_id": 1,
+        "xui_node_id": "",
+        "xui_source": "local"
+      },
+      {
+        "panel_id": 1,
+        "inbound_id": 1,
+        "xui_node_id": "node-alpha-redacted",
+        "xui_source": "synchronized_node"
+      }
+    ]
+  },
+  "same_email_multi_attachment": {
+    "success": true,
+    "obj": {
+      "client": {
+        "email": "alice@example.test",
+        "uuid": "client-alpha-redacted",
+        "enable": true
+      },
+      "inboundIds": [1, 2],
+      "usedTraffic": 300
+    }
+  },
+  "unknown_extra_fields": {
+    "success": true,
+    "obj": {
+      "id": 1,
+      "remark": "future-field-sample",
+      "protocol": "vless",
+      "nodeId": "node-alpha-redacted",
+      "futureField": {
+        "safe": true
+      }
+    }
+  }
+}

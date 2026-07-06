@@ -86,6 +86,7 @@ def _profile_subscription_clients(bot_user):
         VPNClient.objects.select_related("plan", "order", "inbound", "inbound__panel")
         .filter(
             order__customer=bot_user.customer,
+            deleted_at__isnull=True,
             status__in=[
                 VPNClient.Status.ACTIVE,
                 VPNClient.Status.INACTIVE,

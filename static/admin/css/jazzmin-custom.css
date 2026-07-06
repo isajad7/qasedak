@@ -63,3 +63,66 @@ html[dir="rtl"] .admin-metric-card .icon {
     max-width: 520px;
     list-style: none;
 }
+
+#jazzy-navbar .container-fluid {
+    flex-wrap: wrap;
+    gap: .35rem;
+}
+
+#jazzy-navbar .qasedak-navbar-search {
+    margin-inline-start: .35rem;
+    max-width: 190px;
+}
+
+#jazzy-navbar .qasedak-navbar-search .input-group {
+    min-width: 150px;
+}
+
+#jazzy-navbar .qasedak-navbar-search .form-control-navbar {
+    min-width: 0;
+}
+
+.live-region {
+    position: absolute !important;
+    left: auto !important;
+    right: auto !important;
+    top: auto !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
+    clip: rect(0 0 0 0) !important;
+    clip-path: inset(50%) !important;
+    white-space: nowrap !important;
+}
+
+@media (max-width: 991.98px) {
+    html[dir="rtl"] body.sidebar-collapse:not(.sidebar-open) .app-sidebar {
+        right: 0 !important;
+        left: auto !important;
+        margin-right: -250px !important;
+        margin-left: 0 !important;
+        transform: none !important;
+        visibility: hidden !important;
+    }
+
+    html[dir="rtl"] body.sidebar-open .app-sidebar {
+        right: 0 !important;
+        left: auto !important;
+        margin-right: 0 !important;
+        margin-left: 0 !important;
+        visibility: visible !important;
+    }
+}
+
+@media (max-width: 1199px) {
+    #jazzy-navbar .qasedak-navbar-search {
+        max-width: 165px;
+    }
+}
+
+@media (max-width: 767px) {
+    #jazzy-navbar .qasedak-navbar-search {
+        flex: 1 1 150px;
+        max-width: none;
+    }
+}

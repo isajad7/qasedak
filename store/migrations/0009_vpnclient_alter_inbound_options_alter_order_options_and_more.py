@@ -509,7 +509,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='order',
             name='order_tracking_code',
-            field=models.CharField(db_index=True, default=store.models.generate_order_tracking, max_length=10, unique=True),
+            field=models.CharField(db_index=True, default=store.models.generate_order_tracking, max_length=36, unique=True),
         ),
         migrations.AlterField(
             model_name='order',

@@ -13,6 +13,7 @@ from .jalali import format_jalali_datetime, persian_digits
 from .models import BotEventLog, Inbound, Panel, PanelHealthCheckLog, PanelHealthStatus, Store
 from .telegram_bot.redaction import sanitize_bot_event_log_value
 from .xui_api import XUIError, XUIService
+from .xui_compat import discover_xui_capabilities
 
 
 URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
@@ -161,7 +162,7 @@ def _ignored_summary_suffix(ignored_count):
 
 
 def _check_remote_inbound(service, inbound):
-    inbound_data = service.get_inbound(inbound.inbound_id, use_cache=False)
+    inbound_data = service.get_inbound(inbound, use_cache=False)
     issues = []
     remote_id = inbound_data.get("id")
     if remote_id is not None:
@@ -211,6 +212,54 @@ def _check_remote_inbound(service, inbound):
     return inbound_data, issues
 
 
+def _compatibility_health_metadata(profile=None, error=""):
+    metadata = {
+        "compatibility": {
+            "profile": getattr(profile, "profile", "") or "unknown",
+            "version": getattr(profile, "version", "") or "",
+            "node_count": 0,
+            "host_count": 0,
+            "source": "",
+            "error": error,
+        },
+        "node_issues": [],
+        "node_issue_count": 0,
+    }
+    if not profile:
+        return metadata, []
+    profile_metadata = profile.metadata or {}
+    nodes = profile_metadata.get("nodes") or []
+    node_issues = []
+    healthy_statuses = {"", "ok", "online", "running", "active", "connected", "healthy"}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        status = str(node.get("status") or "").strip().lower()
+        enabled = node.get("enabled")
+        if enabled is False:
+            continue
+        if status not in healthy_statuses:
+            node_issues.append(
+                {
+                    "node_id": node.get("external_node_id") or "",
+                    "node_name": node.get("name") or "",
+                    "status": status or "unknown",
+                    "message": "Node is not reporting an online/healthy status.",
+                }
+            )
+    metadata["compatibility"] = {
+        "profile": profile.profile,
+        "version": profile.version or "",
+        "node_count": profile_metadata.get("node_count", 0),
+        "host_count": profile_metadata.get("host_count", 0),
+        "source": profile_metadata.get("source", ""),
+        "error": error,
+    }
+    metadata["node_issues"] = node_issues[:20]
+    metadata["node_issue_count"] = len(node_issues)
+    return metadata, node_issues
+
+
 def build_panel_health_result(panel, *, settings=None):
     settings = settings or get_panel_monitor_settings(getattr(panel, "store", None))
     start = time.monotonic()
@@ -255,6 +304,16 @@ def build_panel_health_result(panel, *, settings=None):
         result["response_time_ms"] = int((time.monotonic() - start) * 1000)
         return result
 
+    try:
+        compatibility_profile = discover_xui_capabilities(panel, live=True, service=service, write=True, use_cache=False)
+        compatibility_metadata, node_issues = _compatibility_health_metadata(compatibility_profile)
+    except Exception as exc:
+        compatibility_profile = None
+        compatibility_metadata, node_issues = _compatibility_health_metadata(
+            None,
+            error=sanitize_operational_text(exc, panel=panel),
+        )
+
     all_active_inbounds = list(
         Inbound.objects.filter(panel=panel, is_active=True).order_by("inbound_id")
     )
@@ -271,7 +330,7 @@ def build_panel_health_result(panel, *, settings=None):
             login_ok=True,
             error_code="no_active_inbounds",
             error_message="هیچ اینباند فعال محلی پیدا نشد.",
-            metadata={"inbound_issues": [], "inbound_issue_count": 0, **ignored_metadata},
+            metadata={"inbound_issues": [], "inbound_issue_count": 0, **ignored_metadata, **compatibility_metadata},
         )
         result["inbounds_warning"] = 1
         result["response_time_ms"] = int((time.monotonic() - start) * 1000)
@@ -285,7 +344,7 @@ def build_panel_health_result(panel, *, settings=None):
             status=PanelHealthStatus.Status.OK,
             summary=f"ورود به پنل موفق بود؛ {persian_digits(ignored_count)} اینباند legacy/ignored نادیده گرفته شد.",
             login_ok=True,
-            metadata={"inbound_issues": [], "inbound_issue_count": 0, **ignored_metadata},
+            metadata={"inbound_issues": [], "inbound_issue_count": 0, **ignored_metadata, **compatibility_metadata},
         )
         result["response_time_ms"] = int((time.monotonic() - start) * 1000)
         return result
@@ -315,10 +374,23 @@ def build_panel_health_result(panel, *, settings=None):
             ok_count += 1
 
     issue_count = len(warnings) + len(errors)
+    if node_issues:
+        warnings.extend(
+            {
+                "inbound_id": "",
+                "remark": item.get("node_name") or item.get("node_id") or "",
+                "code": "node_unhealthy",
+                "message": item.get("message") or "Node health warning.",
+                "expected": "online",
+                "actual": item.get("status") or "unknown",
+            }
+            for item in node_issues[:20]
+        )
+        issue_count = len(warnings) + len(errors)
     if issue_count:
         status = PanelHealthStatus.Status.WARNING
         summary = (
-            f"ورود به پنل موفق بود؛ {persian_digits(issue_count)} مشکل در اینباندها دیده شد"
+            f"ورود به پنل موفق بود؛ {persian_digits(issue_count)} مشکل در node/اینباندها دیده شد"
             f"{_ignored_summary_suffix(len(ignored_inbounds))}."
         )
     else:
@@ -340,6 +412,7 @@ def build_panel_health_result(panel, *, settings=None):
             "inbound_issues": [*warnings, *errors][:20],
             "inbound_issue_count": issue_count,
             **ignored_metadata,
+            **compatibility_metadata,
         },
     )
     result["inbounds_checked"] = len(active_inbounds)

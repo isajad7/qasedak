@@ -1,16 +1,78 @@
 # Backup
 
-Use `scripts/backup.sh` before every real update and before risky maintenance. Backups contain secrets because they include `.env`; store them with restricted permissions and do not share archives publicly.
+Qasedak production backups are PostgreSQL-first. SQLite remains supported for development, small installs, and legacy rollback packages.
 
-## Dry-Run
+Backups can be created from Django Admin:
 
-```bash
-scripts/backup.sh --dry-run --install-dir /opt/qasedak --output-dir /opt/qasedak/backups --yes
+```text
+/admin/store/backups/
 ```
 
-Dry-run validates the install directory and database path, prints the plan, and writes nothing.
+The Admin page title is:
 
-## Create a Backup
+```text
+پشتیبان‌گیری و انتقال سرور
+```
+
+Admin-created archives are stored under the private backup root, not `media/` or `static/`:
+
+```text
+QASEDAK_PRIVATE_BACKUP_ROOT=/opt/qasedak/backups/admin_center
+```
+
+## Package Format
+
+Standard archive name:
+
+```text
+qasedak-backup-YYYYMMDD-HHMMSS.tar.gz
+```
+
+Required archive structure:
+
+```text
+manifest.json
+checksums.sha256
+database/
+  db.postgres.dump
+media/ optional
+env/
+  production.env optional
+system/
+  systemd/*.service optional
+  nginx/*.conf optional
+```
+
+SQLite legacy packages use:
+
+```text
+database/db.sqlite3
+```
+
+`manifest.json` records the backup version, timestamp, app/git metadata, DB engine/vendor, backup type, media/env/system flags, migration summary, file counts/sizes, warnings, and redaction policy. It must not contain raw secret keys, bot tokens, panel passwords, DB passwords, full card numbers, config links, UUIDs, full phone/email/chat IDs, or subscription links.
+
+`checksums.sha256` covers the archive payload files and is verified before any restore plan is built.
+
+## Backup Types
+
+- `فقط دیتابیس`: database only.
+- `دیتابیس + فایل‌ها`: database plus media.
+- `بسته انتقال سرور`: database, media, `.env`, install config, and system reference files when available.
+
+The `.env` option is useful for server migration, but the archive then contains secrets. CLI backups exclude env and system reference files unless `--include-env` or `--include-system` is passed. Keep env-containing archives on the server with restricted permissions and download them only when necessary.
+
+## CLI Backup
+
+Dry-run:
+
+```bash
+sudo /opt/qasedak/scripts/backup.sh \
+  --install-dir /opt/qasedak \
+  --output-dir /opt/qasedak/backups \
+  --dry-run
+```
+
+Create a PostgreSQL backup:
 
 ```bash
 sudo /opt/qasedak/scripts/backup.sh \
@@ -19,17 +81,15 @@ sudo /opt/qasedak/scripts/backup.sh \
   --yes
 ```
 
-Output format:
+PostgreSQL uses `pg_dump -Fc` and writes:
 
 ```text
-/opt/qasedak/backups/vpn-store-backup-YYYYMMDD-HHMMSS.tar.gz
+database/db.postgres.dump
 ```
 
-The script prints a SHA256 checksum after a successful archive.
+The script reads `POSTGRES_PASSWORD` from `.env` through `PGPASSWORD`; it does not print the password.
 
-## Include Media
-
-Media files are excluded by default so routine backups stay small. Include them when uploads, receipts, or user media must be captured:
+Include media:
 
 ```bash
 sudo /opt/qasedak/scripts/backup.sh \
@@ -39,7 +99,19 @@ sudo /opt/qasedak/scripts/backup.sh \
   --yes
 ```
 
-`static_root/` is not included because it is rebuildable with:
+Create a server-transfer package:
+
+```bash
+sudo /opt/qasedak/scripts/backup.sh \
+  --install-dir /opt/qasedak \
+  --output-dir /opt/qasedak/backups \
+  --include-media \
+  --include-env \
+  --include-system \
+  --yes
+```
+
+`static_root/` is not backed up because it is rebuildable:
 
 ```bash
 /opt/qasedak/venv/bin/python /opt/qasedak/manage.py collectstatic --noinput
@@ -47,7 +119,7 @@ sudo /opt/qasedak/scripts/backup.sh \
 
 ## Retention
 
-Keep only the newest 10 backup archives:
+Keep the newest 10 archives:
 
 ```bash
 sudo /opt/qasedak/scripts/backup.sh \
@@ -57,68 +129,35 @@ sudo /opt/qasedak/scripts/backup.sh \
   --yes
 ```
 
-## Verify Checksum
+Recommended baseline: keep daily backups for 7 days, weekly backups for 4 weeks, and one fresh server-transfer package before every migration or major update.
+
+## Verify
+
+Compare archive SHA256:
 
 ```bash
-sha256sum /opt/qasedak/backups/vpn-store-backup-YYYYMMDD-HHMMSS.tar.gz
+sha256sum /opt/qasedak/backups/qasedak-backup-YYYYMMDD-HHMMSS.tar.gz
 ```
 
-Compare the output with the checksum printed by `backup.sh`.
-
-## Archive Contents
-
-Backups include:
-
-- SQLite database copied through `sqlite3 .backup` when available
-- `.env`
-- `install.config.json`
-- generated VPN Store systemd/nginx files when present
-- `media/` only with `--include-media`
-- `manifest.json` with timestamp, install path, included sections, SHA256 file checksums, and redacted runtime/config previews
-
-## Manual Restore: SQLite
-
-Stop services first if they exist:
+Validate a backup package without applying it:
 
 ```bash
-sudo systemctl stop vpn-store-web.service vpn-store-telegram.service
+sudo /opt/qasedak/scripts/restore.sh \
+  --install-dir /opt/qasedak \
+  --backup-file /opt/qasedak/backups/qasedak-backup-YYYYMMDD-HHMMSS.tar.gz \
+  --dry-run
 ```
 
-Extract to a temporary directory:
+## Server Migration Flow
 
-```bash
-TMPDIR=$(mktemp -d)
-tar -xzf /opt/qasedak/backups/vpn-store-backup-YYYYMMDD-HHMMSS.tar.gz -C "$TMPDIR"
-```
+1. On the old server, create a server-transfer backup.
+2. Copy the archive through a private channel.
+3. Install Qasedak on the new server.
+4. Open `/admin/store/backups/`.
+5. Upload and Validate the package.
+6. Review the restore plan.
+7. Generate the command and run it over SSH.
 
-Copy the database back to the configured path:
+Restore is intentionally command-based. Django Admin validates and generates the command; it does not replace a live database inside a web request.
 
-```bash
-sudo install -m 0640 "$TMPDIR"/vpn-store-backup-*/database/db.sqlite3 /opt/qasedak/data/db.sqlite3
-```
-
-Then run checks and restart only after review:
-
-```bash
-/opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --no-fail
-sudo systemctl start vpn-store-web.service vpn-store-telegram.service
-```
-
-## Manual Restore: Media
-
-Only archives created with `--include-media` contain media:
-
-```bash
-sudo rsync -a "$TMPDIR"/vpn-store-backup-*/media/ /opt/qasedak/media/
-```
-
-## Manual Restore: `.env` and Config
-
-Review before overwriting live runtime files:
-
-```bash
-sudo install -m 0600 "$TMPDIR"/vpn-store-backup-*/runtime/.env /opt/qasedak/.env
-sudo install -m 0600 "$TMPDIR"/vpn-store-backup-*/runtime/install.config.json /opt/qasedak/install.config.json
-```
-
-Never paste `.env` or backup archives into tickets, logs, chat, or public repos.
+See [Restore](RESTORE.md) for the controlled restore runbook.

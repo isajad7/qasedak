@@ -236,7 +236,9 @@ def inbound_label(inbound):
         return "-"
     panel_name = safe_label(getattr(getattr(inbound, "panel", None), "name", ""))
     remark = safe_label(inbound.remark or f"Inbound {inbound.inbound_id}")
-    return f"{panel_name} / #{inbound.inbound_id} / {remark}"
+    node_name = safe_label(getattr(inbound, "xui_node_name", "") or getattr(inbound, "xui_node_id", ""))
+    node_part = f" / node {node_name}" if node_name != "-" else ""
+    return f"{panel_name}{node_part} / #{inbound.inbound_id} / {remark}"
 
 
 def route_destination_label(route):

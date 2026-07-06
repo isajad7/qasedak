@@ -1,0 +1,80 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_staff_access' %}">کارکنان و دسترسی ها</a>
+    &rsaquo; {{ target.username }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-staff" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Staff Review</p>
+            <h1>{{ target.username }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ back_url }}" class="qadmin-action qadmin-action-secondary">لیست کارکنان</a>
+            {% if not target.is_superuser or request.user.is_superuser %}
+                <a href="{{ edit_url }}" class="qadmin-action">Edit</a>
+                {% if target.pk != request.user.pk or request.user.is_superuser %}
+                    <a href="{{ password_url }}" class="qadmin-action qadmin-action-warning">Reset password</a>
+                {% endif %}
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="qadmin-review-layout">
+        <div class="qadmin-review-main">
+            <section class="qadmin-staff-section">
+                <header class="qadmin-section-header"><h2>پروفایل</h2></header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>username</dt><dd>{{ target.username }}</dd></div>
+                    <div><dt>display name</dt><dd>{{ row.display_name }}</dd></div>
+                    <div><dt>email</dt><dd>{{ row.email_masked|default:"-" }}</dd></div>
+                    <div><dt>active</dt><dd>{% if target.is_active %}بله{% else %}خیر{% endif %}</dd></div>
+                    <div><dt>staff</dt><dd>{% if target.is_staff %}بله{% else %}خیر{% endif %}</dd></div>
+                    <div><dt>superuser</dt><dd>{% if target.is_superuser %}بله{% else %}خیر{% endif %}</dd></div>
+                    <div><dt>last login</dt><dd>{% if target.last_login %}{{ target.last_login|date:"Y-m-d H:i" }}{% else %}never logged in{% endif %}</dd></div>
+                </dl>
+            </section>
+
+            <section class="qadmin-staff-section">
+                <header class="qadmin-section-header"><h2>نقش های محصولی</h2></header>
+                <div class="qadmin-role-list">
+                    {% for role in roles %}
+                        <article>
+                            <strong>{{ role.label }}</strong>
+                            <p>{{ role.description }}</p>
+                        </article>
+                    {% empty %}
+                        <p class="qadmin-empty">این staff هنوز role preset ندارد.</p>
+                    {% endfor %}
+                </div>
+            </section>
+        </div>
+
+        <aside class="qadmin-review-side">
+            <section class="qadmin-side-panel">
+                <h2>امنیت</h2>
+                <ul class="qadmin-detail-list">
+                    <li>password hash نمایش داده نمی شود.</li>
+                    <li>permission خام در این UI قابل ویرایش نیست.</li>
+                    <li>superuser از مسیر Django Admin پیشرفته مدیریت می شود.</li>
+                </ul>
+            </section>
+        </aside>
+    </section>
+</div>
+{% endblock %}

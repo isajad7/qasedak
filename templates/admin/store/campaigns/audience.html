@@ -1,0 +1,112 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{{ workbench_url }}">کمپین‌ها و پیام‌رسانی</a>
+    &rsaquo; <a href="{{ review_url }}">Campaign Review</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-campaigns qadmin-campaign-audience" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Campaign Wizard</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ edit_url }}" class="qadmin-action qadmin-action-secondary">Message</a>
+            <a href="{{ preview_url }}" class="qadmin-action qadmin-action-info">Preview</a>
+            <a href="{{ review_url }}" class="qadmin-action qadmin-action-secondary">Review</a>
+        </div>
+    </section>
+
+    <section class="qadmin-wizard-layout">
+        <nav class="qadmin-wizard-steps" aria-label="Campaign steps">
+            <a href="{{ edit_url }}" class="qadmin-wizard-step"><span>1. Message</span></a>
+            <span class="qadmin-wizard-step is-current"><span>2. Audience</span><strong>اکنون</strong></span>
+            <a href="{{ preview_url }}" class="qadmin-wizard-step"><span>3. Preview</span></a>
+            <a href="{{ confirm_url }}" class="qadmin-wizard-step"><span>4. Confirm</span></a>
+        </nav>
+
+        <section class="qadmin-form-panel">
+            <form method="post" class="qadmin-campaign-owner-form">
+                {% csrf_token %}
+                {% if form.non_field_errors %}<div class="qadmin-error">{{ form.non_field_errors }}</div>{% endif %}
+
+                <div class="qadmin-form-row {% if form.audience_type.errors %}has-error{% endif %}">
+                    {{ form.audience_type.label_tag }}
+                    {{ form.audience_type }}
+                    {{ form.audience_type.errors }}
+                </div>
+                <div class="qadmin-form-row {% if form.channel.errors %}has-error{% endif %}">
+                    {{ form.channel.label_tag }}
+                    {{ form.channel }}
+                    {% if form.channel.help_text %}<p class="qadmin-help">{{ form.channel.help_text }}</p>{% endif %}
+                    {{ form.channel.errors }}
+                </div>
+                <div class="qadmin-form-actions">
+                    <button type="submit" class="qadmin-button">ذخیره و Preview</button>
+                    <a href="{{ preview_url }}" class="qadmin-action qadmin-action-secondary">Preview بدون تغییر</a>
+                </div>
+            </form>
+
+            <div class="qadmin-audience-descriptions">
+                {% for item in audience_descriptions %}
+                    <article class="{% if item.value == campaign.audience_type %}is-current{% endif %}">
+                        <strong>{{ item.label }}</strong>
+                        <span>{{ item.description }}</span>
+                    </article>
+                {% endfor %}
+            </div>
+        </section>
+    </section>
+
+    <section class="qadmin-review-panel qadmin-audience-summary">
+        <header>
+            <h2>Audience Preview</h2>
+            <span class="qadmin-badge qadmin-badge-{% if preview.targetable %}success{% else %}danger{% endif %}">{{ preview.targetable }} قابل ارسال</span>
+        </header>
+        <div class="qadmin-report-mini-grid">
+            <div><strong>{{ preview.customers_matched }}</strong><span>customers matched</span></div>
+            <div><strong>{{ preview.bot_users_matched }}</strong><span>BotUsers matched</span></div>
+            <div><strong>{{ preview.targetable }}</strong><span>targetable</span></div>
+            <div><strong>{{ preview.missing_target }}</strong><span>missing Telegram target</span></div>
+            <div><strong>{{ preview.inactive_bot_users }}</strong><span>inactive BotUsers</span></div>
+            <div><strong>{{ preview.duplicates_removed }}</strong><span>duplicates removed</span></div>
+            <div><strong>{{ preview.recently_messaged }}</strong><span>recently messaged</span></div>
+            <div><strong>{{ preview.estimated_recipients }}</strong><span>estimated recipients</span></div>
+        </div>
+        <dl class="qadmin-review-grid">
+            <div><dt>Audience</dt><dd>{{ preview.audience_label }}</dd></div>
+            <div><dt>Channel</dt><dd>{{ preview.channel_label }}</dd></div>
+            <div><dt>BotConfiguration</dt><dd>{{ preview.bot_config_label }}</dd></div>
+        </dl>
+        {% if preview.warnings %}
+            <div class="qadmin-danger-box">
+                {% for warning in preview.warnings %}
+                    <p>{{ warning }}</p>
+                {% endfor %}
+            </div>
+        {% endif %}
+        <div class="qadmin-sample-list">
+            {% for sample in preview.sample_customers %}
+                <span class="qadmin-badge qadmin-badge-secondary">{{ sample.label }}</span>
+            {% empty %}
+                <span class="qadmin-badge qadmin-badge-secondary">sample ندارد</span>
+            {% endfor %}
+        </div>
+    </section>
+</div>
+{% endblock %}

@@ -38,6 +38,7 @@ from .order_services import (
 from .referral_services import (
     apply_referral_code,
 )
+from .setup_readiness import SETUP_NOT_READY_MESSAGE, store_is_sellable
 from .telegram_link_services import (
     WEB_TELEGRAM_INVALID_MESSAGE,
     link_bot_user_to_customer,
@@ -1399,14 +1400,26 @@ def handle_bot_update(provider, webhook_secret, update, *, source="webhook"):
         message=f"Incoming {source} update for provider={provider}",
         raw_payload=safe_update,
     )
-    maybe_send_due_sales_report(config)
-
     callback_query = get_callback_update(update)
     message = get_message_update(update)
     user_id = extract_user_id(update)
     chat_id = extract_chat_id(update)
     is_admin = config.is_admin_user(user_id) or config.is_admin_user(chat_id)
     logger.info("Bot update extraction config=%s source=%s user_id=%s chat_id=%s is_admin=%s", config.pk, source, user_id, chat_id, is_admin)
+
+    if not is_admin and config.store_id and not store_is_sellable(config.store):
+        if chat_id and config.bot_token:
+            BotClient(config).send_message(SETUP_NOT_READY_MESSAGE, chat_id=chat_id, parse_mode=None)
+        log_event(
+            config,
+            event_type=BotEventLog.EventType.WEBHOOK,
+            status=BotEventLog.Status.SUCCESS,
+            message="Customer bot update blocked until tenant setup is ready.",
+            raw_payload={"setup_status": getattr(config.store, "setup_status", "")},
+        )
+        return {"ok": True, "setup_required": True}
+
+    maybe_send_due_sales_report(config)
 
     callback_data = get_callback_data(callback_query) if callback_query else ""
     return _dispatch_bot_update(

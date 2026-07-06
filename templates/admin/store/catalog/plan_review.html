@@ -25,8 +25,10 @@
             <p>{{ subtitle }}</p>
         </div>
         <div class="qadmin-hero-actions">
-            <a href="{{ edit_url }}" class="qadmin-action">Edit</a>
-            <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">Assign/change route</a>
+            {% if can_manage_catalog %}
+                <a href="{{ edit_url }}" class="qadmin-action">Edit</a>
+                <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">Assign/change route</a>
+            {% endif %}
             <a href="{{ catalog_url }}" class="qadmin-action qadmin-action-secondary">برگشت به catalog</a>
         </div>
     </section>
@@ -96,7 +98,7 @@
                                         {% endfor %}
                                     </td>
                                     <td>
-                                        {% if item.is_active %}
+                                        {% if can_manage_catalog and item.is_active %}
                                             <form method="post">
                                                 {% csrf_token %}
                                                 <input type="hidden" name="confirm_action" value="1">
@@ -127,23 +129,25 @@
             <section class="qadmin-side-panel">
                 <h2>Actionها</h2>
                 <div class="qadmin-action-list">
-                    <a href="{{ edit_url }}" class="qadmin-action">Edit</a>
-                    <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">Bulk routing center</a>
-                    <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-secondary">Django Admin</a>
-                    <form method="post">
-                        {% csrf_token %}
-                        <input type="hidden" name="confirm_action" value="1">
-                        {% if plan.is_active %}
-                            <button type="submit" name="action" value="deactivate" class="qadmin-action qadmin-action-warning" onclick="return confirm('پلن غیرفعال شود؟');">Deactivate</button>
-                        {% else %}
-                            <button type="submit" name="action" value="activate" class="qadmin-action qadmin-action-success" onclick="return confirm('پلن فعال شود؟');">Activate</button>
-                        {% endif %}
-                    </form>
-                    <form method="post">
-                        {% csrf_token %}
-                        <input type="hidden" name="confirm_action" value="1">
-                        <button type="submit" name="action" value="duplicate" class="qadmin-action qadmin-action-secondary" onclick="return confirm('کپی غیرفعال و بدون route فعال ساخته شود؟');">Duplicate</button>
-                    </form>
+                    {% if can_manage_catalog %}
+                        <a href="{{ edit_url }}" class="qadmin-action">Edit</a>
+                        <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">Bulk routing center</a>
+                        <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-secondary">Django Admin</a>
+                        <form method="post">
+                            {% csrf_token %}
+                            <input type="hidden" name="confirm_action" value="1">
+                            {% if plan.is_active %}
+                                <button type="submit" name="action" value="deactivate" class="qadmin-action qadmin-action-warning" onclick="return confirm('پلن غیرفعال شود؟');">Deactivate</button>
+                            {% else %}
+                                <button type="submit" name="action" value="activate" class="qadmin-action qadmin-action-success" onclick="return confirm('پلن فعال شود؟');">Activate</button>
+                            {% endif %}
+                        </form>
+                        <form method="post">
+                            {% csrf_token %}
+                            <input type="hidden" name="confirm_action" value="1">
+                            <button type="submit" name="action" value="duplicate" class="qadmin-action qadmin-action-secondary" onclick="return confirm('کپی غیرفعال و بدون route فعال ساخته شود؟');">Duplicate</button>
+                        </form>
+                    {% endif %}
                     <a href="{{ catalog_url }}" class="qadmin-action qadmin-action-secondary">Catalog</a>
                 </div>
             </section>

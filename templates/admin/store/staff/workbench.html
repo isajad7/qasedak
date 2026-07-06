@@ -1,0 +1,145 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-staff" dir="rtl">
+    <section class="qadmin-hero qadmin-staff-hero">
+        <div>
+            <p class="qadmin-eyebrow">Staff Access Center</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ new_url }}" class="qadmin-action">افزودن کارمند</a>
+            <a href="{{ roles_url }}" class="qadmin-action qadmin-action-info">مدیریت نقش ها</a>
+            <a href="#staff-audit" class="qadmin-action qadmin-action-secondary">مشاهده audit</a>
+            <a href="{% url 'admin_store_owner_dashboard' %}" class="qadmin-action qadmin-action-secondary">داشبورد</a>
+        </div>
+    </section>
+
+    <section class="qadmin-staff-stats">
+        <article><strong>{{ stats.active_staff }}</strong><span>کارمند فعال</span></article>
+        <article><strong>{{ stats.inactive_staff }}</strong><span>کارمند غیرفعال</span></article>
+        <article><strong>{{ stats.never_logged_in }}</strong><span>بدون ورود</span></article>
+        <article><strong>{{ stats.superuser_count }}</strong><span>superuser</span></article>
+    </section>
+
+    <section class="qadmin-warning-panel">
+        <h2>هشدارهای دسترسی</h2>
+        <div class="qadmin-warning-grid">
+            <article class="{% if warnings.without_role %}qadmin-status-warning{% else %}qadmin-status-success{% endif %}">
+                <strong>{{ warnings.without_role|length }}</strong>
+                <span>staff بدون role preset</span>
+            </article>
+            <article class="{% if warnings.unexpected_permissions %}qadmin-status-warning{% else %}qadmin-status-success{% endif %}">
+                <strong>{{ warnings.unexpected_permissions|length }}</strong>
+                <span>permission یا group غیرمنتظره</span>
+            </article>
+            <article class="{% if warnings.active_superuser_count < 2 %}qadmin-status-warning{% else %}qadmin-status-info{% endif %}">
+                <strong>{{ warnings.active_superuser_count }}</strong>
+                <span>superuser فعال</span>
+            </article>
+        </div>
+        {% if warnings.without_role %}
+            <ul class="qadmin-warning-list">
+                {% for user in warnings.without_role|slice:":6" %}
+                    <li>{{ user.username }} نقش محصولی ندارد.</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+    </section>
+
+    <section class="qadmin-staff-section">
+        <header class="qadmin-section-header">
+            <div>
+                <h2>کارکنان</h2>
+                <p>رمز عبور، token، config link و permission خام در این صفحه نمایش داده نمی شود.</p>
+            </div>
+        </header>
+        <div class="qadmin-table-wrap">
+            <table class="qadmin-staff-table">
+                <thead>
+                    <tr>
+                        <th>username</th>
+                        <th>نام / ایمیل</th>
+                        <th>نقش</th>
+                        <th>وضعیت</th>
+                        <th>staff</th>
+                        <th>superuser</th>
+                        <th>آخرین ورود</th>
+                        <th>اقدام</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in rows %}
+                        <tr>
+                            <td><a href="{{ row.review_url }}"><strong>{{ row.username }}</strong></a></td>
+                            <td>{{ row.display_name }}{% if row.email_masked %}<small>{{ row.email_masked }}</small>{% endif %}</td>
+                            <td><span class="qadmin-role-badge">{{ row.role_label }}</span></td>
+                            <td><span class="qadmin-badge qadmin-badge-{% if row.status == 'active' %}success{% elif row.status == 'inactive' %}secondary{% else %}warning{% endif %}">{{ row.status }}</span></td>
+                            <td>{% if row.is_staff %}بله{% else %}خیر{% endif %}</td>
+                            <td>{% if row.is_superuser %}<span class="qadmin-badge qadmin-badge-danger">superuser</span>{% else %}-{% endif %}</td>
+                            <td>{% if row.last_login %}{{ row.last_login|date:"Y-m-d H:i" }}{% else %}-{% endif %}</td>
+                            <td>
+                                <a href="{{ row.review_url }}" class="qadmin-action">Review</a>
+                                {% if not row.is_superuser or request.user.is_superuser %}
+                                    <a href="{{ row.edit_url }}" class="qadmin-action qadmin-action-secondary">Edit</a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="8" class="qadmin-empty-cell">هنوز کارمند staff ثبت نشده است.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section id="staff-audit" class="qadmin-staff-section">
+        <header class="qadmin-section-header">
+            <div>
+                <h2>Audit اخیر</h2>
+                <p>LogEntryهای امن مربوط به تغییرات دسترسی.</p>
+            </div>
+        </header>
+        <div class="qadmin-table-wrap">
+            <table class="qadmin-staff-table">
+                <thead>
+                    <tr>
+                        <th>زمان</th>
+                        <th>actor</th>
+                        <th>target</th>
+                        <th>خلاصه</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for entry in audit_entries %}
+                        <tr>
+                            <td>{{ entry.action_time|date:"Y-m-d H:i" }}</td>
+                            <td>{% if entry.user %}{{ entry.user.username }}{% else %}-{% endif %}</td>
+                            <td>{{ entry.object_repr }}</td>
+                            <td><code class="qadmin-inline-code">{{ entry.change_message }}</code></td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="4" class="qadmin-empty-cell">audit دسترسی هنوز ثبت نشده است.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+{% endblock %}

@@ -1,0 +1,99 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{{ workbench_url }}">کمپین‌ها و پیام‌رسانی</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-campaigns qadmin-campaign-form" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Campaign Wizard</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ workbench_url }}" class="qadmin-action qadmin-action-secondary">Workbench</a>
+            {% if review_url %}<a href="{{ review_url }}" class="qadmin-action qadmin-action-info">Review</a>{% endif %}
+        </div>
+    </section>
+
+    <section class="qadmin-wizard-layout">
+        <nav class="qadmin-wizard-steps" aria-label="Campaign steps">
+            <span class="qadmin-wizard-step is-current"><span>1. Message</span><strong>اکنون</strong></span>
+            {% if audience_url %}<a href="{{ audience_url }}" class="qadmin-wizard-step"><span>2. Audience</span></a>{% else %}<span class="qadmin-wizard-step qadmin-muted"><span>2. Audience</span></span>{% endif %}
+            {% if preview_url %}<a href="{{ preview_url }}" class="qadmin-wizard-step"><span>3. Preview</span></a>{% else %}<span class="qadmin-wizard-step qadmin-muted"><span>3. Preview</span></span>{% endif %}
+            {% if confirm_url %}<a href="{{ confirm_url }}" class="qadmin-wizard-step"><span>4. Confirm</span></a>{% else %}<span class="qadmin-wizard-step qadmin-muted"><span>4. Confirm</span></span>{% endif %}
+        </nav>
+
+        <section class="qadmin-form-panel">
+            {{ message_templates|json_script:"campaign-message-templates" }}
+            <form method="post" class="qadmin-campaign-owner-form" novalidate>
+                {% csrf_token %}
+                {% if form.non_field_errors %}
+                    <div class="qadmin-error">{{ form.non_field_errors }}</div>
+                {% endif %}
+
+                <div class="qadmin-form-row {% if form.store.errors %}has-error{% endif %}">
+                    {{ form.store.label_tag }}
+                    {{ form.store }}
+                    {% if form.store.help_text %}<p class="qadmin-help">{{ form.store.help_text }}</p>{% endif %}
+                    {{ form.store.errors }}
+                </div>
+
+                <div class="qadmin-form-row {% if form.title.errors %}has-error{% endif %}">
+                    {{ form.title.label_tag }}
+                    {{ form.title }}
+                    {% if form.title.help_text %}<p class="qadmin-help">{{ form.title.help_text }}</p>{% endif %}
+                    {{ form.title.errors }}
+                </div>
+
+                <div class="qadmin-form-row {% if form.message_text.errors %}has-error{% endif %}">
+                    {{ form.message_text.label_tag }}
+                    {{ form.message_text }}
+                    <p class="qadmin-help"><span id="campaign-char-count">0</span>/4096</p>
+                    {{ form.message_text.errors }}
+                </div>
+
+                <div class="qadmin-template-buttons">
+                    {% for template in message_templates %}
+                        <button type="button" class="qadmin-template-button" data-campaign-template="{{ template.key }}">{{ template.label }}</button>
+                    {% endfor %}
+                </div>
+
+                <div class="qadmin-form-row {% if form.scheduled_at.errors %}has-error{% endif %}">
+                    {{ form.scheduled_at.label_tag }}
+                    {{ form.scheduled_at }}
+                    {% if form.scheduled_at.help_text %}<p class="qadmin-help">{{ form.scheduled_at.help_text }}</p>{% endif %}
+                    {{ form.scheduled_at.errors }}
+                </div>
+
+                <div class="qadmin-form-row {% if form.admin_note.errors %}has-error{% endif %}">
+                    {{ form.admin_note.label_tag }}
+                    {{ form.admin_note }}
+                    {% if form.admin_note.help_text %}<p class="qadmin-help">{{ form.admin_note.help_text }}</p>{% endif %}
+                    {{ form.admin_note.errors }}
+                </div>
+
+                <div class="qadmin-form-actions">
+                    <button type="submit" class="qadmin-button">ذخیره و ادامه</button>
+                    <a href="{{ workbench_url }}" class="qadmin-action qadmin-action-secondary">انصراف</a>
+                </div>
+            </form>
+        </section>
+    </section>
+</div>
+<script src="{% static 'admin/qasedak_campaigns.js' %}"></script>
+{% endblock %}

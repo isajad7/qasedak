@@ -152,6 +152,7 @@ def get_active_clients_for_reminders(*, store=None, customer_id=None, client_id=
             inbound__is_active=True,
             inbound__panel__isnull=False,
             inbound__panel__is_active=True,
+            deleted_at__isnull=True,
             status__in=[
                 VPNClient.Status.CREATED,
                 VPNClient.Status.INACTIVE,

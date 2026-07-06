@@ -2,11 +2,13 @@ from collections import defaultdict
 from datetime import date, timedelta
 import logging
 import re
+from urllib.parse import urlparse
 
 import jdatetime
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.db.models import Count, Max, Q
+from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
@@ -17,6 +19,20 @@ from django.utils.http import urlencode
 from payments.models import IncomingPaymentSMS
 
 from .admin_dashboard import get_owner_dashboard_context
+from .admin_access import (
+    ensure_admin_capability,
+    ensure_any_admin_capability,
+    require_admin_capability,
+    require_any_admin_capability,
+    user_has_capability,
+)
+from .admin_reports_center import (
+    VALID_REPORT_EXPORTS,
+    build_reports_csv,
+    get_report_store_options,
+    get_reports_center_context,
+    resolve_report_period,
+)
 from .admin_catalog import (
     CatalogPlanForm,
     catalog_plan_edit_url,
@@ -34,6 +50,31 @@ from .admin_catalog import (
     set_plan_active_state,
     validate_plan_sales_readiness,
 )
+from .admin_campaigns import (
+    CampaignAudienceForm,
+    CampaignMessageForm,
+    audience_descriptions,
+    build_campaign_export_csv,
+    campaign_audience_url,
+    campaign_confirm_url,
+    campaign_edit_url,
+    campaign_export_url,
+    campaign_new_url,
+    campaign_preview_url,
+    campaign_review_url,
+    campaign_workbench_url,
+    cancel_campaign,
+    export_filename,
+    get_audience_preview,
+    get_review_context as get_campaign_review_context,
+    get_workbench_context as get_campaign_workbench_context,
+    MESSAGE_TEMPLATE_BODIES,
+    queue_campaign_for_processing,
+    queue_confirmation_phrase,
+    reset_retryable_failed,
+    safe_campaign_snippet,
+    selected_store_from_id as selected_campaign_store_from_id,
+)
 from .admin_revenue import (
     REAL_SEND_CONFIRMATION,
     apply_revenue_safe_defaults,
@@ -45,12 +86,19 @@ from .admin_revenue import (
 )
 from .admin_setup import build_setup_center_context
 from .admin_setup_wizard import (
+    WIZARD_ACTIVATE_ACTION,
+    WIZARD_ACTIVATION_CONFIRMATION,
+    WIZARD_ACTION_FIELD,
     WIZARD_STEP_BY_SLUG,
+    WIZARD_TEST_TELEGRAM_ACTION,
+    WIZARD_TEST_XUI_ACTION,
     clear_step_skipped,
     get_review_context,
     get_setup_wizard_context,
     get_step_form,
     get_step_page_context,
+    is_skip_request,
+    is_step_skippable,
     mark_step_skipped,
     next_step_slug,
     save_step_form,
@@ -68,11 +116,14 @@ from .admin_support_services import (
     support_workbench_url,
 )
 from .config_lookup import mask_identifier
+from .deployment.owner_toolkit import OwnerToolkitError, TenantOwnerToolkit
 from .jalali import format_jalali_date
 from .models import (
     BotConfiguration,
     BotUser,
+    BroadcastMessage,
     Customer,
+    Panel,
     Order,
     Plan,
     PlanInboundRoute,
@@ -82,12 +133,26 @@ from .models import (
     normalize_payment_digits,
 )
 from .order_actions import activate_order, reject_order
+from .orchestrator_v2.models import TenantInstance
 from .vpn_client_management_services import (
     VPNClientManagementError,
     refresh_vpn_client_link_by_admin,
     set_vpn_client_enabled_by_admin,
 )
-from .xui_api import sync_vpn_client_stats
+from .vpn_client_reconciliation_services import (
+    get_reconciliation_summary,
+    reconcile_vpn_clients,
+    remote_scope_matches_latest_check,
+    remote_status_is_cleanup_eligible,
+    remote_status_is_fresh,
+    remote_status_label,
+    remote_status_tone,
+    safe_remote_scope,
+    soft_delete_remote_missing_clients,
+)
+from .setup_readiness import sync_store_setup_status
+from .telegram_bot.client import BotClient, BotDeliveryError
+from .xui_api import XUIService, sync_vpn_client_stats
 
 
 logger = logging.getLogger(__name__)
@@ -96,6 +161,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_STATUS_FILTER = "not_rejected"
 ORDER_WORKBENCH_LIMIT = 20
 SERVICE_WORKBENCH_LIMIT = 20
+REMOTE_FILTER_STATUSES = {
+    "remote-active": (VPNClient.RemoteCheckStatus.REMOTE_ACTIVE,),
+    "remote-disabled": (VPNClient.RemoteCheckStatus.REMOTE_DISABLED,),
+    "remote-missing": (VPNClient.RemoteCheckStatus.REMOTE_MISSING,),
+    "remote-problem": (
+        VPNClient.RemoteCheckStatus.PANEL_UNREACHABLE,
+        VPNClient.RemoteCheckStatus.INBOUND_MISSING,
+        VPNClient.RemoteCheckStatus.AMBIGUOUS,
+        VPNClient.RemoteCheckStatus.UNKNOWN,
+    ),
+    "not-checked": (VPNClient.RemoteCheckStatus.NOT_CHECKED,),
+}
+RECONCILIATION_CONFIRMATION = "SOFT_DELETE_REMOTE_MISSING"
 PENDING_REVIEW_STATUSES = (Order.Status.PENDING_VERIFICATION, Order.Status.CONFIRMED)
 PENDING_ORDER_STATUSES = (Order.Status.PENDING_PAYMENT, Order.Status.PENDING_VERIFICATION, Order.Status.CONFIRMED)
 ORDER_TERMINAL_STATUSES = (Order.Status.COMPLETED, Order.Status.REJECTED, Order.Status.CANCELLED)
@@ -217,6 +295,7 @@ def build_order_row(order, card_info):
     }
 
 
+@require_admin_capability("payments.review")
 def card_receipts_report(request):
     selected_status = request.GET.get("status") or DEFAULT_STATUS_FILTER
     if selected_status not in STATUS_FILTERS:
@@ -544,13 +623,36 @@ def service_workbench_url(section="", *, store=None):
     if store and getattr(store, "pk", None):
         params["store"] = store.pk
     if section:
-        params["section"] = section
+        if section in REMOTE_FILTER_STATUSES:
+            params["remote_status"] = section
+        else:
+            params["section"] = section
     url = reverse("admin_store_service_workbench")
     if params:
         url = f"{url}?{urlencode(params)}"
-    if section:
+    if section and section not in REMOTE_FILTER_STATUSES:
         url = f"{url}#{section}"
     return url
+
+
+def service_reconcile_url(store=None):
+    params = {}
+    if store and getattr(store, "pk", None):
+        params["store"] = store.pk
+    url = reverse("admin_store_services_reconcile")
+    return f"{url}?{urlencode(params)}" if params else url
+
+
+def service_bulk_cleanup_url(store=None):
+    params = {}
+    if store and getattr(store, "pk", None):
+        params["store"] = store.pk
+    url = reverse("admin_store_services_reconciliation_soft_delete_missing")
+    return f"{url}?{urlencode(params)}" if params else url
+
+
+def service_soft_delete_missing_url(vpn_client):
+    return reverse("admin_store_service_soft_delete_missing", args=[vpn_client.pk])
 
 
 def admin_vpn_client_changelist(params=None, *, store=None):
@@ -683,6 +785,10 @@ def service_row(vpn_client):
     route_label, route_tone = client_route_status(vpn_client)
     telegram_label, telegram_tone, _target_count = customer_telegram_target_status(customer, vpn_client.store)
     service_label = safe_identifier_label(vpn_client.xui_email or vpn_client.username or vpn_client.public_id)
+    remote_status = vpn_client.last_remote_check_status or VPNClient.RemoteCheckStatus.NOT_CHECKED
+    remote_fresh = remote_status_is_fresh(vpn_client)
+    remote_scope_current = remote_scope_matches_latest_check(vpn_client)
+    remote_cleanup_eligible = remote_status_is_cleanup_eligible(vpn_client)
     return {
         "client": vpn_client,
         "service_label": service_label,
@@ -700,6 +806,17 @@ def service_row(vpn_client):
         "status_label": vpn_client.get_status_display(),
         "status_tone": status_tone(vpn_client.status),
         "active_label": "فعال" if vpn_client.status == VPNClient.Status.ACTIVE else "غیرفعال",
+        "remote_status": remote_status,
+        "remote_status_label": "نیازمند بررسی مجدد"
+        if vpn_client.last_remote_check_at and not remote_fresh
+        else remote_status_label(remote_status),
+        "remote_status_tone": "warning" if vpn_client.last_remote_check_at and not remote_fresh else remote_status_tone(remote_status),
+        "last_remote_check_at": vpn_client.last_remote_check_at,
+        "remote_check_error": safe_short_text(vpn_client.last_remote_check_error),
+        "remote_check_fresh": remote_fresh,
+        "remote_scope_current": remote_scope_current,
+        "remote_cleanup_eligible": remote_cleanup_eligible,
+        "soft_delete_missing_url": service_soft_delete_missing_url(vpn_client),
         "expires_at": vpn_client.expires_at,
         "days_left": days_left(vpn_client.expires_at),
         "days_left_label": days_left_label(vpn_client.expires_at),
@@ -778,6 +895,7 @@ def build_workbench_context(selected_store):
         Q(status=Order.Status.CONFIRMED)
         | Q(is_paid=True, verification_status=Order.VerificationStatus.VERIFIED, status__in=PENDING_REVIEW_STATUSES)
         | Q(metadata__panel_provisioning_deferred=True)
+        | Q(provisioning_status__in=[Order.ProvisioningStatus.PENDING, Order.ProvisioningStatus.PROVISIONING, Order.ProvisioningStatus.FAILED])
         | Q(vpn_clients__status__in=[VPNClient.Status.ERROR, VPNClient.Status.CREATED, VPNClient.Status.INACTIVE])
     ).exclude(status__in=[Order.Status.REJECTED, Order.Status.CANCELLED]).distinct()
 
@@ -786,6 +904,7 @@ def build_workbench_context(selected_store):
     problematic = base.filter(
         Q(metadata__receipt_analysis__status__in=["mismatch", "not_found", "unsupported_currency", "image_only"])
         | Q(metadata__panel_provisioning_deferred=True)
+        | Q(provisioning_status=Order.ProvisioningStatus.FAILED)
         | Q(vpn_clients__status=VPNClient.Status.ERROR)
         | Q(status__in=[Order.Status.CONFIRMED, Order.Status.COMPLETED], inbound__isnull=True)
         | Q(customer__isnull=True)
@@ -869,6 +988,7 @@ def build_workbench_context(selected_store):
     }
 
 
+@require_admin_capability("orders.view")
 def order_workbench(request):
     stores, selected_store = selected_store_from_id(request.GET.get("store"))
     workbench_context = build_workbench_context(selected_store)
@@ -883,6 +1003,7 @@ def order_workbench(request):
     return TemplateResponse(request, "admin/store/orders/workbench.html", context)
 
 
+@require_admin_capability("support.view")
 def support_workbench(request):
     stores, selected_store = selected_store_from_id(request.GET.get("store"))
     workbench_context = get_support_workbench_context(selected_store)
@@ -903,6 +1024,7 @@ def handle_support_review_action(request, conversation):
     if action not in {"reply", "close", "reopen", "mark_followup"}:
         messages.error(request, "Action معتبر نیست.")
         return redirect(review_url)
+    ensure_admin_capability(request.user, "support.reply")
 
     if action == "reply":
         if request.POST.get("confirm_customer") != "1" and request.POST.get("confirm_external") != "1":
@@ -949,6 +1071,7 @@ def handle_support_review_action(request, conversation):
     return redirect(review_url)
 
 
+@require_admin_capability("support.view")
 def support_review(request, support_id):
     conversation = get_object_or_404(
         SupportConversation.objects.select_related("store", "customer"),
@@ -957,9 +1080,14 @@ def support_review(request, support_id):
     if request.method == "POST":
         return handle_support_review_action(request, conversation)
 
+    review_context = get_support_review_context(conversation.pk)
+    if not user_has_capability(request.user, "support.reply"):
+        for key in ("can_reply", "can_close", "can_reopen", "can_mark_followup"):
+            review_context["actions"][key] = False
+        review_context["customer_summary"]["message_url"] = ""
     context = {
         **admin.site.each_context(request),
-        **get_support_review_context(conversation.pk),
+        **review_context,
         "title": f"بررسی پشتیبانی #{conversation.pk}",
         "subtitle": "Timeline و پاسخ owner-facing فقط برای همین گفتگو.",
     }
@@ -994,10 +1122,21 @@ def service_section(key, title, description, queryset, *, tone="info", link="", 
     }
 
 
-def build_service_workbench_context(selected_store):
+def _apply_remote_status_filter(queryset, remote_filter):
+    statuses = REMOTE_FILTER_STATUSES.get(remote_filter)
+    if not statuses:
+        return queryset
+    if remote_filter == "not-checked":
+        return queryset.filter(Q(last_remote_check_status__in=statuses) | Q(last_remote_check_at__isnull=True))
+    return queryset.filter(last_remote_check_status__in=statuses)
+
+
+def build_service_workbench_context(selected_store, remote_filter=""):
     now = timezone.now()
     soon = now + timedelta(days=3)
-    base = base_service_clients(selected_store)
+    unfiltered_base = base_service_clients(selected_store)
+    reconciliation_summary = get_reconciliation_summary(unfiltered_base)
+    base = _apply_remote_status_filter(unfiltered_base, remote_filter)
     active = base.filter(status=VPNClient.Status.ACTIVE)
     expiring = active.filter(expires_at__gte=now, expires_at__lte=soon)
     expired = base.filter(Q(status=VPNClient.Status.EXPIRED) | Q(expires_at__lt=now)).distinct()
@@ -1097,8 +1236,59 @@ def build_service_workbench_context(selected_store):
             link=admin_vpn_client_changelist({"status__exact": VPNClient.Status.ERROR}, store=selected_store),
         ),
     ]
+    remote_filters = [
+        {
+            "key": "",
+            "label": "همه",
+            "url": service_workbench_url(store=selected_store),
+            "active": not remote_filter,
+            "count": unfiltered_base.count(),
+        },
+        {
+            "key": "remote-active",
+            "label": "فعال در پنل",
+            "url": service_workbench_url("remote-active", store=selected_store),
+            "active": remote_filter == "remote-active",
+            "count": reconciliation_summary["remote_active"],
+        },
+        {
+            "key": "remote-disabled",
+            "label": "غیرفعال در پنل",
+            "url": service_workbench_url("remote-disabled", store=selected_store),
+            "active": remote_filter == "remote-disabled",
+            "count": reconciliation_summary["remote_disabled"],
+        },
+        {
+            "key": "remote-missing",
+            "label": "حذف‌شده از پنل",
+            "url": service_workbench_url("remote-missing", store=selected_store),
+            "active": remote_filter == "remote-missing",
+            "count": reconciliation_summary["remote_missing"],
+        },
+        {
+            "key": "remote-problem",
+            "label": "خطادار / نامشخص",
+            "url": service_workbench_url("remote-problem", store=selected_store),
+            "active": remote_filter == "remote-problem",
+            "count": reconciliation_summary["unknown_or_error"] + reconciliation_summary["ambiguous"],
+        },
+        {
+            "key": "not-checked",
+            "label": "بررسی‌نشده",
+            "url": service_workbench_url("not-checked", store=selected_store),
+            "active": remote_filter == "not-checked",
+            "count": reconciliation_summary["not_checked"],
+        },
+    ]
     return {
         "sections": sections,
+        "reconciliation_summary": reconciliation_summary,
+        "remote_filters": remote_filters,
+        "current_remote_filter": remote_filter,
+        "reconcile_url": service_reconcile_url(selected_store),
+        "bulk_cleanup_url": service_bulk_cleanup_url(selected_store),
+        "bulk_cleanup_enabled": reconciliation_summary["cleanup_candidate_count"] > 0,
+        "bulk_cleanup_confirmation": RECONCILIATION_CONFIRMATION,
         "summary_counts": {
             "active": sections[0]["count"],
             "expiring": sections[1]["count"],
@@ -1126,18 +1316,94 @@ def build_service_workbench_context(selected_store):
     }
 
 
+@require_admin_capability("services.view")
 def service_workbench(request):
     stores, selected_store = selected_store_from_id(request.GET.get("store"))
-    workbench_context = build_service_workbench_context(selected_store)
+    remote_filter = request.GET.get("remote_status") or ""
+    if remote_filter not in REMOTE_FILTER_STATUSES:
+        remote_filter = ""
+    workbench_context = build_service_workbench_context(selected_store, remote_filter=remote_filter)
     context = {
         **admin.site.each_context(request),
         **workbench_context,
         "stores": stores,
         "selected_store": selected_store,
+        "can_modify_services": user_has_capability(request.user, "services.modify"),
         "title": "میز کار سرویس‌ها",
         "subtitle": "مشتری، وضعیت سرویس، مصرف، انقضا و actionهای explicit بدون نمایش secret.",
     }
     return TemplateResponse(request, "admin/store/services/workbench.html", context)
+
+
+@require_admin_capability("services.modify")
+def service_reconcile(request):
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+    stores, selected_store = selected_store_from_id(request.GET.get("store") or request.POST.get("store"))
+    if request.POST.get("confirm_reconcile") != "1":
+        messages.error(request, "برای بررسی سرویس‌ها باید تایید owner ثبت شود.")
+        return redirect(service_workbench_url(store=selected_store))
+    queryset = base_service_clients(selected_store)
+    client_ids = [value for value in request.POST.getlist("client_ids") if str(value).strip()]
+    if client_ids:
+        queryset = queryset.filter(pk__in=client_ids)
+    try:
+        result = reconcile_vpn_clients(queryset, actor=request.user)
+    except Exception:
+        logger.exception("Service reconciliation failed")
+        messages.error(request, "بررسی سرویس‌ها ناموفق بود. جزئیات امن در لاگ سرور ثبت شد.")
+        return redirect(service_workbench_url(store=selected_store))
+    request.session["service_reconciliation_last_batch_id"] = result.batch_id
+    messages.success(
+        request,
+        (
+            f"بررسی سرویس‌ها انجام شد: {result.checked} سرویس در {result.scopes} scope "
+            f"با {result.api_calls} درخواست پنل. Batch: {result.batch_id[:8]}"
+        ),
+    )
+    url = service_workbench_url(store=selected_store)
+    separator = "&" if "?" in url else "?"
+    return redirect(f"{url}{separator}batch={result.batch_id}")
+
+
+@require_admin_capability("services.modify")
+def service_soft_delete_missing(request, vpn_client_id):
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+    vpn_client = get_object_or_404(
+        VPNClient.objects.select_related("store", "inbound", "inbound__panel"),
+        pk=vpn_client_id,
+    )
+    if request.POST.get("confirm_soft_delete") != RECONCILIATION_CONFIRMATION:
+        messages.error(request, "عبارت تایید حذف نرم معتبر نیست.")
+        return redirect(service_review_url(vpn_client))
+    result = soft_delete_remote_missing_clients([vpn_client.pk], actor=request.user)
+    if result["deleted"]:
+        messages.success(request, "سرویس به صورت حذف نرم از قاصدک خارج شد؛ سفارش، مشتری و سوابق حفظ شدند.")
+        return redirect(service_workbench_url("remote-missing", store=vpn_client.store))
+    messages.error(request, "حذف نرم انجام نشد؛ نتیجه revalidation تازه یا scope دقیق برای حذف معتبر نبود.")
+    return redirect(service_review_url(vpn_client))
+
+
+@require_admin_capability("services.modify")
+def service_bulk_soft_delete_missing(request):
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+    _stores, selected_store = selected_store_from_id(request.GET.get("store") or request.POST.get("store"))
+    if request.POST.get("confirm_bulk_soft_delete") != RECONCILIATION_CONFIRMATION:
+        messages.error(request, "عبارت تایید پاک‌سازی گروهی معتبر نیست.")
+        return redirect(service_workbench_url("remote-missing", store=selected_store))
+    summary = get_reconciliation_summary(base_service_clients(selected_store))
+    candidate_ids = summary["cleanup_candidate_ids"]
+    result = soft_delete_remote_missing_clients(candidate_ids, actor=request.user)
+    if result["deleted"]:
+        messages.success(
+            request,
+            f"{result['deleted']} سرویس حذف نرم شد. {result['blocked']} مورد به دلیل revalidation/scope حذف نشد.",
+        )
+    else:
+        messages.error(request, "هیچ سرویسی حذف نرم نشد؛ ممکن است نتیجه check قدیمی شده یا revalidation ناموفق بوده باشد.")
+    return redirect(service_workbench_url("remote-missing", store=selected_store))
 
 
 def get_review_vpn_client(vpn_client_id):
@@ -1194,10 +1460,46 @@ def resend_vpn_client_config_to_telegram(vpn_client):
 def handle_service_review_action(request, vpn_client):
     action = request.POST.get("action", "")
     review_url = service_review_url(vpn_client)
-    allowed_actions = {"resend_config", "refresh_config_link", "update_usage", "disable_client", "enable_client"}
+    allowed_actions = {
+        "resend_config",
+        "refresh_config_link",
+        "update_usage",
+        "disable_client",
+        "enable_client",
+        "reconcile_client",
+        "soft_delete_remote_missing",
+    }
     if action not in allowed_actions:
         messages.error(request, "Action معتبر نیست.")
         return redirect(review_url)
+    if action == "resend_config":
+        ensure_admin_capability(request.user, "services.send_config")
+    else:
+        ensure_admin_capability(request.user, "services.modify")
+    if action == "soft_delete_remote_missing":
+        if request.POST.get("confirm_soft_delete") != RECONCILIATION_CONFIRMATION:
+            messages.error(request, "عبارت تایید حذف نرم معتبر نیست.")
+            return redirect(review_url)
+        result = soft_delete_remote_missing_clients([vpn_client.pk], actor=request.user)
+        if result["deleted"]:
+            messages.success(request, "سرویس به صورت حذف نرم از قاصدک خارج شد؛ سفارش، مشتری و سوابق حفظ شدند.")
+            return redirect(service_workbench_url("remote-missing", store=vpn_client.store))
+        messages.error(request, "حذف نرم انجام نشد؛ نتیجه revalidation تازه یا scope دقیق برای حذف معتبر نبود.")
+        return redirect(review_url)
+
+    if action == "reconcile_client":
+        if request.POST.get("confirm_reconcile") != "1":
+            messages.error(request, "برای بررسی این سرویس باید تایید owner ثبت شود.")
+            return redirect(review_url)
+        try:
+            result = reconcile_vpn_clients(VPNClient.objects.filter(pk=vpn_client.pk), actor=request.user)
+        except Exception:
+            logger.exception("Single service reconciliation failed vpn_client=%s", vpn_client.pk)
+            messages.error(request, "بررسی پنل ناموفق بود. جزئیات امن در لاگ سرور ثبت شد.")
+            return redirect(review_url)
+        messages.success(request, f"بررسی همین سرویس انجام شد. Batch: {result.batch_id[:8]}")
+        return redirect(review_url)
+
     if request.POST.get("confirm_external") != "1":
         messages.error(request, "برای اجرای این action باید تایید صریح owner ثبت شود.")
         return redirect(review_url)
@@ -1263,6 +1565,16 @@ def build_service_review_context(vpn_client):
     delivery_error = latest_failed_action_error(vpn_client)
     if not delivery_error and vpn_client.order_id:
         delivery_error = safe_action_message((vpn_client.order.metadata or {}).get("delivery_error", ""))
+    remote_status = vpn_client.last_remote_check_status or VPNClient.RemoteCheckStatus.NOT_CHECKED
+    remote_fresh = remote_status_is_fresh(vpn_client)
+    remote_scope_current = remote_scope_matches_latest_check(vpn_client)
+    remote_warning = ""
+    if vpn_client.last_remote_check_at and not remote_fresh:
+        remote_warning = "نتیجه بررسی قدیمی است؛ قبل از پاک‌سازی دوباره بررسی کن."
+    elif vpn_client.last_remote_check_at and not remote_scope_current:
+        remote_warning = "scope سرویس بعد از آخرین بررسی تغییر کرده است؛ نتیجه قبلی معتبر نیست."
+    elif remote_status == VPNClient.RemoteCheckStatus.REMOTE_MISSING:
+        remote_warning = "این سرویس در آخرین بررسی معتبر روی پنل پیدا نشده است."
     return {
         "row": service_row(vpn_client),
         "customer_summary": {
@@ -1286,6 +1598,7 @@ def build_service_review_context(vpn_client):
             "order_url": order_review_url(vpn_client.order) if vpn_client.order_id else "",
             "panel": vpn_client.inbound.panel.name if vpn_client.inbound_id and vpn_client.inbound.panel_id else "-",
             "inbound": vpn_client.inbound.remark or vpn_client.inbound.inbound_id if vpn_client.inbound_id else "-",
+            "safe_scope": safe_remote_scope(vpn_client),
             "protocol": vpn_client.inbound.get_protocol_display() if vpn_client.inbound_id else "-",
             "status_label": vpn_client.get_status_display(),
             "status_tone": status_tone(vpn_client.status),
@@ -1297,6 +1610,18 @@ def build_service_review_context(vpn_client):
             "last_synced_at": vpn_client.last_synced_at,
             "last_online_at": vpn_client.last_online_at,
             "usage": usage,
+        },
+        "reconciliation_summary": {
+            "status": remote_status,
+            "label": "نیازمند بررسی مجدد" if vpn_client.last_remote_check_at and not remote_fresh else remote_status_label(remote_status),
+            "tone": "warning" if vpn_client.last_remote_check_at and not remote_fresh else remote_status_tone(remote_status),
+            "checked_at": vpn_client.last_remote_check_at,
+            "batch_id": vpn_client.last_remote_check_batch_id[:8] if vpn_client.last_remote_check_batch_id else "",
+            "error": safe_short_text(vpn_client.last_remote_check_error),
+            "fresh": remote_fresh,
+            "scope_current": remote_scope_current,
+            "warning": remote_warning,
+            "confirmation": RECONCILIATION_CONFIRMATION,
         },
         "delivery_summary": {
             "config_exists": bool(vpn_client.uuid or vpn_client.xui_email or vpn_client.username),
@@ -1319,20 +1644,33 @@ def build_service_review_context(vpn_client):
             "can_update_usage": bool(payload),
             "can_disable": bool(payload and vpn_client.status != VPNClient.Status.DELETED),
             "can_enable": bool(payload and vpn_client.status != VPNClient.Status.DELETED),
+            "can_reconcile": bool(vpn_client.status != VPNClient.Status.DELETED),
+            "can_soft_delete_remote_missing": remote_status_is_cleanup_eligible(vpn_client),
         },
         "workbench_url": service_workbench_url(store=vpn_client.store),
         "admin_change_url": reverse("admin:store_vpnclient_change", args=[vpn_client.pk]),
     }
 
 
+@require_admin_capability("services.view")
 def service_review(request, vpn_client_id):
     vpn_client = get_review_vpn_client(vpn_client_id)
     if request.method == "POST":
         return handle_service_review_action(request, vpn_client)
 
+    review_context = build_service_review_context(vpn_client)
+    review_context["actions"]["can_resend_config"] = review_context["actions"]["can_resend_config"] and user_has_capability(
+        request.user, "services.send_config"
+    )
+    for key in ("can_refresh_config", "can_update_usage", "can_disable", "can_enable", "can_reconcile", "can_soft_delete_remote_missing"):
+        review_context["actions"][key] = review_context["actions"][key] and user_has_capability(request.user, "services.modify")
+    if not user_has_capability(request.user, "support.reply"):
+        review_context["customer_summary"]["message_url"] = ""
+    if not user_has_capability(request.user, "support.view"):
+        review_context["customer_summary"]["support_history_url"] = ""
     context = {
         **admin.site.each_context(request),
-        **build_service_review_context(vpn_client),
+        **review_context,
         "vpn_client": vpn_client,
         "title": f"بررسی سرویس #{vpn_client.pk}",
         "subtitle": "نمای owner-facing بدون نمایش لینک کانفیگ، UUID، token یا شماره کامل.",
@@ -1413,11 +1751,15 @@ def build_customer_review_context(customer):
     }
 
 
+@require_any_admin_capability("orders.view", "services.view", "support.view")
 def customer_review(request, customer_id):
     customer = get_review_customer(customer_id)
+    review_context = build_customer_review_context(customer)
+    if not user_has_capability(request.user, "support.reply"):
+        review_context["message_url"] = ""
     context = {
         **admin.site.each_context(request),
-        **build_customer_review_context(customer),
+        **review_context,
         "customer": customer,
         "title": f"بررسی مشتری #{customer.pk}",
         "subtitle": "از مشتری به سرویس، usage، expiry و orderهای مرتبط برس.",
@@ -1425,6 +1767,7 @@ def customer_review(request, customer_id):
     return TemplateResponse(request, "admin/store/customers/review.html", context)
 
 
+@require_admin_capability("support.reply")
 def customer_message(request, customer_id):
     customer = get_object_or_404(Customer, pk=customer_id)
     message_url = customer_message_url(customer)
@@ -1451,6 +1794,251 @@ def customer_message(request, customer_id):
         "subtitle": "ارسال پیام شخصی و موردی فقط برای همین مشتری.",
     }
     return TemplateResponse(request, "admin/store/customers/message.html", context)
+
+
+def get_admin_campaign(campaign_id):
+    return get_object_or_404(
+        BroadcastMessage.objects.select_related("store"),
+        pk=campaign_id,
+    )
+
+
+@require_admin_capability("campaigns.view")
+def campaign_workbench(request):
+    stores, selected_store = selected_campaign_store_from_id(request.GET.get("store"))
+    workbench_context = get_campaign_workbench_context(selected_store)
+    if not user_has_capability(request.user, "campaigns.create"):
+        workbench_context["quick_actions"] = [
+            action for action in workbench_context["quick_actions"] if action["url"] != campaign_new_url(selected_store)
+        ]
+    context = {
+        **admin.site.each_context(request),
+        **workbench_context,
+        "stores": stores,
+        "selected_store": selected_store,
+        "can_create_campaign": user_has_capability(request.user, "campaigns.create"),
+        "title": "کمپین‌ها و پیام‌رسانی",
+        "subtitle": "ساخت، preview، queue و پایش کمپین‌های Broadcast بدون ارسال تصادفی.",
+    }
+    return TemplateResponse(request, "admin/store/campaigns/workbench.html", context)
+
+
+@require_admin_capability("campaigns.create")
+def campaign_message_form(request, campaign_id=None):
+    campaign = None
+    stores, selected_store = selected_campaign_store_from_id(request.GET.get("store"))
+    if campaign_id:
+        campaign = get_admin_campaign(campaign_id)
+        selected_store = campaign.store or selected_store
+    else:
+        audience_type = request.GET.get("audience")
+        if audience_type not in BroadcastMessage.AudienceType.values:
+            audience_type = BroadcastMessage.AudienceType.ALL
+        campaign = BroadcastMessage(
+            store=selected_store,
+            status=BroadcastMessage.Status.DRAFT,
+            audience_type=audience_type,
+            channel=BroadcastMessage.Channel.TELEGRAM,
+        )
+
+    if request.method == "POST" and campaign.pk and campaign.status != BroadcastMessage.Status.DRAFT:
+        messages.error(request, "فقط کمپین draft قابل ویرایش است.")
+        return redirect(campaign_review_url(campaign))
+
+    form = CampaignMessageForm(request.POST or None, instance=campaign, selected_store=selected_store)
+    if request.method == "POST":
+        if form.is_valid():
+            saved = form.save(commit=False)
+            metadata = dict(saved.metadata or {})
+            metadata.setdefault("created_by_user_id", request.user.pk)
+            metadata["last_edited_by_user_id"] = request.user.pk
+            saved.metadata = metadata
+            saved.status = saved.status or BroadcastMessage.Status.DRAFT
+            saved.save()
+            messages.success(request, "متن کمپین ذخیره شد. حالا مخاطبان را بررسی کن.")
+            return redirect(campaign_audience_url(saved))
+        messages.error(request, "لطفاً خطاهای فرم پیام را بررسی کن.")
+
+    context = {
+        **admin.site.each_context(request),
+        "title": "ساخت کمپین جدید" if not campaign.pk else f"ویرایش کمپین #{campaign.pk}",
+        "subtitle": "مرحله Message؛ این فرم هیچ پیام واقعی ارسال نمی‌کند.",
+        "campaign": campaign if campaign.pk else None,
+        "form": form,
+        "stores": stores,
+        "selected_store": selected_store,
+        "message_templates": MESSAGE_TEMPLATE_BODIES,
+        "workbench_url": campaign_workbench_url(selected_store),
+        "review_url": campaign_review_url(campaign) if campaign.pk else "",
+        "audience_url": campaign_audience_url(campaign) if campaign.pk else "",
+        "preview_url": campaign_preview_url(campaign) if campaign.pk else "",
+        "confirm_url": campaign_confirm_url(campaign) if campaign.pk else "",
+        "current_step": "message",
+    }
+    return TemplateResponse(request, "admin/store/campaigns/form.html", context)
+
+
+@require_admin_capability("campaigns.create")
+def campaign_audience(request, campaign_id):
+    campaign = get_admin_campaign(campaign_id)
+    if request.method == "POST" and campaign.status != BroadcastMessage.Status.DRAFT:
+        messages.error(request, "Audience فقط برای کمپین draft قابل تغییر است.")
+        return redirect(campaign_review_url(campaign))
+
+    form = CampaignAudienceForm(request.POST or None, instance=campaign)
+    if request.method == "POST":
+        if form.is_valid():
+            form.save()
+            messages.success(request, "Audience ذخیره شد. Preview را قبل از queue بررسی کن.")
+            return redirect(campaign_preview_url(campaign))
+        messages.error(request, "لطفاً خطاهای audience را بررسی کن.")
+
+    preview = get_audience_preview(campaign)
+    context = {
+        **admin.site.each_context(request),
+        "title": f"Audience کمپین #{campaign.pk}",
+        "subtitle": "مرحله Audience؛ فقط شمارش DB انجام می‌شود و recipient دائمی ساخته نمی‌شود.",
+        "campaign": campaign,
+        "form": form,
+        "preview": preview,
+        "audience_descriptions": audience_descriptions(),
+        "workbench_url": campaign_workbench_url(campaign.store),
+        "review_url": campaign_review_url(campaign),
+        "edit_url": campaign_edit_url(campaign),
+        "preview_url": campaign_preview_url(campaign),
+        "confirm_url": campaign_confirm_url(campaign),
+        "current_step": "audience",
+    }
+    return TemplateResponse(request, "admin/store/campaigns/audience.html", context)
+
+
+@require_admin_capability("campaigns.view")
+def campaign_preview(request, campaign_id):
+    if request.method != "GET":
+        return HttpResponseNotAllowed(["GET"])
+    campaign = get_admin_campaign(campaign_id)
+    preview = get_audience_preview(campaign)
+    context = {
+        **admin.site.each_context(request),
+        "title": f"Preview کمپین #{campaign.pk}",
+        "subtitle": "مرحله Preview؛ هیچ recipient، send یا live validation ساخته/اجرا نمی‌شود.",
+        "campaign": campaign,
+        "preview": preview,
+        "message_preview": safe_campaign_message_preview(campaign.message_text),
+        "workbench_url": campaign_workbench_url(campaign.store),
+        "review_url": campaign_review_url(campaign),
+        "edit_url": campaign_edit_url(campaign),
+        "audience_url": campaign_audience_url(campaign),
+        "confirm_url": campaign_confirm_url(campaign),
+        "current_step": "preview",
+    }
+    return TemplateResponse(request, "admin/store/campaigns/preview.html", context)
+
+
+def safe_campaign_message_preview(message):
+    return safe_campaign_snippet(message, limit=4096)
+
+
+@require_admin_capability("campaigns.queue")
+def campaign_confirm(request, campaign_id):
+    campaign = get_admin_campaign(campaign_id)
+    phrase = queue_confirmation_phrase(campaign)
+    preview = get_audience_preview(campaign)
+    if request.method == "POST":
+        if request.POST.get("confirmation", "").strip() != phrase:
+            messages.error(request, f"برای queue کردن باید دقیقاً {phrase} را وارد کنی.")
+            return redirect(campaign_confirm_url(campaign))
+        try:
+            counts = queue_campaign_for_processing(campaign, request.user)
+        except ValidationError as exc:
+            for error in exc.messages:
+                messages.error(request, error)
+            return redirect(campaign_confirm_url(campaign))
+        messages.success(
+            request,
+            f"کمپین queue شد: total={counts.get('total', 0):,} sent=0. ارسال واقعی فقط با process_broadcast_queue انجام می‌شود.",
+        )
+        return redirect(campaign_review_url(campaign))
+    if request.method != "GET":
+        return HttpResponseNotAllowed(["GET", "POST"])
+
+    context = {
+        **admin.site.each_context(request),
+        "title": f"تایید queue کمپین #{campaign.pk}",
+        "subtitle": "مرحله Confirm؛ این صفحه فقط با POST و phrase دقیق کمپین را queue می‌کند.",
+        "campaign": campaign,
+        "preview": preview,
+        "confirmation_phrase": phrase,
+        "workbench_url": campaign_workbench_url(campaign.store),
+        "review_url": campaign_review_url(campaign),
+        "edit_url": campaign_edit_url(campaign),
+        "audience_url": campaign_audience_url(campaign),
+        "preview_url": campaign_preview_url(campaign),
+        "current_step": "confirm",
+    }
+    return TemplateResponse(request, "admin/store/campaigns/confirm.html", context)
+
+
+@require_admin_capability("campaigns.view")
+def campaign_review(request, campaign_id):
+    campaign = get_admin_campaign(campaign_id)
+    review_url = campaign_review_url(campaign)
+    if request.method == "POST":
+        ensure_admin_capability(request.user, "campaigns.queue")
+        action = request.POST.get("action", "")
+        try:
+            if action == "cancel":
+                phrase = f"CANCEL_CAMPAIGN_{campaign.pk}"
+                if request.POST.get("confirmation", "").strip() != phrase:
+                    messages.error(request, f"برای cancel باید دقیقاً {phrase} را وارد کنی.")
+                else:
+                    cancel_campaign(campaign, request.user)
+                    messages.warning(request, "کمپین لغو شد. recipientهای sent برگشت داده نمی‌شوند.")
+                return redirect(review_url)
+
+            if action == "retry":
+                phrase = f"RETRY_CAMPAIGN_{campaign.pk}"
+                if request.POST.get("confirmation", "").strip() != phrase:
+                    messages.error(request, f"برای retry باید دقیقاً {phrase} را وارد کنی.")
+                else:
+                    count = reset_retryable_failed(campaign, request.user)
+                    if count:
+                        messages.success(request, f"{count:,} failed retryable دوباره pending شد و کمپین queue شد.")
+                    else:
+                        messages.info(request, "failed retryable برای retry پیدا نشد.")
+                return redirect(review_url)
+        except ValidationError as exc:
+            for error in exc.messages:
+                messages.error(request, error)
+            return redirect(review_url)
+
+        messages.error(request, "Action معتبر نیست.")
+        return redirect(review_url)
+
+    review_context = get_campaign_review_context(campaign)
+    review_context["actions"]["can_edit"] = review_context["actions"]["can_edit"] and user_has_capability(
+        request.user, "campaigns.create"
+    )
+    for key in ("can_queue", "can_cancel", "can_retry"):
+        review_context["actions"][key] = review_context["actions"][key] and user_has_capability(request.user, "campaigns.queue")
+    context = {
+        **admin.site.each_context(request),
+        **review_context,
+        "campaign": campaign,
+        "title": f"Campaign Review #{campaign.pk}",
+        "subtitle": "وضعیت ارسال، خطاها و actionهای امن کمپین.",
+    }
+    return TemplateResponse(request, "admin/store/campaigns/review.html", context)
+
+
+@require_admin_capability("campaigns.view")
+def campaign_export(request, campaign_id):
+    if request.method != "GET":
+        return HttpResponseNotAllowed(["GET"])
+    campaign = get_admin_campaign(campaign_id)
+    response = HttpResponse(build_campaign_export_csv(campaign), content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="{export_filename(campaign)}"'
+    return response
 
 
 def get_review_order(order_id):
@@ -1482,6 +2070,10 @@ def handle_order_review_action(request, order):
     if action not in {"approve", "reject", "retry_delivery"}:
         messages.error(request, "Action معتبر نیست.")
         return redirect(review_url)
+    if action == "reject":
+        ensure_admin_capability(request.user, "orders.reject")
+    else:
+        ensure_admin_capability(request.user, "orders.approve")
 
     if request.POST.get("confirm_external") != "1":
         messages.error(request, "برای اجرای این action باید تایید صریح owner ثبت شود.")
@@ -1541,10 +2133,18 @@ def build_review_context(order):
     clients = prefetched_clients(order)
     first_client = clients[0] if clients else None
     last_error = (
-        (order.metadata or {}).get("panel_provisioning_reason")
+        order.last_provisioning_error
+        or (order.metadata or {}).get("panel_provisioning_reason")
         or (order.metadata or {}).get("delivery_error")
         or ""
     )
+    provisioning_scope = (order.metadata or {}).get("provisioning_scope") or {}
+    provisioning_strategy = (order.metadata or {}).get("provisioning_strategy") or ""
+    if not provisioning_strategy:
+        provisioning_strategy = "renew_existing_client" if (order.metadata or {}).get("renewal_client_pk") else ""
+    panel_profile = ""
+    if order.inbound_id and order.inbound and order.inbound.panel_id:
+        panel_profile = order.inbound.panel.capability_profile or "legacy_single_node"
     return {
         "row": order_row(order),
         "payment": {
@@ -1572,6 +2172,14 @@ def build_review_context(order):
             "active_client_count": sum(1 for client in clients if client.status == VPNClient.Status.ACTIVE),
             "last_error": safe_action_message(last_error) if last_error else "",
             "primary_client_status": first_client.get_status_display() if first_client else "",
+            "provisioning_strategy": provisioning_strategy,
+            "compatibility_profile": panel_profile,
+            "provisioning_status": order.get_provisioning_status_display(),
+            "provisioning_attempts": order.provisioning_attempts,
+            "provisioned_at": order.provisioned_at,
+            "scope_panel_id": provisioning_scope.get("panel_id") or "",
+            "scope_node_id": provisioning_scope.get("node_id") or "",
+            "scope_xui_inbound_id": provisioning_scope.get("xui_inbound_id") or "",
         },
         "can_approve": can_approve_order(order),
         "can_reject": can_reject_order(order),
@@ -1592,14 +2200,23 @@ def build_review_context(order):
     }
 
 
+@require_admin_capability("orders.view")
 def order_review(request, order_id):
     order = get_review_order(order_id)
     if request.method == "POST":
         return handle_order_review_action(request, order)
 
+    review_context = build_review_context(order)
+    review_context["can_approve"] = review_context["can_approve"] and user_has_capability(request.user, "orders.approve")
+    review_context["can_reject"] = review_context["can_reject"] and user_has_capability(request.user, "orders.reject")
+    review_context["can_retry_delivery"] = review_context["can_retry_delivery"] and user_has_capability(request.user, "orders.approve")
+    if not user_has_capability(request.user, "support.reply"):
+        review_context["customer_message_url"] = ""
+    if not user_has_capability(request.user, "support.view"):
+        review_context["support_workbench_url"] = ""
     context = {
         **admin.site.each_context(request),
-        **build_review_context(order),
+        **review_context,
         "order": order,
         "title": f"بررسی سفارش {order.order_tracking_code}",
         "subtitle": "خلاصه owner-facing، بدون نمایش لینک کانفیگ یا secret کامل.",
@@ -1617,6 +2234,7 @@ def handle_catalog_post_action(request, *, selected_store=None, plan=None):
     if action not in {"activate", "deactivate", "duplicate", "deactivate_route"}:
         messages.error(request, "Action معتبر نیست.")
         return None
+    ensure_admin_capability(request.user, "catalog.manage")
     if request.POST.get("confirm_action") != "1":
         messages.error(request, "برای انجام این عملیات باید تایید صریح ثبت شود.")
         return None
@@ -1653,6 +2271,7 @@ def handle_catalog_post_action(request, *, selected_store=None, plan=None):
     return copied
 
 
+@require_admin_capability("catalog.view")
 def product_catalog(request):
     stores, selected_store = selected_catalog_store_from_id(request.GET.get("store"))
     if request.method == "POST":
@@ -1666,12 +2285,14 @@ def product_catalog(request):
         **get_catalog_context(selected_store),
         "stores": stores,
         "selected_store": selected_store,
+        "can_manage_catalog": user_has_capability(request.user, "catalog.manage"),
         "title": "مدیریت محصولات و مسیر فروش",
         "subtitle": "کاتالوگ پلن‌ها، routeهای فروش و آمادگی inboundها بدون اجرای live call.",
     }
     return TemplateResponse(request, "admin/store/catalog/index.html", context)
 
 
+@require_admin_capability("catalog.manage")
 def catalog_plan_form(request, plan_id=None):
     plan = None
     if plan_id:
@@ -1701,6 +2322,7 @@ def catalog_plan_form(request, plan_id=None):
     return TemplateResponse(request, "admin/store/catalog/plan_form.html", context)
 
 
+@require_admin_capability("catalog.view")
 def catalog_plan_review(request, plan_id):
     plan = get_object_or_404(Plan.objects.select_related("store").prefetch_related("operators"), pk=plan_id)
     selected_store = plan.store
@@ -1736,10 +2358,12 @@ def catalog_plan_review(request, plan_id):
         "catalog_url": catalog_url(selected_store),
         "bulk_assign_url": f"{reverse('admin:store_planinboundroute_bulk_assign')}?{urlencode({'store': getattr(selected_store, 'pk', ''), 'plan_ids': plan.pk, 'plan_selection_mode': 'manual'})}",
         "admin_change_url": reverse("admin:store_plan_change", args=[plan.pk]),
+        "can_manage_catalog": user_has_capability(request.user, "catalog.manage"),
     }
     return TemplateResponse(request, "admin/store/catalog/plan_review.html", context)
 
 
+@require_admin_capability("setup.manage")
 def setup_center(request):
     setup_context = build_setup_center_context(request.GET.get("store"))
     context = {
@@ -1751,6 +2375,7 @@ def setup_center(request):
     return TemplateResponse(request, "admin/store/setup_center.html", context)
 
 
+@require_admin_capability("dashboard.view")
 def owner_dashboard(request):
     dashboard_context = get_owner_dashboard_context(
         user=request.user,
@@ -1765,11 +2390,50 @@ def owner_dashboard(request):
     return TemplateResponse(request, "admin/store/owner_dashboard.html", context)
 
 
+@require_admin_capability("reports.view")
+def reports_center(request):
+    stores, selected_store = get_report_store_options(request.GET.get("store"))
+    allow_extended = bool(request.user.is_superuser and request.GET.get("extended_reason"))
+    period = resolve_report_period(request.GET, store=selected_store, allow_extended=allow_extended)
+    reports_context = get_reports_center_context(period, selected_store)
+    context = {
+        **admin.site.each_context(request),
+        **reports_context,
+        "stores": stores,
+        "selected_store": selected_store,
+        "can_export_reports": user_has_capability(request.user, "reports.export"),
+        "title": "گزارش‌ها و تحلیل کسب‌وکار",
+        "subtitle": "فروش، مشتری، سرویس، مصرف پنل و عملیات از داده‌های موجود DB",
+    }
+    return TemplateResponse(request, "admin/store/reports/index.html", context)
+
+
+@require_admin_capability("reports.export")
+def reports_export(request):
+    report_type = (request.GET.get("report") or "sales").strip()
+    if report_type not in VALID_REPORT_EXPORTS:
+        return HttpResponseBadRequest("نوع گزارش نامعتبر است.")
+    _stores, selected_store = get_report_store_options(request.GET.get("store"))
+    allow_extended = bool(request.user.is_superuser and request.GET.get("extended_reason"))
+    period = resolve_report_period(request.GET, store=selected_store, allow_extended=allow_extended)
+    if period.errors or period.blocked:
+        return HttpResponseBadRequest("بازه گزارش معتبر نیست یا از حد مجاز طولانی‌تر است.")
+    filename, body = build_reports_csv(period, report_type, selected_store)
+    response = HttpResponse(body, content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
+
+@require_admin_capability("revenue.view")
 def revenue_control_center(request):
     selected_store_id = request.POST.get("store") if request.method == "POST" else request.GET.get("store")
     stores, selected_store = get_store_options(selected_store_id)
     if request.method == "POST":
         action = request.POST.get("action", "")
+        if action == "enable_real_send":
+            ensure_admin_capability(request.user, "revenue.enable_real_send")
+        else:
+            ensure_admin_capability(request.user, "revenue.manage_safe")
         if not selected_store:
             messages.error(request, "برای Revenue Control Center ابتدا یک Store بساز.")
         elif action == "enable_dry_run":
@@ -1813,12 +2477,164 @@ def revenue_control_center(request):
         **control_context,
         "stores": stores,
         "selected_store": selected_store,
+        "can_manage_revenue": user_has_capability(request.user, "revenue.manage_safe"),
+        "can_enable_real_send": user_has_capability(request.user, "revenue.enable_real_send"),
         "title": "کنترل درآمد هوشمند",
         "subtitle": "Revenue Engine Control Center",
     }
     return TemplateResponse(request, "admin/store/revenue/control_center.html", context)
 
 
+def _safe_setup_test_error(exc, *sensitive_values):
+    message = str(exc or "").strip()
+    for value in sensitive_values:
+        value = str(value or "").strip()
+        if value:
+            message = message.replace(value, "<redacted>")
+    return safe_action_message(message)
+
+
+def _test_telegram_setup_form(form):
+    token = (form.cleaned_data.get("bot_token") or "").strip()
+    if not token:
+        raise ValidationError("برای بررسی اتصال، Bot token لازم است.")
+    config = BotConfiguration(
+        provider=BotConfiguration.Provider.TELEGRAM,
+        store=form.store,
+        name=form.cleaned_data.get("name") or "Telegram bot",
+        telegram_bot_username=form.cleaned_data.get("telegram_bot_username") or "",
+        bot_token=token,
+        admin_user_id=form.cleaned_data.get("admin_user_id") or "",
+        additional_admin_user_ids=form.cleaned_data.get("additional_admin_user_ids") or "",
+        is_active=False,
+    )
+    client = BotClient(config)
+    client.bot_token = token
+    client.base_url = client.BASE_URLS[BotConfiguration.Provider.TELEGRAM].format(token=token).rstrip("/")
+    return client.get_me()
+
+
+def _test_xui_setup_form(form, store):
+    password = (form.cleaned_data.get("password") or "").strip()
+    panel = Panel(
+        store=store,
+        name=form.cleaned_data.get("name") or "Primary X-UI panel",
+        url=form.cleaned_data.get("url") or "",
+        username=form.cleaned_data.get("username") or "",
+        password=password,
+        proxy_url=form.cleaned_data.get("proxy_url") or None,
+        is_active=bool(form.cleaned_data.get("is_active")),
+    )
+    service = XUIService(panel, timeout_seconds=8)
+    return service.authenticated_json("GET", "/panel/api/inbounds/list")
+
+
+def _store_domain_host(store):
+    text = str(getattr(store, "domain", "") or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text if "://" in text else f"//{text}")
+    host = parsed.hostname or parsed.path.split("/", 1)[0]
+    return host.strip().strip(".").lower()
+
+
+def _tenant_instance_for_store(store):
+    host = _store_domain_host(store)
+    if not host:
+        return None
+    return (
+        TenantInstance.objects.exclude(status=TenantInstance.Status.DELETED)
+        .filter(
+            Q(subdomain__iexact=host)
+            | Q(domain__iexact=host)
+            | Q(customer_domain__iexact=host)
+            | Q(domain__iexact=f"https://{host}")
+            | Q(domain__iexact=f"http://{host}")
+            | Q(instance_url__iexact=f"https://{host}")
+            | Q(instance_url__iexact=f"http://{host}")
+        )
+        .order_by("id")
+        .first()
+    )
+
+
+def _store_has_active_telegram_bot(store):
+    if not store:
+        return False
+    return (
+        BotConfiguration.objects.filter(
+            store=store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            is_active=True,
+        )
+        .exclude(bot_token="")
+        .exists()
+    )
+
+
+def _ensure_tenant_bot_worker_after_setup(request, store):
+    if not _store_has_active_telegram_bot(store):
+        return
+    instance = _tenant_instance_for_store(store)
+    if not instance:
+        return
+    try:
+        TenantOwnerToolkit().start_or_restart_bot_worker(tenant_id=instance.tenant_id)
+    except OwnerToolkitError as exc:
+        messages.warning(
+            request,
+            f"فروشگاه ذخیره شد، اما راه‌اندازی worker ربات نیاز به بررسی دارد: {safe_action_message(exc)}",
+        )
+    else:
+        messages.success(request, "worker ربات تلگرام فعال شد.")
+
+
+def _handle_setup_test_action(request, step_slug, form, selected_store):
+    action = request.POST.get(WIZARD_ACTION_FIELD)
+    if action == WIZARD_TEST_TELEGRAM_ACTION:
+        if step_slug != "telegram":
+            return False
+        if form.is_valid():
+            try:
+                _test_telegram_setup_form(form)
+            except (ValidationError, BotDeliveryError) as exc:
+                messages.error(
+                    request,
+                    f"بررسی ربات ناموفق بود: {_safe_setup_test_error(exc, form.cleaned_data.get('bot_token'))}",
+                )
+            else:
+                messages.success(request, "اتصال ربات با getMe بررسی شد. هیچ پیام تلگرامی ارسال نشد.")
+        else:
+            messages.error(request, "برای بررسی اتصال، ابتدا خطاهای فرم را اصلاح کن.")
+        return True
+
+    if action == WIZARD_TEST_XUI_ACTION:
+        if step_slug != "panel":
+            return False
+        if form.is_valid():
+            try:
+                _test_xui_setup_form(form, selected_store)
+            except Exception as exc:
+                safe_error = _safe_setup_test_error(
+                    exc,
+                    form.cleaned_data.get("password"),
+                    form.cleaned_data.get("proxy_url"),
+                )
+                logger.warning("Setup wizard X-UI read test failed: %s", safe_error)
+                messages.error(
+                    request,
+                    f"تست خواندن پنل ناموفق بود: {safe_error}",
+                )
+            else:
+                messages.success(request, "اتصال پنل با یک خواندن read-only بررسی شد.")
+        else:
+            messages.error(request, "برای تست پنل، ابتدا خطاهای فرم را اصلاح کن.")
+        return True
+
+    return False
+
+
+@require_admin_capability("setup.manage")
 def setup_wizard_index(request):
     wizard_context = get_setup_wizard_context(request, request.GET.get("store"))
     context = {
@@ -1830,21 +2646,41 @@ def setup_wizard_index(request):
     return TemplateResponse(request, "admin/store/setup_wizard/index.html", context)
 
 
+@require_admin_capability("setup.manage")
 def setup_wizard_step(request, step_slug):
     if step_slug not in WIZARD_STEP_BY_SLUG:
         return redirect("admin_store_setup_wizard")
 
     if step_slug == "review":
+        _stores, selected_store = selected_store_from_id(request.GET.get("store"))
+        if request.method == "POST":
+            if request.POST.get(WIZARD_ACTION_FIELD) != WIZARD_ACTIVATE_ACTION:
+                messages.error(request, "Action نامعتبر است.")
+                return redirect(wizard_step_url("review", selected_store))
+            if request.POST.get("activation_confirmation", "").strip() != WIZARD_ACTIVATION_CONFIRMATION:
+                messages.error(request, f"برای فعال‌سازی باید دقیقاً {WIZARD_ACTIVATION_CONFIRMATION} را وارد کنی.")
+                return redirect(wizard_step_url("review", selected_store))
+            status = sync_store_setup_status(selected_store, allow_ready=True)
+            if status == Store.SetupStatus.READY:
+                _ensure_tenant_bot_worker_after_setup(request, selected_store)
+                messages.success(request, "فروشگاه آماده شد و فروش عمومی فعال است.")
+            else:
+                messages.error(request, "هنوز چند مورد setup کامل نیست؛ تا رفع همه موارد فروش عمومی فعال نمی‌شود.")
+            return redirect(wizard_step_url("review", selected_store))
+
         context = {
             **admin.site.each_context(request),
-            **get_review_context(request, request.GET.get("store")),
+            **get_review_context(request, getattr(selected_store, "pk", None)),
             "title": "بررسی نهایی راه‌اندازی",
         }
         return TemplateResponse(request, "admin/store/setup_wizard/review.html", context)
 
     _stores, selected_store = selected_store_from_id(request.GET.get("store"))
 
-    if request.method == "POST" and "_skip" in request.POST:
+    if request.method == "POST" and is_skip_request(request.POST):
+        if not is_step_skippable(step_slug):
+            messages.error(request, "این مرحله قابل رد کردن نیست.")
+            return redirect(wizard_step_url(step_slug, selected_store))
         mark_step_skipped(request, step_slug)
         messages.warning(request, "این مرحله برای بعد علامت‌گذاری شد.")
         next_slug = next_step_slug(step_slug)
@@ -1852,11 +2688,30 @@ def setup_wizard_step(request, step_slug):
 
     form = get_step_form(step_slug, request=request, store=selected_store, data=request.POST or None)
     if request.method == "POST":
+        if request.POST.get(WIZARD_ACTION_FIELD) in {WIZARD_TEST_TELEGRAM_ACTION, WIZARD_TEST_XUI_ACTION}:
+            if not _handle_setup_test_action(request, step_slug, form, selected_store):
+                messages.error(request, "Action تست برای این مرحله معتبر نیست.")
+                return redirect(wizard_step_url(step_slug, selected_store))
+            context = {
+                **admin.site.each_context(request),
+                **get_step_page_context(
+                    request,
+                    step_slug,
+                    selected_store_id=getattr(selected_store, "pk", None),
+                    form=form,
+                ),
+                "title": WIZARD_STEP_BY_SLUG[step_slug].title,
+            }
+            return TemplateResponse(request, WIZARD_STEP_BY_SLUG[step_slug].template, context)
+
         if form.is_valid():
             saved_object = save_step_form(step_slug, form)
             if isinstance(saved_object, Store):
                 selected_store = saved_object
+            sync_store_setup_status(selected_store, allow_ready=False)
             clear_step_skipped(request, step_slug)
+            if step_slug == "telegram":
+                _ensure_tenant_bot_worker_after_setup(request, selected_store)
             messages.success(request, "مرحله با موفقیت ذخیره شد.")
             if step_slug == "plans" and isinstance(saved_object, Plan):
                 return redirect(catalog_plan_review_url(saved_object))

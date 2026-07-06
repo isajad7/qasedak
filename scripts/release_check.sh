@@ -179,6 +179,43 @@ check_unignored_artifacts() {
   fi
 }
 
+check_admin_css_artifact() {
+  local source="$REPO_DIR/static_src/admin/qasedak_admin_tailwind.css"
+  local output="$REPO_DIR/static/admin/qasedak_admin_tailwind.css"
+
+  [[ -f "$source" ]] || {
+    record_fail "admin-css" "missing source $source"
+    return 0
+  }
+  [[ -f "$output" ]] || {
+    record_fail "admin-css" "missing compiled $output; run npm run build:admin-css"
+    return 0
+  }
+  if [[ "$source" -nt "$output" ]]; then
+    record_fail "admin-css" "compiled CSS is older than source; run npm run build:admin-css"
+    return 0
+  fi
+
+  python3 - "$output" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+if ".tw-admin-home" not in text or ".tw-grid" not in text:
+    print("missing tw-prefixed admin dashboard classes")
+    raise SystemExit(1)
+if re.search(r"(^|})\s*(\*|html|body|button,input,select,optgroup,textarea)\s*[{,]", text):
+    print("compiled CSS appears to contain global reset/preflight selectors")
+    raise SystemExit(1)
+PY
+  if (($?)); then
+    record_fail "admin-css" "compiled CSS is not scoped or contains preflight"
+  else
+    record_pass "admin-css" "compiled scoped Tailwind CSS present"
+  fi
+}
+
 check_production_values() {
   local findings
   findings="$(
@@ -225,6 +262,10 @@ for rel_path in paths:
     if rel_path in seen:
         continue
     seen.add(rel_path)
+    parts = rel_path.split("/")
+    base = os.path.basename(rel_path)
+    if base in {"tests.py", "test.py"} or base.startswith("test_") or "tests" in parts:
+        continue
     abs_path = os.path.join(repo_dir, rel_path)
     if not os.path.isfile(abs_path):
         continue
@@ -257,6 +298,79 @@ PY
     [[ -n "$path" ]] || continue
     record_fail "production-scan" "$path ($label)"
   done <<< "$findings"
+}
+
+check_postgres_readiness() {
+  local env_example="$REPO_DIR/.env.example"
+  local requirements="$REPO_DIR/requirements.txt"
+  local install_script="$REPO_DIR/scripts/install.sh"
+  local backup_script="$REPO_DIR/scripts/backup.sh"
+  local doctor_script="$REPO_DIR/scripts/doctor.sh"
+
+  if grep -q '^DATABASE_ENGINE=' "$env_example" && grep -q '^POSTGRES_PASSWORD=' "$env_example"; then
+    record_pass "postgres-env-example" "database engine and Postgres env examples present"
+  else
+    record_fail "postgres-env-example" "missing DATABASE_ENGINE or POSTGRES_PASSWORD in .env.example"
+  fi
+
+  if grep -Fq 'psycopg[binary]' "$requirements"; then
+    record_pass "postgres-dependency" "psycopg[binary] present"
+  else
+    record_fail "postgres-dependency" "psycopg[binary] missing from requirements.txt"
+  fi
+
+  if grep -q 'pg_dump' "$backup_script" && grep -q -- '-Fc' "$backup_script"; then
+    record_pass "postgres-backup" "backup.sh uses pg_dump custom format"
+  else
+    record_fail "postgres-backup" "backup.sh does not mention pg_dump -Fc"
+  fi
+
+  if grep -q 'pg_isready' "$doctor_script" && grep -q 'pg_dump' "$doctor_script" && grep -q 'pg_restore' "$doctor_script"; then
+    record_pass "postgres-doctor" "doctor.sh checks PostgreSQL connectivity and backup tools"
+  else
+    record_fail "postgres-doctor" "doctor.sh is missing pg_isready/pg_dump/pg_restore checks"
+  fi
+
+  if grep -q -- '--db-engine' "$install_script" && grep -q 'install_postgres_packages' "$install_script"; then
+    record_pass "postgres-installer" "install.sh supports Postgres dry-run/install path"
+  else
+    record_fail "postgres-installer" "install.sh is missing Postgres installer support"
+  fi
+
+  local leaked_passwords
+  leaked_passwords="$(
+    python3 - "$REPO_DIR" "$FILES_FILE" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+files_path = Path(sys.argv[2])
+allowed = {"", "generate-with-installer", "runtime-generated", "[REDACTED]"}
+paths = [p.decode("utf-8", "surrogateescape") for p in files_path.read_bytes().split(b"\0") if p]
+for rel in paths:
+    path = repo / rel
+    if not path.is_file():
+        continue
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
+    for match in re.finditer(r"(?m)^POSTGRES_PASSWORD=(.+)$", text):
+        value = match.group(1).strip().strip("'\"")
+        if value in allowed or "$" in value or value.startswith("generate"):
+            continue
+        print(rel)
+PY
+  )"
+  if [[ -z "$leaked_passwords" ]]; then
+    record_pass "postgres-secret-scan" "no hardcoded generated Postgres password found"
+  else
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      record_fail "postgres-secret-scan" "$path contains a hardcoded POSTGRES_PASSWORD"
+    done <<< "$leaked_passwords"
+  fi
 }
 
 emit_json() {
@@ -307,9 +421,11 @@ main() {
     run_step "django-tests" "$py" manage.py test store.tests payments.tests
   fi
   run_step "migration-check" "$py" manage.py makemigrations --check --dry-run
+  check_admin_css_artifact
   check_tracked_artifacts
   check_unignored_artifacts
   check_production_values
+  check_postgres_readiness
 
   if (( FAILURES )); then
     record_fail "release-readiness" "NOT_READY_SECRET_OR_ARTIFACTS"

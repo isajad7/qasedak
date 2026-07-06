@@ -3,6 +3,7 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from payments.models import IncomingPaymentSMS
+from store.admin_dashboard import get_admin_home_context
 from store.models import Customer, Order
 
 register = template.Library()
@@ -16,6 +17,16 @@ def admin_dashboard_stats():
         Order.Status.PENDING_VERIFICATION,
         Order.Status.CONFIRMED,
     ]
+
+
+@register.simple_tag(takes_context=True)
+def admin_home_context(context):
+    request = context.get("request")
+    user = getattr(request, "user", None)
+    selected_store_id = ""
+    if request is not None:
+        selected_store_id = request.GET.get("store")
+    return get_admin_home_context(user=user, selected_store_id=selected_store_id)
 
     return [
         {

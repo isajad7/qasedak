@@ -16,7 +16,7 @@ from .jalali import format_jalali_datetime, persian_digits
 from .models import Customer, FreeTrialRequest, Inbound, VPNClient
 from .naming import build_trial_client_name
 from .order_services import get_current_store
-from .xui_api import bytes_from_gb, create_trial_client_details, delete_client
+from .xui_api import bytes_from_gb, create_trial_client_details, delete_client, mask_xui_value
 
 
 logger = logging.getLogger(__name__)
@@ -165,8 +165,8 @@ def cleanup_panel_trial_client(client_result, inbound, *, trial_request=None):
     deleted = delete_client(target)
     log_context = {
         "request_id": getattr(trial_request, "pk", None),
-        "uuid": client_result.get("uuid"),
-        "email": client_result.get("email") or "",
+        "uuid": mask_xui_value(client_result.get("uuid")),
+        "email": mask_xui_value(client_result.get("email") or ""),
         "inbound_id": getattr(inbound, "pk", None),
     }
     if deleted:
@@ -296,6 +296,8 @@ def create_free_trial_for_customer(customer, telegram_user_id=None, *, store=Non
                     device_limit=payload["limit_ip"],
                     activated_at=now,
                     expires_at=expires_at,
+                    xui_node_id=client_result.get("xui_node_id") or getattr(settings["inbound"], "xui_node_id", "") or "",
+                    remote_client_key=client_result.get("remote_client_key") or "",
                     xui_raw=client_result.get("raw", {}),
                 )
                 trial_request.vpn_client = vpn_client
@@ -329,8 +331,8 @@ def create_free_trial_for_customer(customer, telegram_user_id=None, *, store=Non
                 getattr(trial_request, "pk", None),
                 getattr(customer, "pk", None),
                 telegram_user_id,
-                client_result.get("uuid"),
-                client_result.get("email") or "",
+                mask_xui_value(client_result.get("uuid")),
+                mask_xui_value(client_result.get("email") or ""),
                 safe_error,
             )
             return FreeTrialResult(

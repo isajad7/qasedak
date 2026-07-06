@@ -13,6 +13,7 @@ INSTALL_DIR=""
 CONFIG_PATH=""
 DEFAULT_INSTALL_DIR="/opt/qasedak"
 ADMIN_PASSWORD_ENV_NAME="QASEDAK_ADMIN_PASSWORD"
+POSTGRES_PASSWORD_ENV_NAME="QASEDAK_DB_PASSWORD"
 TELEGRAM_BOT_TOKEN_ENV_NAME="QASEDAK_TELEGRAM_BOT_TOKEN"
 XUI_PASSWORD_ENV_NAME="QASEDAK_XUI_PASSWORD"
 APT_PACKAGES=(
@@ -22,6 +23,7 @@ APT_PACKAGES=(
   ca-certificates
   openssl
 )
+POSTGRES_PACKAGES=(postgresql postgresql-client libpq-dev)
 NGINX_PACKAGES=(nginx)
 TLS_PACKAGES=(certbot python3-certbot-nginx)
 SUDO_CMD=()
@@ -70,6 +72,7 @@ Options:
   --yes              Accept prompts and use safe defaults where prompting is needed.
   --install-dir DIR  Install target directory. Default: /opt/qasedak
   --advanced         Ask optional Store, payment, Telegram, X-UI, inbound, and plan prompts.
+  --db-engine NAME   Database engine for interactive installs: postgres or sqlite. Default: postgres.
   --config FILE      Use an existing install config JSON instead of interactive prompts.
   --live-checks      Explicitly run Telegram/X-UI live checks during bootstrap and doctor.
   --clean-existing   Remove detected previous Qasedak install traces before installing.
@@ -219,6 +222,87 @@ PY
   fi
 }
 
+generate_db_password() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 32 | tr -d '\n'
+  else
+    "${PYTHON_BIN:-python3}" - <<'PY'
+import secrets
+print(secrets.token_urlsafe(32), end="")
+PY
+  fi
+}
+
+normalize_database_engine() {
+  local engine="${DATABASE_ENGINE:-sqlite}"
+  engine="${engine,,}"
+  case "$engine" in
+    sqlite|sqlite3)
+      DATABASE_ENGINE="sqlite"
+      ;;
+    postgres|postgresql)
+      DATABASE_ENGINE="postgres"
+      ;;
+    *)
+      die "Unsupported database engine: $engine. Use postgres or sqlite."
+      ;;
+  esac
+}
+
+validate_pg_identifier() {
+  local label="$1"
+  local value="$2"
+  [[ "$value" =~ ^[a-zA-Z0-9_]+$ ]] || die "$label may contain only letters, numbers, and underscores."
+}
+
+validate_postgres_config() {
+  [[ "${DATABASE_ENGINE:-sqlite}" == "postgres" ]] || return 0
+  POSTGRES_DB="${POSTGRES_DB:-qasedak}"
+  POSTGRES_USER="${POSTGRES_USER:-qasedak}"
+  POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"
+  POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+  POSTGRES_CONN_MAX_AGE="${POSTGRES_CONN_MAX_AGE:-60}"
+  POSTGRES_SSLMODE="${POSTGRES_SSLMODE:-prefer}"
+  POSTGRES_PASSWORD_ENV_NAME="${POSTGRES_PASSWORD_ENV_NAME:-QASEDAK_DB_PASSWORD}"
+  validate_pg_identifier "PostgreSQL database name" "$POSTGRES_DB"
+  validate_pg_identifier "PostgreSQL user name" "$POSTGRES_USER"
+  [[ "$POSTGRES_PASSWORD_ENV_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "PostgreSQL password_env must be a valid environment variable name."
+  [[ "$POSTGRES_PORT" =~ ^[0-9]+$ ]] || die "PostgreSQL port must be numeric."
+  [[ "$POSTGRES_CONN_MAX_AGE" =~ ^[0-9]+$ ]] || die "PostgreSQL conn max age must be numeric."
+}
+
+sql_literal() {
+  local value="$1"
+  printf "'%s'" "${value//\'/\'\'}"
+}
+
+sql_ident() {
+  local value="$1"
+  validate_pg_identifier "PostgreSQL identifier" "$value"
+  printf '"%s"' "$value"
+}
+
+postgres_psql_output() {
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -u postgres psql "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    runuser -u postgres -- psql "$@"
+  else
+    su postgres -c "$(printf 'psql'; printf ' %q' "$@")"
+  fi
+}
+
+postgres_psql_file() {
+  local file="$1"
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -u postgres psql -v ON_ERROR_STOP=1 postgres < "$file" >/dev/null
+  elif command -v runuser >/dev/null 2>&1; then
+    runuser -u postgres -- psql -v ON_ERROR_STOP=1 postgres < "$file" >/dev/null
+  else
+    su postgres -c "psql -v ON_ERROR_STOP=1 postgres" < "$file" >/dev/null
+  fi
+}
+
 parse_args() {
   while (($#)); do
     case "$1" in
@@ -235,6 +319,11 @@ parse_args() {
         shift
         [[ $# -gt 0 ]] || die "--install-dir requires a value."
         INSTALL_DIR="$1"
+        ;;
+      --db-engine)
+        shift
+        [[ $# -gt 0 ]] || die "--db-engine requires a value."
+        DATABASE_ENGINE="$1"
         ;;
       --config)
         shift
@@ -334,13 +423,29 @@ except Exception:
     print("")
     print("0")
     print("")
+    print("")
+    print("")
+    print("")
+    print("")
+    print("")
+    print("")
+    print("")
 else:
     app = data.get("app") or {}
     store = data.get("store") or {}
     admin = data.get("admin") or {}
+    database = data.get("database") or {}
+    postgres = database.get("postgres") or {}
     print(store.get("domain") or app.get("domain") or "")
     print("1" if app.get("enable_tls") else "0")
     print(admin.get("username") or "admin")
+    print((database.get("engine") or "sqlite").lower())
+    print(postgres.get("database") or "qasedak")
+    print(postgres.get("user") or "qasedak")
+    print(postgres.get("host") or "127.0.0.1")
+    print(postgres.get("port") or "5432")
+    print(postgres.get("password_env") or "QASEDAK_DB_PASSWORD")
+    print(database.get("sqlite_path") or "")
 PY
 }
 
@@ -441,6 +546,16 @@ install_base_packages() {
   fi
   run_cmd "${SUDO_CMD[@]}" apt-get update
   run_cmd "${SUDO_CMD[@]}" apt-get install -y "${packages[@]}"
+}
+
+install_postgres_packages() {
+  [[ "${DATABASE_ENGINE:-sqlite}" == "postgres" ]] || return 0
+  log "PostgreSQL packages: ${POSTGRES_PACKAGES[*]}"
+  if (( ! DRY_RUN )); then
+    confirm "Install/update PostgreSQL packages with apt?" "yes" || die "PostgreSQL package installation cancelled."
+  fi
+  run_cmd "${SUDO_CMD[@]}" apt-get update
+  run_cmd "${SUDO_CMD[@]}" apt-get install -y "${POSTGRES_PACKAGES[@]}"
 }
 
 python_is_compatible() {
@@ -701,6 +816,19 @@ collect_config() {
     APP_DOMAIN="${config_metadata[0]:-}"
     APP_ENABLE_TLS="${config_metadata[1]:-0}"
     ADMIN_USERNAME="${config_metadata[2]:-admin}"
+    local config_db_engine="${config_metadata[3]:-sqlite}"
+    if [[ -n "${DATABASE_ENGINE:-}" && "${DATABASE_ENGINE,,}" != "${config_db_engine,,}" ]]; then
+      die "--db-engine conflicts with database.engine in $CONFIG_PATH."
+    fi
+    DATABASE_ENGINE="$config_db_engine"
+    normalize_database_engine
+    POSTGRES_DB="${config_metadata[4]:-qasedak}"
+    POSTGRES_USER="${config_metadata[5]:-qasedak}"
+    POSTGRES_HOST="${config_metadata[6]:-127.0.0.1}"
+    POSTGRES_PORT="${config_metadata[7]:-5432}"
+    POSTGRES_PASSWORD_ENV_NAME="${config_metadata[8]:-QASEDAK_DB_PASSWORD}"
+    SQLITE_PATH="${config_metadata[9]:-$INSTALL_DIR/data/db.sqlite3}"
+    validate_postgres_config
     resolve_optional_layers
     RUN_DOCTOR="$(prompt_yes_no "Run non-live doctor after install?" "yes")"
     log "Using provided install config: $CONFIG_PATH"
@@ -723,8 +851,25 @@ collect_config() {
   ADMIN_USERNAME="$(prompt_value "Admin username" "admin" "yes")"
   ADMIN_EMAIL="$(prompt_value "Admin email (optional)" "" "no")"
   ADMIN_PASSWORD="$(prompt_secret_or_generate "Admin password")"
-  DATABASE_ENGINE="sqlite"
-  SQLITE_PATH="$(prompt_value "SQLite database path" "$INSTALL_DIR/data/db.sqlite3" "yes")"
+  DATABASE_ENGINE="${DATABASE_ENGINE:-$(prompt_value "Database engine [postgres/sqlite]" "postgres" "yes")}"
+  normalize_database_engine
+  SQLITE_PATH="$INSTALL_DIR/data/db.sqlite3"
+  POSTGRES_DB="qasedak"
+  POSTGRES_USER="qasedak"
+  POSTGRES_HOST="127.0.0.1"
+  POSTGRES_PORT="5432"
+  POSTGRES_CONN_MAX_AGE="60"
+  POSTGRES_SSLMODE="prefer"
+  if [[ "$DATABASE_ENGINE" == "postgres" ]]; then
+    POSTGRES_DB="$(prompt_value "PostgreSQL database name" "$POSTGRES_DB" "yes")"
+    POSTGRES_USER="$(prompt_value "PostgreSQL database user" "$POSTGRES_USER" "yes")"
+    POSTGRES_HOST="$(prompt_value "PostgreSQL host" "$POSTGRES_HOST" "yes")"
+    POSTGRES_PORT="$(prompt_value "PostgreSQL port" "$POSTGRES_PORT" "yes")"
+    POSTGRES_PASSWORD="__GENERATE__"
+    validate_postgres_config
+  else
+    SQLITE_PATH="$(prompt_value "SQLite database path" "$SQLITE_PATH" "yes")"
+  fi
   STORE_NAME="Qasedak"
   STORE_ENGLISH_NAME="Qasedak"
   STORE_CARD_NUMBER=""
@@ -824,6 +969,11 @@ materialize_generated_secrets() {
     ADMIN_PASSWORD_GENERATED=1
     log "Admin password generated and stored in .env as $ADMIN_PASSWORD_ENV_NAME."
   fi
+  if [[ "${DATABASE_ENGINE:-sqlite}" == "postgres" && ( -z "${POSTGRES_PASSWORD:-}" || "${POSTGRES_PASSWORD:-}" == "__GENERATE__" ) ]]; then
+    POSTGRES_PASSWORD="$(generate_db_password)"
+    POSTGRES_PASSWORD_GENERATED=1
+    log "PostgreSQL password generated and stored in .env as POSTGRES_PASSWORD and $POSTGRES_PASSWORD_ENV_NAME."
+  fi
 }
 
 admin_panel_url() {
@@ -893,6 +1043,23 @@ rsync_repo() {
     "$REPO_DIR/" "$INSTALL_DIR/"
 }
 
+write_database_env() {
+  printf '%s=%q\n' DATABASE_ENGINE "${DATABASE_ENGINE:-sqlite}"
+  printf '%s=%q\n' SQLITE_DATABASE_PATH "${SQLITE_PATH:-$INSTALL_DIR/data/db.sqlite3}"
+  if [[ "${DATABASE_ENGINE:-sqlite}" == "postgres" ]]; then
+    printf '%s=%q\n' POSTGRES_DB "${POSTGRES_DB:-qasedak}"
+    printf '%s=%q\n' POSTGRES_USER "${POSTGRES_USER:-qasedak}"
+    printf '%s=%q\n' POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
+    if [[ "${POSTGRES_PASSWORD_ENV_NAME:-QASEDAK_DB_PASSWORD}" != "POSTGRES_PASSWORD" ]]; then
+      printf '%s=%q\n' "$POSTGRES_PASSWORD_ENV_NAME" "$POSTGRES_PASSWORD"
+    fi
+    printf '%s=%q\n' POSTGRES_HOST "${POSTGRES_HOST:-127.0.0.1}"
+    printf '%s=%q\n' POSTGRES_PORT "${POSTGRES_PORT:-5432}"
+    printf '%s=%q\n' POSTGRES_CONN_MAX_AGE "${POSTGRES_CONN_MAX_AGE:-60}"
+    printf '%s=%q\n' POSTGRES_SSLMODE "${POSTGRES_SSLMODE:-prefer}"
+  fi
+}
+
 write_env_file() {
   local target="$INSTALL_DIR/.env"
   if (( DRY_RUN )); then
@@ -924,7 +1091,7 @@ write_env_file() {
     printf '%s=%q\n' DJANGO_ALLOWED_HOSTS "$allowed_hosts"
     printf '%s=%q\n' DJANGO_CSRF_TRUSTED_ORIGINS "$csrf_origins"
     printf '%s=%q\n' DJANGO_USE_X_FORWARDED_HOST "True"
-    printf '%s=%q\n' SQLITE_DATABASE_PATH "${SQLITE_PATH:-$INSTALL_DIR/data/db.sqlite3}"
+    write_database_env
     printf '%s=%q\n' DJANGO_LANGUAGE_CODE "${APP_LANGUAGE:-fa}"
     printf '%s=%q\n' DJANGO_TIME_ZONE "${APP_TIMEZONE:-Asia/Tehran}"
     printf '%s=%q\n' "$ADMIN_PASSWORD_ENV_NAME" "$ADMIN_PASSWORD"
@@ -989,10 +1156,22 @@ store = config.get("store") or {}
 telegram = config.get("telegram") or {}
 xui = config.get("xui") or {}
 database = config.get("database") or {}
+postgres = database.get("postgres") or {}
 domain = store.get("domain") or app.get("domain") or ""
 enable_tls = os.environ.get("INSTALL_TLS_ACTIVE") == "1"
 install_dir = os.environ["INSTALL_TARGET"]
 sqlite_path = database.get("sqlite_path") or os.path.join(install_dir, "data", "db.sqlite3")
+engine = str(database.get("engine") or "sqlite").strip().lower()
+if engine in {"postgresql"}:
+    engine = "postgres"
+if engine not in {"sqlite", "postgres"}:
+    raise SystemExit(f"Unsupported database.engine: {engine}")
+postgres_password_env = postgres.get("password_env") or "QASEDAK_DB_PASSWORD"
+postgres_password = (
+    os.environ.get(postgres_password_env)
+    or os.environ.get("POSTGRES_PASSWORD")
+    or secrets.token_urlsafe(32)
+)
 server_ip = os.environ.get("INSTALL_SERVER_IP", "")
 allowed_parts = []
 if domain:
@@ -1014,6 +1193,7 @@ values = {
     "DJANGO_ALLOWED_HOSTS": allowed_hosts,
     "DJANGO_CSRF_TRUSTED_ORIGINS": csrf_origins,
     "DJANGO_USE_X_FORWARDED_HOST": "True",
+    "DATABASE_ENGINE": engine,
     "SQLITE_DATABASE_PATH": sqlite_path,
     "DJANGO_LANGUAGE_CODE": app.get("language") or "fa",
     "DJANGO_TIME_ZONE": app.get("timezone") or "Asia/Tehran",
@@ -1044,6 +1224,18 @@ values = {
     "DJANGO_SECURE_HSTS_PRELOAD": "False",
 }
 
+if engine == "postgres":
+    values.update({
+        "POSTGRES_DB": postgres.get("database") or "qasedak",
+        "POSTGRES_USER": postgres.get("user") or "qasedak",
+        "POSTGRES_PASSWORD": postgres_password,
+        postgres_password_env: postgres_password,
+        "POSTGRES_HOST": postgres.get("host") or "127.0.0.1",
+        "POSTGRES_PORT": str(postgres.get("port") or "5432"),
+        "POSTGRES_CONN_MAX_AGE": str(postgres.get("conn_max_age") or "60"),
+        "POSTGRES_SSLMODE": postgres.get("sslmode") or "prefer",
+    })
+
 for section, field in ((config.get("admin") or {}, "password_env"), (telegram, "bot_token_env"), (xui, "password_env")):
     env_name = section.get(field)
     if env_name and os.environ.get(env_name):
@@ -1069,7 +1261,8 @@ write_generated_config() {
   export APP_DOMAIN APP_ENABLE_TLS APP_TIMEZONE APP_LANGUAGE
   export ADVANCED ADMIN_PASSWORD_ENV_NAME TELEGRAM_BOT_TOKEN_ENV_NAME XUI_PASSWORD_ENV_NAME
   export ADMIN_USERNAME ADMIN_EMAIL
-  export DATABASE_ENGINE SQLITE_PATH
+  export DATABASE_ENGINE SQLITE_PATH POSTGRES_DB POSTGRES_USER POSTGRES_HOST POSTGRES_PORT
+  export POSTGRES_CONN_MAX_AGE POSTGRES_SSLMODE POSTGRES_PASSWORD_ENV_NAME
   export STORE_NAME STORE_ENGLISH_NAME STORE_CARD_NUMBER STORE_CARD_OWNER
   export TELEGRAM_ENABLED TELEGRAM_BOT_USERNAME TELEGRAM_ADMIN_IDS TELEGRAM_PROXY_ENABLED
   export TELEGRAM_PROXY_PROTOCOL TELEGRAM_PROXY_HOST TELEGRAM_PROXY_PORT TELEGRAM_PROXY_USERNAME
@@ -1114,7 +1307,7 @@ config = {
         "password_env": env("ADMIN_PASSWORD_ENV_NAME", "QASEDAK_ADMIN_PASSWORD"),
     },
     "database": {
-        "engine": "sqlite",
+        "engine": env("DATABASE_ENGINE", "sqlite"),
         "sqlite_path": env("SQLITE_PATH"),
     },
     "store": {
@@ -1132,6 +1325,17 @@ config = {
         "dry_run": True,
     },
 }
+
+if env("DATABASE_ENGINE", "sqlite") == "postgres":
+    config["database"]["postgres"] = {
+        "database": env("POSTGRES_DB", "qasedak"),
+        "user": env("POSTGRES_USER", "qasedak"),
+        "password_env": env("POSTGRES_PASSWORD_ENV_NAME", "QASEDAK_DB_PASSWORD"),
+        "host": env("POSTGRES_HOST", "127.0.0.1"),
+        "port": int(env("POSTGRES_PORT", "5432")),
+        "conn_max_age": int(env("POSTGRES_CONN_MAX_AGE", "60")),
+        "sslmode": env("POSTGRES_SSLMODE", "prefer"),
+    }
 
 if advanced:
     plan = {
@@ -1244,6 +1448,82 @@ source_env() {
   # shellcheck source=/dev/null
   . "$INSTALL_DIR/.env"
   set +a
+}
+
+create_postgres_role_and_db() {
+  [[ "${DATABASE_ENGINE:-sqlite}" == "postgres" ]] || return 0
+  validate_postgres_config
+  if (( DRY_RUN )); then
+    log "DRY-RUN: would create/verify PostgreSQL role '$POSTGRES_USER' and database '$POSTGRES_DB' without resetting existing passwords."
+    return 0
+  fi
+  [[ -n "${POSTGRES_PASSWORD:-}" ]] || die "POSTGRES_PASSWORD is required for PostgreSQL installs."
+  command -v psql >/dev/null 2>&1 || die "psql was not found after PostgreSQL package installation."
+
+  local user_lit db_lit user_ident db_ident role_exists db_exists reset_existing_role=0
+  user_lit="$(sql_literal "$POSTGRES_USER")"
+  db_lit="$(sql_literal "$POSTGRES_DB")"
+  user_ident="$(sql_ident "$POSTGRES_USER")"
+  db_ident="$(sql_ident "$POSTGRES_DB")"
+  role_exists="$(postgres_psql_output -Atqc "SELECT 1 FROM pg_roles WHERE rolname = $user_lit;" postgres 2>/dev/null || true)"
+  db_exists="$(postgres_psql_output -Atqc "SELECT 1 FROM pg_database WHERE datname = $db_lit;" postgres 2>/dev/null || true)"
+
+  if [[ "$role_exists" == "1" ]]; then
+    warn "PostgreSQL role '$POSTGRES_USER' already exists; keeping its password unchanged."
+    if (( ! YES )) && confirm "Reset password for existing PostgreSQL role '$POSTGRES_USER'?" "no"; then
+      reset_existing_role=1
+    fi
+  fi
+
+  local tmp_sql
+  tmp_sql="$(mktemp)"
+  chmod 600 "$tmp_sql"
+  {
+    if [[ "$role_exists" != "1" ]]; then
+      printf 'CREATE ROLE %s WITH LOGIN PASSWORD %s;\n' "$user_ident" "$(sql_literal "$POSTGRES_PASSWORD")"
+    elif (( reset_existing_role )); then
+      printf 'ALTER ROLE %s WITH LOGIN PASSWORD %s;\n' "$user_ident" "$(sql_literal "$POSTGRES_PASSWORD")"
+    fi
+    if [[ "$db_exists" != "1" ]]; then
+      printf 'CREATE DATABASE %s OWNER %s;\n' "$db_ident" "$user_ident"
+    else
+      printf 'ALTER DATABASE %s OWNER TO %s;\n' "$db_ident" "$user_ident"
+    fi
+    printf 'GRANT ALL PRIVILEGES ON DATABASE %s TO %s;\n' "$db_ident" "$user_ident"
+  } > "$tmp_sql"
+  if ! postgres_psql_file "$tmp_sql"; then
+    rm -f "$tmp_sql"
+    die "PostgreSQL role/database creation failed."
+  fi
+  rm -f "$tmp_sql"
+  log "PostgreSQL role/database are ready."
+}
+
+check_postgres_connection() {
+  [[ "${DATABASE_ENGINE:-sqlite}" == "postgres" ]] || return 0
+  validate_postgres_config
+  if (( DRY_RUN )); then
+    log "DRY-RUN: would check PostgreSQL connectivity with pg_isready and psql (password redacted)."
+    return 0
+  fi
+  command -v pg_isready >/dev/null 2>&1 || die "pg_isready not found."
+  command -v psql >/dev/null 2>&1 || die "psql not found."
+  PGPASSWORD="$POSTGRES_PASSWORD" pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -d "$POSTGRES_DB" -U "$POSTGRES_USER" >/dev/null
+  PGPASSWORD="$POSTGRES_PASSWORD" psql \
+    "host=$POSTGRES_HOST port=$POSTGRES_PORT dbname=$POSTGRES_DB user=$POSTGRES_USER sslmode=${POSTGRES_SSLMODE:-prefer}" \
+    -v ON_ERROR_STOP=1 -Atqc "SELECT 1" >/dev/null
+  log "PostgreSQL connection check passed."
+}
+
+configure_database_backend() {
+  normalize_database_engine
+  if [[ "$DATABASE_ENGINE" == "sqlite" ]]; then
+    log "Database: SQLite at ${SQLITE_PATH:-$INSTALL_DIR/data/db.sqlite3}."
+    return 0
+  fi
+  source_env
+  create_postgres_role_and_db
+  check_postgres_connection
 }
 
 django_setup() {
@@ -1498,6 +1778,15 @@ print_post_install_next_steps() {
   printf '\n'
   printf 'Qasedak install complete.\n'
   printf '\n'
+  printf 'Database:\n'
+  printf '  engine: %s\n' "${DATABASE_ENGINE:-sqlite}"
+  if [[ "${DATABASE_ENGINE:-sqlite}" == "postgres" ]]; then
+    printf '  database: %s@%s:%s/%s\n' "${POSTGRES_USER:-qasedak}" "${POSTGRES_HOST:-127.0.0.1}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-qasedak}"
+    printf '  password: stored in %s/.env (redacted)\n' "$INSTALL_DIR"
+  else
+    printf '  path: %s\n' "${SQLITE_PATH:-$INSTALL_DIR/data/db.sqlite3}"
+  fi
+  printf '\n'
   printf 'Admin panel:\n'
   printf '  %s\n' "$url"
   printf '\n'
@@ -1536,10 +1825,12 @@ main() {
   collect_config
   precheck_tls_dns
   install_base_packages
+  install_postgres_packages
   check_python_version
   prepare_install_tree
   rsync_repo
   write_runtime_files
+  configure_database_backend
   django_setup
   configure_systemd
   configure_nginx

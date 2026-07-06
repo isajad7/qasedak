@@ -259,6 +259,269 @@
     text-decoration: none !important;
 }
 
+.qadmin-reports {
+    gap: 18px;
+}
+
+.qadmin-report-alert {
+    border: 1px solid #e4bc59;
+    border-radius: 8px;
+    background: #fff8e5;
+    padding: 12px 14px;
+    color: #735016;
+}
+
+.qadmin-report-alert p {
+    margin: 0;
+    line-height: 1.8;
+}
+
+.qadmin-report-filters {
+    flex-wrap: wrap;
+}
+
+.qadmin-report-filter-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #fff;
+    padding: 12px;
+}
+
+.qadmin-report-ranges,
+.qadmin-report-custom-range {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.qadmin-report-custom-range {
+    margin: 0;
+}
+
+.qadmin-report-custom-range label {
+    margin: 0;
+    color: #5f6f85;
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.qadmin-report-custom-range input {
+    min-height: 36px;
+    border: 1px solid #c4ceda;
+    border-radius: 6px;
+    background: #fff;
+    color: #172033;
+    direction: ltr;
+    padding: 6px 10px;
+}
+
+.qadmin-report-range {
+    display: inline-flex;
+    align-items: center;
+    min-height: 34px;
+    border: 1px solid #c4ceda;
+    border-radius: 999px;
+    background: #fff;
+    color: #344154 !important;
+    font-size: 13px;
+    font-weight: 800;
+    padding: 6px 12px;
+    text-decoration: none !important;
+}
+
+.qadmin-report-range-active {
+    border-color: #216c5c;
+    background: #e5f4ef;
+    color: #195548 !important;
+}
+
+.qadmin-report-kpis,
+.qadmin-report-mini-grid,
+.qadmin-chart-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+.qadmin-report-kpi,
+.qadmin-report-section,
+.qadmin-chart-box,
+.qadmin-report-mini-grid > div,
+.qadmin-report-mini-grid > a {
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #fff;
+}
+
+.qadmin-report-kpi {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 150px;
+    border-top-width: 4px;
+    padding: 14px;
+}
+
+.qadmin-report-kpi header,
+.qadmin-report-section > header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.qadmin-report-kpi h2,
+.qadmin-report-section h2 {
+    margin: 0;
+    color: #172033;
+    font-size: 17px;
+    font-weight: 900;
+}
+
+.qadmin-report-kpi strong {
+    color: #172033;
+    font-size: 24px;
+    font-weight: 900;
+}
+
+.qadmin-report-kpi p,
+.qadmin-report-section p {
+    margin: 0;
+    color: #5f6f85;
+    line-height: 1.8;
+}
+
+.qadmin-comparison {
+    display: inline-flex;
+    align-items: center;
+    width: fit-content;
+    border-radius: 999px;
+    padding: 4px 9px;
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.qadmin-comparison-success {
+    background: #dff4e8;
+    color: #17613c;
+}
+
+.qadmin-comparison-danger {
+    background: #ffe2df;
+    color: #9c2b21;
+}
+
+.qadmin-comparison-secondary {
+    background: #edf0f5;
+    color: #58677b;
+}
+
+.qadmin-report-section {
+    display: grid;
+    gap: 14px;
+    padding: 14px;
+}
+
+.qadmin-report-mini-grid > div,
+.qadmin-report-mini-grid > a {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 86px;
+    padding: 12px;
+    text-decoration: none !important;
+}
+
+.qadmin-report-mini-grid strong {
+    color: #172033;
+    font-size: 20px;
+    font-weight: 900;
+}
+
+.qadmin-report-mini-grid span {
+    color: #5f6f85;
+    font-size: 12px;
+    font-weight: 800;
+    line-height: 1.6;
+}
+
+.qadmin-chart-box {
+    min-height: 230px;
+    padding: 12px;
+}
+
+.qadmin-chart-box canvas {
+    width: 100% !important;
+    height: 205px !important;
+}
+
+.qadmin-table-wrap {
+    overflow-x: auto;
+}
+
+.qadmin-report-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 640px;
+}
+
+.qadmin-report-table th,
+.qadmin-report-table td {
+    border-bottom: 1px solid #e8edf3;
+    padding: 10px;
+    text-align: right;
+    vertical-align: top;
+}
+
+.qadmin-report-table th {
+    background: #f7f9fc;
+    color: #344154;
+    font-size: 12px;
+    font-weight: 900;
+}
+
+.qadmin-report-table td {
+    color: #172033;
+    font-size: 13px;
+}
+
+.qadmin-two-tables {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 12px;
+}
+
+.qadmin-empty {
+    color: #69778a !important;
+    text-align: center !important;
+}
+
+@media (max-width: 720px) {
+    .qadmin-report-kpis,
+    .qadmin-report-mini-grid,
+    .qadmin-chart-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .qadmin-report-kpi header,
+    .qadmin-report-section > header,
+    .qadmin-report-filter-panel {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .qadmin-report-custom-range input,
+    .qadmin-report-custom-range button {
+        width: 100%;
+    }
+}
+
 .qadmin-action:hover {
     background: #185448;
     color: #fff !important;
@@ -659,6 +922,238 @@
 .qadmin-support-review,
 .qadmin-customer-message {
     gap: 16px;
+}
+
+.qadmin-campaigns {
+    gap: 16px;
+}
+
+.qadmin-campaign-metrics,
+.qadmin-campaign-quick,
+.qadmin-campaign-preview-grid {
+    display: grid;
+    gap: 10px;
+}
+
+.qadmin-campaign-metrics {
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.qadmin-campaign-metrics div {
+    display: grid;
+    gap: 4px;
+    min-height: 78px;
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #fff;
+    padding: 12px;
+}
+
+.qadmin-campaign-metrics strong {
+    color: #172033;
+    font-size: 22px;
+    font-weight: 900;
+}
+
+.qadmin-campaign-metrics span {
+    color: #5f6f85;
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.qadmin-campaign-quick {
+    grid-template-columns: repeat(auto-fit, minmax(150px, max-content));
+    align-items: center;
+}
+
+.qadmin-campaign-table {
+    min-width: 900px;
+}
+
+.qadmin-audience-descriptions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 8px;
+}
+
+.qadmin-audience-descriptions article,
+.qadmin-message-preview,
+.qadmin-danger-box {
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #fff;
+}
+
+.qadmin-audience-descriptions article {
+    display: grid;
+    gap: 4px;
+    padding: 10px;
+}
+
+.qadmin-audience-descriptions article.is-current {
+    border-color: #216c5c;
+    background: #edf8f4;
+}
+
+.qadmin-audience-descriptions strong {
+    color: #172033;
+    font-size: 13px;
+    font-weight: 900;
+}
+
+.qadmin-audience-descriptions span {
+    color: #5f6f85;
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+.qadmin-audience-summary {
+    display: grid;
+    gap: 14px;
+}
+
+.qadmin-sample-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.qadmin-campaign-preview-grid {
+    grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+    align-items: start;
+}
+
+.qadmin-message-preview {
+    overflow: hidden;
+    background: #eef5f2;
+}
+
+.qadmin-message-preview header {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    border-bottom: 1px solid #d7dee8;
+    background: #fff;
+    padding: 10px 12px;
+}
+
+.qadmin-message-preview header strong,
+.qadmin-message-preview header span {
+    color: #344154;
+    font-size: 13px;
+    font-weight: 900;
+}
+
+.qadmin-telegram-bubble {
+    width: min(100%, 340px);
+    margin: 18px;
+    border-radius: 8px 8px 2px 8px;
+    background: #fff;
+    color: #172033;
+    line-height: 1.9;
+    padding: 12px 14px;
+    white-space: normal;
+    word-break: break-word;
+}
+
+.qadmin-danger-box {
+    display: grid;
+    gap: 8px;
+    border-color: #e6a29b;
+    background: #fff5f3;
+    padding: 14px;
+}
+
+.qadmin-danger-box h2 {
+    margin: 0;
+    color: #8f2d25;
+    font-size: 18px;
+    font-weight: 900;
+}
+
+.qadmin-danger-box p {
+    margin: 0;
+    color: #6d2c27;
+    line-height: 1.8;
+}
+
+.qadmin-confirm-box .qadmin-command,
+.qadmin-action-form .qadmin-command {
+    margin: 6px 0;
+}
+
+.qadmin-action-form input[name="confirmation"] {
+    width: 100%;
+    max-width: 420px;
+    min-height: 38px;
+    border: 1px solid #c4ceda;
+    border-radius: 6px;
+    background: #fff;
+    direction: ltr;
+    padding: 7px 10px;
+}
+
+.qadmin-delivery-progress {
+    display: flex;
+    width: 100%;
+    height: 10px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #edf0f5;
+}
+
+.qadmin-delivery-progress span {
+    display: block;
+    height: 100%;
+}
+
+.qadmin-delivery-progress .sent {
+    background: #36a66a;
+}
+
+.qadmin-delivery-progress .failed {
+    background: #d34c3f;
+}
+
+.qadmin-delivery-progress .skipped {
+    background: #9b7b42;
+}
+
+.qadmin-recipient-table {
+    min-width: 820px;
+}
+
+.qadmin-muted {
+    color: #8a97a8 !important;
+}
+
+.qadmin-template-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.qadmin-template-button {
+    min-height: 32px;
+    border: 1px solid #c4ceda;
+    border-radius: 6px;
+    background: #f7f9fc;
+    color: #172033;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 800;
+    padding: 6px 10px;
+}
+
+.qadmin-template-button:hover {
+    border-color: #9fb0c4;
+    background: #edf3f8;
+}
+
+@media (max-width: 860px) {
+    .qadmin-campaign-preview-grid {
+        grid-template-columns: 1fr;
+    }
 }
 
 .qadmin-order-tabs,
@@ -1648,4 +2143,152 @@
     .qadmin-form-actions > * {
         width: 100%;
     }
+}
+
+.qadmin-staff-stats,
+.qadmin-warning-grid,
+.qadmin-role-grid,
+.qadmin-permission-matrix {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    margin: 1rem 0;
+}
+
+.qadmin-staff-stats article,
+.qadmin-warning-grid article,
+.qadmin-role-card,
+.qadmin-generated-password,
+.qadmin-staff-section,
+.qadmin-warning-panel,
+.qadmin-permission-matrix article {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 1rem;
+}
+
+.qadmin-staff-stats strong,
+.qadmin-warning-grid strong {
+    color: #111827;
+    display: block;
+    font-size: 1.6rem;
+    line-height: 1.2;
+}
+
+.qadmin-staff-table {
+    border-collapse: collapse;
+    min-width: 860px;
+    width: 100%;
+}
+
+.qadmin-staff-table th,
+.qadmin-staff-table td {
+    border-bottom: 1px solid #eef2f7;
+    padding: .75rem;
+    text-align: right;
+    vertical-align: top;
+}
+
+.qadmin-staff-table small,
+.qadmin-review-grid small {
+    color: #6b7280;
+    display: block;
+    margin-top: .25rem;
+}
+
+.qadmin-role-badge,
+.qadmin-permission-list span,
+.qadmin-permission-preview span,
+.qadmin-role-user {
+    background: #eef6ff;
+    border: 1px solid #cfe4ff;
+    border-radius: 999px;
+    color: #17456b;
+    display: inline-flex;
+    font-size: .85rem;
+    margin: .15rem;
+    padding: .28rem .6rem;
+}
+
+.qadmin-permission-denied span {
+    background: #f8fafc;
+    border-color: #e5e7eb;
+    color: #6b7280;
+}
+
+.qadmin-role-card header {
+    align-items: flex-start;
+    display: flex;
+    gap: .75rem;
+    justify-content: space-between;
+}
+
+.qadmin-role-card h2 {
+    font-size: 1.05rem;
+    margin: 0 0 .5rem;
+}
+
+.qadmin-role-list {
+    display: grid;
+    gap: .75rem;
+}
+
+.qadmin-role-list article {
+    background: #f8fafc;
+    border-radius: 8px;
+    padding: .85rem;
+}
+
+.qadmin-form-grid {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.qadmin-staff-form {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 1rem;
+}
+
+.qadmin-form-row input,
+.qadmin-form-row select,
+.qadmin-form-row textarea {
+    max-width: 100%;
+    width: 100%;
+}
+
+.qadmin-form-row ul {
+    list-style: none;
+    margin: .35rem 0 0;
+    padding: 0;
+}
+
+.qadmin-generated-password {
+    border-color: #f59e0b;
+    margin: 1rem 0;
+}
+
+.qadmin-inline-code {
+    white-space: normal;
+    word-break: break-word;
+}
+
+.qadmin-inline-form {
+    display: inline-flex;
+    margin: 0;
+}
+
+.qadmin-inline-form .qadmin-action {
+    border: 0;
+    cursor: pointer;
+    font: inherit;
+}
+
+.qadmin-inline-form .qadmin-action:disabled,
+.qadmin-button:disabled {
+    cursor: not-allowed;
+    opacity: .55;
 }

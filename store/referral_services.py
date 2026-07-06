@@ -9,6 +9,7 @@ from django.db.models import Count, F, Sum
 from django.utils import timezone
 
 from .configuration_services import get_telegram_bot_username
+from .db_locking import select_for_update_self
 from .models import Customer, Order, Referral, ReferralRewardLedger, Store, VPNClient
 from .referrals import assign_referrer, build_referral_link, normalize_referral_code
 from .xui_api import add_client_traffic, bytes_from_gb
@@ -76,8 +77,7 @@ def create_referral_reward_for_order(order):
 
     with transaction.atomic():
         order = (
-            Order.objects.select_for_update()
-            .select_related("customer", "customer__referred_by", "store")
+            select_for_update_self(Order.objects.select_related("customer", "customer__referred_by", "store"))
             .get(pk=order.pk)
         )
         if (
@@ -197,7 +197,7 @@ def get_active_referral_configs(customer):
         return VPNClient.objects.none()
     return (
         VPNClient.objects.select_related("plan", "order", "inbound", "inbound__panel")
-        .filter(order__customer=customer, status=VPNClient.Status.ACTIVE)
+        .filter(order__customer=customer, status=VPNClient.Status.ACTIVE, deleted_at__isnull=True)
         .order_by("-created_at")
     )
 
@@ -337,8 +337,7 @@ def redeem_referral_rewards(customer, vpn_config):
     now = timezone.now()
     with transaction.atomic():
         vpn_config = (
-            VPNClient.objects.select_for_update()
-            .select_related("order", "inbound", "inbound__panel")
+            select_for_update_self(VPNClient.objects.select_related("order", "inbound", "inbound__panel"))
             .filter(pk=vpn_config.pk, order__customer=customer, status=VPNClient.Status.ACTIVE)
             .first()
         )

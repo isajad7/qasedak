@@ -3,8 +3,26 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
+from core.health import health
+from store.admin_backup_restore import (
+    backup_center,
+    backup_create,
+    backup_delete,
+    backup_download,
+    restore_command,
+    restore_detail,
+    restore_upload,
+    restore_validate,
+)
 from store.admin_views import (
     card_receipts_report,
+    campaign_audience,
+    campaign_confirm,
+    campaign_export,
+    campaign_message_form,
+    campaign_preview,
+    campaign_review,
+    campaign_workbench,
     customer_message,
     customer_review,
     order_review,
@@ -13,8 +31,13 @@ from store.admin_views import (
     product_catalog,
     catalog_plan_form,
     catalog_plan_review,
+    reports_center,
+    reports_export,
     revenue_control_center,
+    service_bulk_soft_delete_missing,
+    service_reconcile,
     service_review,
+    service_soft_delete_missing,
     service_workbench,
     setup_center,
     setup_wizard_index,
@@ -22,8 +45,19 @@ from store.admin_views import (
     support_review,
     support_workbench,
 )
+from store.admin_staff import (
+    staff_access_center,
+    staff_create,
+    staff_edit,
+    staff_password,
+    staff_review,
+    staff_role_detail,
+    staff_roles,
+)
 
 urlpatterns = [
+    path('health', health, name='health_no_slash'),
+    path('health/', health, name='health'),
     path(
         'admin/card-receipts-report/',
         admin.site.admin_view(card_receipts_report),
@@ -33,6 +67,46 @@ urlpatterns = [
         'admin/store/setup/',
         admin.site.admin_view(setup_center),
         name='admin_store_setup_center',
+    ),
+    path(
+        'admin/store/backups/',
+        admin.site.admin_view(backup_center),
+        name='admin_store_backup_center',
+    ),
+    path(
+        'admin/store/backups/create/',
+        admin.site.admin_view(backup_create),
+        name='admin_store_backup_create',
+    ),
+    path(
+        'admin/store/backups/<int:job_id>/download/',
+        admin.site.admin_view(backup_download),
+        name='admin_store_backup_download',
+    ),
+    path(
+        'admin/store/backups/<int:job_id>/delete/',
+        admin.site.admin_view(backup_delete),
+        name='admin_store_backup_delete',
+    ),
+    path(
+        'admin/store/restore/upload/',
+        admin.site.admin_view(restore_upload),
+        name='admin_store_restore_upload',
+    ),
+    path(
+        'admin/store/restore/<int:restore_id>/',
+        admin.site.admin_view(restore_detail),
+        name='admin_store_restore_detail',
+    ),
+    path(
+        'admin/store/restore/<int:restore_id>/validate/',
+        admin.site.admin_view(restore_validate),
+        name='admin_store_restore_validate',
+    ),
+    path(
+        'admin/store/restore/<int:restore_id>/command/',
+        admin.site.admin_view(restore_command),
+        name='admin_store_restore_command',
     ),
     path(
         'admin/store/dashboard/',
@@ -65,6 +139,91 @@ urlpatterns = [
         name='admin_store_revenue_control',
     ),
     path(
+        'admin/store/reports/',
+        admin.site.admin_view(reports_center),
+        name='admin_store_reports_center',
+    ),
+    path(
+        'admin/store/reports/export/',
+        admin.site.admin_view(reports_export),
+        name='admin_store_reports_export',
+    ),
+    path(
+        'admin/store/campaigns/',
+        admin.site.admin_view(campaign_workbench),
+        name='admin_store_campaign_workbench',
+    ),
+    path(
+        'admin/store/campaigns/new/',
+        admin.site.admin_view(campaign_message_form),
+        name='admin_store_campaign_new',
+    ),
+    path(
+        'admin/store/campaigns/<int:campaign_id>/',
+        admin.site.admin_view(campaign_review),
+        name='admin_store_campaign_review',
+    ),
+    path(
+        'admin/store/campaigns/<int:campaign_id>/edit/',
+        admin.site.admin_view(campaign_message_form),
+        name='admin_store_campaign_edit',
+    ),
+    path(
+        'admin/store/campaigns/<int:campaign_id>/audience/',
+        admin.site.admin_view(campaign_audience),
+        name='admin_store_campaign_audience',
+    ),
+    path(
+        'admin/store/campaigns/<int:campaign_id>/preview/',
+        admin.site.admin_view(campaign_preview),
+        name='admin_store_campaign_preview',
+    ),
+    path(
+        'admin/store/campaigns/<int:campaign_id>/confirm/',
+        admin.site.admin_view(campaign_confirm),
+        name='admin_store_campaign_confirm',
+    ),
+    path(
+        'admin/store/campaigns/<int:campaign_id>/export/',
+        admin.site.admin_view(campaign_export),
+        name='admin_store_campaign_export',
+    ),
+    path(
+        'admin/store/staff/',
+        admin.site.admin_view(staff_access_center),
+        name='admin_store_staff_access',
+    ),
+    path(
+        'admin/store/staff/new/',
+        admin.site.admin_view(staff_create),
+        name='admin_store_staff_new',
+    ),
+    path(
+        'admin/store/staff/roles/',
+        admin.site.admin_view(staff_roles),
+        name='admin_store_staff_roles',
+    ),
+    path(
+        'admin/store/staff/roles/<slug:role_key>/',
+        admin.site.admin_view(staff_role_detail),
+        name='admin_store_staff_role_detail',
+    ),
+    path(
+        'admin/store/staff/<int:user_id>/',
+        admin.site.admin_view(staff_review),
+        name='admin_store_staff_review',
+    ),
+    path(
+        'admin/store/staff/<int:user_id>/edit/',
+        admin.site.admin_view(staff_edit),
+        name='admin_store_staff_edit',
+    ),
+    path(
+        'admin/store/staff/<int:user_id>/password/',
+        admin.site.admin_view(staff_password),
+        name='admin_store_staff_password',
+    ),
+    path(
         'admin/store/orders/workbench/',
         admin.site.admin_view(order_workbench),
         name='admin_store_order_workbench',
@@ -90,9 +249,24 @@ urlpatterns = [
         name='admin_store_service_workbench',
     ),
     path(
+        'admin/store/services/reconcile/',
+        admin.site.admin_view(service_reconcile),
+        name='admin_store_services_reconcile',
+    ),
+    path(
+        'admin/store/services/reconciliation/soft-delete-missing/',
+        admin.site.admin_view(service_bulk_soft_delete_missing),
+        name='admin_store_services_reconciliation_soft_delete_missing',
+    ),
+    path(
         'admin/store/services/<int:vpn_client_id>/review/',
         admin.site.admin_view(service_review),
         name='admin_store_service_review',
+    ),
+    path(
+        'admin/store/services/<int:vpn_client_id>/soft-delete-missing/',
+        admin.site.admin_view(service_soft_delete_missing),
+        name='admin_store_service_soft_delete_missing',
     ),
     path(
         'admin/store/customers/<int:customer_id>/review/',

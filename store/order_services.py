@@ -16,6 +16,7 @@ from .models import (
     Inbound,
     Operator,
     Order,
+    Panel,
     Plan,
     PlanInboundRoute,
     Store,
@@ -27,6 +28,12 @@ from .models import (
 )
 from .jalali import TEHRAN_TZ
 from .naming import build_client_display_name
+from .provisioning_services import (
+    STRATEGY_LEGACY_PRECREATE_INACTIVE,
+    provisioning_scope,
+    resolve_provisioning_strategy,
+)
+from .setup_readiness import SETUP_NOT_READY_MESSAGE, store_is_sellable
 from .xui_api import create_inactive_client_details
 
 
@@ -47,6 +54,12 @@ INBOUND_NOT_FOR_NEW_ORDERS_MESSAGE = "اینباند انتخاب‌شده بر�
 INBOUND_PANEL_INACTIVE_MESSAGE = "پنل متصل به اینباند غیرفعال است و نمی‌تواند برای سفارش جدید استفاده شود."
 INBOUND_STORE_MISMATCH_MESSAGE = "اینباند انتخاب‌شده به فروشگاه دیگری وصل است."
 INBOUND_CAPACITY_MESSAGE = "ظرفیت اینباند انتخاب‌شده برای تعداد کانفیگ درخواستی کافی نیست."
+INBOUND_NODE_SCOPE_MISSING_MESSAGE = "اینباند sync شده از node هویت node ندارد و برای ساخت کانفیگ جدید امن نیست."
+PANEL_UNKNOWN_COMPATIBILITY_MESSAGE = "سازگاری پنل X-UI نامشخص است. ابتدا audit سازگاری پنل را اجرا کن."
+PANEL_MODERN_INACTIVE_CREATE_MESSAGE = (
+    "API جدید 3X-UI ساخت کلاینت غیرفعال را به‌صورت امن پشتیبانی نمی‌کند؛ "
+    "این مسیر فقط با deferred/direct create-enabled provisioning مجاز است."
+)
 PLAN_INBOUND_ROUTE_MISSING_MESSAGE = "برای این پلن مسیر سرور/اینباند تعریف نشده است. لطفاً با پشتیبانی تماس بگیرید."
 
 
@@ -97,7 +110,7 @@ def inbound_panel(inbound):
         return None
 
 
-def validate_inbound_for_order(inbound, store=None, *, required_slots=1):
+def validate_inbound_for_order(inbound, store=None, *, required_slots=1, allow_modern_deferred=False):
     required_slots = max(int(required_slots or 1), 1)
     if not inbound:
         raise ValidationError("سرور فعالی برای ساخت کانفیگ پیدا نشد.")
@@ -113,12 +126,23 @@ def validate_inbound_for_order(inbound, store=None, *, required_slots=1):
         raise ValidationError(INBOUND_PANEL_INACTIVE_MESSAGE)
     if store and panel.store_id not in (None, store.pk):
         raise ValidationError(INBOUND_STORE_MISMATCH_MESSAGE)
+    if getattr(inbound, "xui_source", "") == Inbound.XUISource.SYNCHRONIZED_NODE and not (inbound.xui_node_id or "").strip():
+        raise ValidationError(INBOUND_NODE_SCOPE_MISSING_MESSAGE)
+    if getattr(panel, "capability_profile", "") == Panel.CapabilityProfile.UNKNOWN_SAFE:
+        raise ValidationError(PANEL_UNKNOWN_COMPATIBILITY_MESSAGE)
+    if getattr(panel, "capability_profile", "") in {
+        Panel.CapabilityProfile.MODERN_SINGLE_NODE,
+        Panel.CapabilityProfile.MODERN_MULTI_NODE,
+    } and not allow_modern_deferred:
+        raise ValidationError(PANEL_MODERN_INACTIVE_CREATE_MESSAGE)
     if inbound.max_clients is not None and inbound.available_capacity < required_slots:
         raise ValidationError(INBOUND_CAPACITY_MESSAGE)
     return inbound
 
 
 def get_store_plans(store, *, public_only=True, operator=None):
+    if public_only and store and not store_is_sellable(store):
+        return Plan.objects.none()
     plans = Plan.objects.filter(is_active=True)
     if public_only:
         plans = plans.filter(is_public=True, is_custom_volume=False)
@@ -195,6 +219,8 @@ def store_custom_volume_price_per_gb(store):
 
 
 def custom_volume_is_available(store):
+    if store and not store_is_sellable(store):
+        return False
     return bool(store_custom_volume_price_per_gb(store))
 
 
@@ -217,6 +243,8 @@ def custom_volume_slug(volume_gb, price_per_gb):
 def get_or_create_custom_volume_plan(store, volume_gb, *, operator=None):
     if not store:
         raise ValidationError("فروشگاه فعال برای خرید حجم دلخواه پیدا نشد.")
+    if not store_is_sellable(store):
+        raise ValidationError(SETUP_NOT_READY_MESSAGE)
     volume_gb = normalize_custom_volume_gb(volume_gb)
     price_per_gb = store_custom_volume_price_per_gb(store)
     if not price_per_gb:
@@ -257,7 +285,9 @@ def get_or_create_custom_volume_plan(store, volume_gb, *, operator=None):
     return plan
 
 
-def get_available_inbound(store, *, required_slots=1):
+def get_available_inbound(store, *, required_slots=1, allow_modern_deferred=False):
+    if store and not store_is_sellable(store):
+        return None
     required_slots = max(int(required_slots or 1), 1)
     inbound_qs = Inbound.objects.filter(
         is_active=True,
@@ -273,7 +303,12 @@ def get_available_inbound(store, *, required_slots=1):
 
     for inbound in inbound_qs.order_by("current_users", "id"):
         try:
-            validate_inbound_for_order(inbound, store, required_slots=required_slots)
+            validate_inbound_for_order(
+                inbound,
+                store,
+                required_slots=required_slots,
+                allow_modern_deferred=allow_modern_deferred,
+            )
         except ValidationError:
             logger.warning(
                 "Skipping unusable inbound during selection inbound_id=%s panel_id=%s store_id=%s",
@@ -312,7 +347,7 @@ def _route_queryset_for_store(route_qs, store):
     )
 
 
-def _first_valid_route_inbound(route_qs, store, *, required_slots=1):
+def _first_valid_route_inbound(route_qs, store, *, required_slots=1, allow_modern_deferred=False):
     route_qs = route_qs.select_related(
         "store",
         "plan",
@@ -322,7 +357,12 @@ def _first_valid_route_inbound(route_qs, store, *, required_slots=1):
     ).order_by("store_route_priority", "priority", "inbound__current_users", "id")
     for route in route_qs:
         try:
-            return validate_inbound_for_order(route.inbound, store, required_slots=required_slots)
+            return validate_inbound_for_order(
+                route.inbound,
+                store,
+                required_slots=required_slots,
+                allow_modern_deferred=allow_modern_deferred,
+            )
         except ValidationError as exc:
             logger.warning(
                 "Skipping invalid plan inbound route route_id=%s plan_id=%s operator_id=%s store_id=%s inbound_id=%s: %s",
@@ -336,12 +376,16 @@ def _first_valid_route_inbound(route_qs, store, *, required_slots=1):
     return None
 
 
-def select_inbound_for_plan(plan, store=None, operator=None, purpose="new_order", quantity=1):
+def select_inbound_for_plan(plan, store=None, operator=None, purpose="new_order", quantity=1, allow_modern_deferred=False):
     required_slots = max(int(quantity or 1), 1)
     effective_store = store or getattr(plan, "store", None)
 
     if not store_allows_plan_inbound_routing(effective_store):
-        return get_available_inbound(effective_store, required_slots=required_slots)
+        return get_available_inbound(
+            effective_store,
+            required_slots=required_slots,
+            allow_modern_deferred=allow_modern_deferred,
+        )
 
     base_routes = PlanInboundRoute.objects.filter(
         plan=plan,
@@ -359,7 +403,12 @@ def select_inbound_for_plan(plan, store=None, operator=None, purpose="new_order"
     candidate_sets.append(base_routes.filter(operator__isnull=True))
 
     for route_qs in candidate_sets:
-        inbound = _first_valid_route_inbound(route_qs, effective_store, required_slots=required_slots)
+        inbound = _first_valid_route_inbound(
+            route_qs,
+            effective_store,
+            required_slots=required_slots,
+            allow_modern_deferred=allow_modern_deferred,
+        )
         if inbound:
             logger.info(
                 "Selected plan inbound route plan_id=%s operator_id=%s store_id=%s inbound_pk=%s purpose=%s quantity=%s",
@@ -381,7 +430,11 @@ def select_inbound_for_plan(plan, store=None, operator=None, purpose="new_order"
             purpose,
             required_slots,
         )
-        return get_available_inbound(effective_store, required_slots=required_slots)
+        return get_available_inbound(
+            effective_store,
+            required_slots=required_slots,
+            allow_modern_deferred=allow_modern_deferred,
+        )
 
     logger.warning(
         "No plan inbound route found and fallback is disabled plan_id=%s operator_id=%s store_id=%s purpose=%s quantity=%s",
@@ -609,6 +662,10 @@ def _create_inactive_order_records(
 ):
     order_defaults = order_defaults or {}
     metadata = metadata or {}
+    metadata.setdefault("provisioning_strategy", STRATEGY_LEGACY_PRECREATE_INACTIVE)
+    metadata.setdefault("provisioning_scope", provisioning_scope(inbound))
+    order_defaults.setdefault("provisioning_status", Order.ProvisioningStatus.PROVISIONED)
+    order_defaults.setdefault("provisioned_at", timezone.now())
     subtotal = plan.price * quantity
     order = Order(
         store=store,
@@ -645,6 +702,8 @@ def _create_inactive_order_records(
         traffic_limit_bytes=plan.traffic_limit_bytes,
         duration_days=plan.duration_days,
         device_limit=plan.device_limit,
+        xui_node_id=client_result.get("xui_node_id") or getattr(inbound, "xui_node_id", "") or "",
+        remote_client_key=client_result.get("remote_client_key") or "",
         xui_raw=client_result.get("raw", {}),
     )
     Inbound.objects.filter(pk=inbound.pk).update(current_users=F("current_users") + 1)
@@ -666,6 +725,8 @@ def _create_deferred_order_record(
 ):
     order_defaults = order_defaults or {}
     metadata = metadata or {}
+    metadata.setdefault("provisioning_scope", provisioning_scope(inbound))
+    order_defaults.setdefault("provisioning_status", Order.ProvisioningStatus.PENDING)
     subtotal = plan.price * quantity
     order = Order(
         store=store,
@@ -706,6 +767,8 @@ def create_manual_payment_order(
     quantity=1,
     metadata=None,
 ):
+    if store and not store_is_sellable(store):
+        return ProvisionedOrderResult(False, SETUP_NOT_READY_MESSAGE)
     quantity = validate_order_quantity(quantity)
     order_metadata = dict(metadata or {})
     if store:
@@ -758,7 +821,12 @@ def create_manual_payment_order(
 
     if inbound:
         try:
-            inbound = validate_inbound_for_order(inbound, store, required_slots=quantity)
+            inbound = validate_inbound_for_order(
+                inbound,
+                store,
+                required_slots=quantity,
+                allow_modern_deferred=True,
+            )
         except ValidationError as exc:
             logger.warning(
                 "Rejected order creation with unusable inbound inbound_pk=%s panel_id=%s store_id=%s: %s",
@@ -873,6 +941,7 @@ def create_manual_payment_order(
                 operator=operator,
                 purpose="manual_payment_order",
                 quantity=quantity,
+                allow_modern_deferred=True,
             )
         except ValidationError as exc:
             release_discount_usage(reserved_discount)
@@ -882,9 +951,15 @@ def create_manual_payment_order(
             return ProvisionedOrderResult(False, "فعلاً سرور VPN فعالی برای ساخت کانفیگ در دسترس نیست. کمی بعد دوباره تلاش کن.")
 
         client_result = None
+        provisioning_strategy = ""
         if inbound:
             try:
-                inbound = validate_inbound_for_order(inbound, store, required_slots=quantity)
+                inbound = validate_inbound_for_order(
+                    inbound,
+                    store,
+                    required_slots=quantity,
+                    allow_modern_deferred=True,
+                )
             except ValidationError as exc:
                 release_discount_usage(reserved_discount)
                 logger.warning(
@@ -895,16 +970,36 @@ def create_manual_payment_order(
                     exc.messages[0],
                 )
                 return ProvisionedOrderResult(False, exc.messages[0])
-            client_result = create_inactive_client_details(
-                email_prefix=username,
-                total_gb=plan.volume_gb,
-                expire_days=plan.duration_days,
-                panel=inbound.panel,
-                inbound=inbound,
-                limit_ip=plan.device_limit,
+            order_type = "admin_direct_purchase" if order_metadata.get("admin_direct_purchase") else "paid_purchase"
+            provisioning_strategy = resolve_provisioning_strategy(
+                inbound.panel,
+                order_type=order_type,
+                payment_state="pending",
             )
+            order_metadata["provisioning_strategy"] = provisioning_strategy
+            order_metadata["provisioning_scope"] = provisioning_scope(inbound)
+            if provisioning_strategy == STRATEGY_LEGACY_PRECREATE_INACTIVE:
+                client_result = create_inactive_client_details(
+                    email_prefix=username,
+                    total_gb=plan.volume_gb,
+                    expire_days=plan.duration_days,
+                    panel=inbound.panel,
+                    inbound=inbound,
+                    limit_ip=plan.device_limit,
+                )
+            else:
+                order_metadata.update(
+                    {
+                        "panel_provisioning_deferred": True,
+                        "panel_provisioning_deferred_at": timezone.now().isoformat(),
+                        "panel_provisioning_reason": provisioning_strategy,
+                        "deferred_panel_username": username,
+                    }
+                )
 
-        if not client_result:
+        if not client_result and provisioning_strategy and provisioning_strategy != STRATEGY_LEGACY_PRECREATE_INACTIVE:
+            order_metadata.setdefault("deferred_panel_username", username)
+        elif not client_result:
             order_metadata.update(
                 {
                     "panel_provisioning_deferred": True,
@@ -989,6 +1084,8 @@ def create_manual_payment_order(
 
 
 def create_renewal_payment_order(*, customer, vpn_client, metadata=None, discount_code=""):
+    if getattr(vpn_client, "is_deleted", False):
+        return ProvisionedOrderResult(False, "این کانفیگ حذف شده و قابل تمدید نیست.")
     plan = vpn_client.plan
     if not plan:
         return ProvisionedOrderResult(False, "این کانفیگ پلن قابل تمدید ندارد.")
@@ -1097,13 +1194,14 @@ def grant_free_subscription(
             plan,
             store=store,
             purpose="admin_free_subscription",
+            allow_modern_deferred=True,
         )
     except ValidationError as exc:
         return ProvisionedOrderResult(False, exc.messages[0])
     if not inbound:
         return ProvisionedOrderResult(False, "فعلاً سرور VPN فعالی در دسترس نیست. کمی بعد دوباره تلاش کن.")
     try:
-        inbound = validate_inbound_for_order(inbound, store)
+        inbound = validate_inbound_for_order(inbound, store, allow_modern_deferred=True)
     except ValidationError as exc:
         logger.warning(
             "Rejected free subscription with unusable inbound inbound_pk=%s panel_id=%s store_id=%s: %s",
@@ -1120,15 +1218,22 @@ def grant_free_subscription(
         short_id=tracking_code,
         metadata=metadata,
     )
-    client_result = create_inactive_client_details(
-        email_prefix=username,
-        total_gb=plan.volume_gb,
-        expire_days=plan.duration_days,
-        panel=inbound.panel,
-        inbound=inbound,
-        limit_ip=plan.device_limit,
+    provisioning_strategy = resolve_provisioning_strategy(
+        inbound.panel,
+        order_type="admin_direct_paid_grant",
+        payment_state="verified",
     )
-    if not client_result:
+    client_result = None
+    if provisioning_strategy == STRATEGY_LEGACY_PRECREATE_INACTIVE:
+        client_result = create_inactive_client_details(
+            email_prefix=username,
+            total_gb=plan.volume_gb,
+            expire_days=plan.duration_days,
+            panel=inbound.panel,
+            inbound=inbound,
+            limit_ip=plan.device_limit,
+        )
+    if provisioning_strategy == STRATEGY_LEGACY_PRECREATE_INACTIVE and not client_result:
         return ProvisionedOrderResult(False, "ساخت کانفیگ روی پنل انجام نشد. لطفاً تنظیمات پنل را بررسی کن.")
 
     now = timezone.now()
@@ -1141,32 +1246,51 @@ def grant_free_subscription(
         "suppress_customer_notification": not notify_customer,
     }
     grant_metadata.update(metadata or {})
+    grant_metadata["provisioning_strategy"] = provisioning_strategy
+    grant_metadata["provisioning_scope"] = provisioning_scope(inbound)
 
     with transaction.atomic():
-        order, vpn_client = _create_inactive_order_records(
-            store=store,
-            customer=customer,
-            plan=plan,
-            inbound=inbound,
-            tracking_code=tracking_code,
-            username=username,
-            client_result=client_result,
-            metadata=grant_metadata,
-            order_defaults={
-                "status": Order.Status.PENDING_PAYMENT,
-                "payment_method": Order.PaymentMethod.ADMIN_FREE,
-                "is_paid": True,
-                "payment_submitted_at": now,
-                "payment_date": timezone.localdate(now, TEHRAN_TZ),
-            },
-        )
+        order_defaults = {
+            "status": Order.Status.PENDING_PAYMENT,
+            "payment_method": Order.PaymentMethod.ADMIN_FREE,
+            "is_paid": True,
+            "payment_submitted_at": now,
+            "payment_date": timezone.localdate(now, TEHRAN_TZ),
+        }
+        if client_result:
+            order, vpn_client = _create_inactive_order_records(
+                store=store,
+                customer=customer,
+                plan=plan,
+                inbound=inbound,
+                tracking_code=tracking_code,
+                username=username,
+                client_result=client_result,
+                metadata=grant_metadata,
+                order_defaults=order_defaults,
+            )
+        else:
+            grant_metadata["panel_provisioning_deferred"] = True
+            grant_metadata["panel_provisioning_reason"] = provisioning_strategy
+            grant_metadata["deferred_panel_username"] = username
+            order = _create_deferred_order_record(
+                store=store,
+                customer=customer,
+                plan=plan,
+                inbound=inbound,
+                tracking_code=tracking_code,
+                username=username,
+                metadata=grant_metadata,
+                order_defaults=order_defaults,
+            )
+            vpn_client = None
         order.discount_amount = plan.price
         order.amount = 0
         order.save(update_fields=["discount_amount", "amount", "metadata", "updated_at"])
 
     result = activate_order(order, user=granted_by, notify=True)
     order.refresh_from_db()
-    vpn_client.refresh_from_db()
+    vpn_client = order.vpn_clients.order_by("created_at", "pk").first()
     if not result.success:
         return ProvisionedOrderResult(False, result.message, order, vpn_client)
     return ProvisionedOrderResult(True, "اشتراک رایگان ساخته و فعال شد.", order, vpn_client)

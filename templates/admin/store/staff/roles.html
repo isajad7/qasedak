@@ -1,0 +1,50 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_staff_access' %}">کارکنان و دسترسی ها</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-staff" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Role Presets</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ back_url }}" class="qadmin-action qadmin-action-secondary">بازگشت</a>
+        </div>
+    </section>
+
+    <section class="qadmin-role-grid">
+        {% for item in roles %}
+            <article class="qadmin-role-card">
+                <header>
+                    <h2><a href="{{ item.url }}">{{ item.role.label }}</a></h2>
+                    <span class="qadmin-badge qadmin-badge-info">{{ item.user_count }} کاربر</span>
+                </header>
+                <p>{{ item.role.description }}</p>
+                <div class="qadmin-permission-preview">
+                    {% for capability in item.allowed|slice:":6" %}
+                        <span>{{ capability.label }}</span>
+                    {% endfor %}
+                </div>
+                <a href="{{ item.url }}" class="qadmin-action">جزئیات نقش</a>
+            </article>
+        {% endfor %}
+    </section>
+</div>
+{% endblock %}

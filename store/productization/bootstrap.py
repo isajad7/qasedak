@@ -111,8 +111,31 @@ def validate_install_config(config):
 
     if database:
         engine = _clean_string(database.get("engine") or "sqlite").lower()
-        if engine != "sqlite":
-            errors.append("database.engine must be sqlite in P2.")
+        if engine not in {"sqlite", "postgres", "postgresql"}:
+            errors.append("database.engine must be one of: sqlite, postgres, postgresql.")
+        elif engine in {"postgres", "postgresql"}:
+            postgres = database.get("postgres") or {}
+            if not isinstance(postgres, dict):
+                errors.append("database.postgres must be an object when database.engine=postgres.")
+            else:
+                if _clean_string(postgres.get("password")):
+                    errors.append("database.postgres.password is not supported; use database.postgres.password_env.")
+                password_env = _clean_string(postgres.get("password_env"))
+                if not password_env:
+                    errors.append("database.postgres.password_env is required when database.engine=postgres.")
+                elif not _valid_env_name(password_env):
+                    errors.append("database.postgres.password_env must be a valid environment variable name.")
+                for field in ("database", "user"):
+                    value = _clean_string(postgres.get(field))
+                    if value and not _valid_pg_identifier(value):
+                        errors.append(f"database.postgres.{field} may contain only letters, numbers, and underscores.")
+                port = postgres.get("port")
+                if port is not None:
+                    try:
+                        if int(port) <= 0:
+                            errors.append("database.postgres.port must be positive.")
+                    except (TypeError, ValueError):
+                        errors.append("database.postgres.port must be numeric.")
 
     telegram_enabled = _bool(telegram.get("enabled"), default=False)
     if telegram_enabled:
@@ -267,6 +290,7 @@ class BootstrapInstaller:
             "slug": slug,
             "domain": domain,
             "is_active": True,
+            "setup_status": Store.SetupStatus.SETUP_REQUIRED,
             "card_number": _clean_string(store_config.get("card_number"))
             or _nested_string(store_config, "payment", "card_number")
             or SAFE_PLACEHOLDER_CARD_NUMBER,
@@ -341,7 +365,30 @@ class BootstrapInstaller:
     def _bootstrap_bot_configuration(self):
         telegram = self._telegram_config()
         if not _bool(telegram.get("enabled"), default=False):
-            self._record_skip("bot_configuration", "telegram.enabled=false")
+            if _bool(telegram.get("create_inactive_placeholder"), default=False):
+                name = _clean_string(telegram.get("name")) or "Telegram setup placeholder"
+                defaults = {
+                    "store": self.store,
+                    "provider": BotConfiguration.Provider.TELEGRAM,
+                    "name": name,
+                    "telegram_bot_username": _clean_string(telegram.get("bot_username")).lstrip("@"),
+                    "bot_token": "",
+                    "admin_user_id": "",
+                    "additional_admin_user_ids": "",
+                    "is_active": False,
+                }
+                bot_config = self._find_bot_configuration(defaults["telegram_bot_username"], name)
+                bot_config = self._apply_model(
+                    "bot_configuration",
+                    bot_config,
+                    BotConfiguration,
+                    defaults,
+                    lookup={"provider": "telegram", "placeholder": True},
+                )
+                if bot_config:
+                    self.summary["objects"]["bot_configuration"]["active"] = False
+            else:
+                self._record_skip("bot_configuration", "telegram.enabled=false")
             self._mark_business_setup_incomplete(
                 "Telegram setup is incomplete until an admin creates or enables a BotConfiguration."
             )
@@ -750,6 +797,10 @@ def _bool(value, *, default=False):
 
 def _valid_env_name(value):
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value or ""))
+
+
+def _valid_pg_identifier(value):
+    return bool(re.fullmatch(r"[A-Za-z0-9_]+", value or ""))
 
 
 def _valid_domain(value):

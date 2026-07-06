@@ -25,8 +25,11 @@
             <p>{{ subtitle }}</p>
         </div>
         <div class="qadmin-hero-actions">
-            <a href="{{ new_plan_url }}" class="qadmin-action">ساخت پلن جدید</a>
-            <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">Bulk assign route</a>
+            {% if can_manage_catalog %}
+                <a href="{{ new_plan_url }}" class="qadmin-action">ساخت پلن جدید</a>
+                <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">Bulk assign route</a>
+            {% endif %}
+            <a href="{% url 'admin_store_reports_center' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}#sales" class="qadmin-action qadmin-action-info">فروش پلن‌ها</a>
             <a href="{{ dashboard_url }}" class="qadmin-action qadmin-action-secondary">داشبورد</a>
         </div>
     </section>
@@ -77,11 +80,14 @@
                 </div>
             </header>
             <div class="qadmin-actions qadmin-catalog-actions">
-                <a href="{{ new_plan_url }}" class="qadmin-action">ساخت پلن جدید</a>
-                <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">تنظیم گروهی route</a>
-                <a href="{{ inbound_admin_url }}" class="qadmin-action qadmin-action-secondary">مدیریت inboundها</a>
-                <a href="{{ panel_admin_url }}" class="qadmin-action qadmin-action-secondary">مدیریت panelها</a>
-                <a href="{{ setup_wizard_url }}" class="qadmin-action qadmin-action-secondary">Setup Wizard</a>
+                {% if can_manage_catalog %}
+                    <a href="{{ new_plan_url }}" class="qadmin-action">ساخت پلن جدید</a>
+                    <a href="{{ bulk_assign_url }}" class="qadmin-action qadmin-action-info">تنظیم گروهی route</a>
+                    <a href="{{ inbound_admin_url }}" class="qadmin-action qadmin-action-secondary">مدیریت inboundها</a>
+                    <a href="{{ panel_admin_url }}" class="qadmin-action qadmin-action-secondary">مدیریت panelها</a>
+                    <a href="{{ setup_wizard_url }}" class="qadmin-action qadmin-action-secondary">Setup Wizard</a>
+                {% endif %}
+                <a href="{% url 'admin_store_reports_center' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}#sales" class="qadmin-action qadmin-action-secondary">گزارش فروش پلن‌ها</a>
                 <a href="{{ dashboard_url }}" class="qadmin-action qadmin-action-secondary">Dashboard</a>
             </div>
             <code class="qadmin-command">{{ audit_command }}</code>
@@ -151,19 +157,21 @@
                             <td>
                                 <div class="qadmin-inline-actions">
                                     <a href="{{ item.review_url }}" class="qadmin-action">مشاهده</a>
-                                    <a href="{{ item.edit_url }}" class="qadmin-action qadmin-action-info">تنظیم route</a>
-                                    <form method="post">
-                                        {% csrf_token %}
-                                        <input type="hidden" name="confirm_action" value="1">
-                                        <input type="hidden" name="plan_id" value="{{ item.plan.pk }}">
-                                        <button type="submit" name="action" value="deactivate" class="qadmin-action qadmin-action-warning" onclick="return confirm('پلن غیرفعال شود؟');">غیرفعال</button>
-                                    </form>
-                                    <form method="post">
-                                        {% csrf_token %}
-                                        <input type="hidden" name="confirm_action" value="1">
-                                        <input type="hidden" name="plan_id" value="{{ item.plan.pk }}">
-                                        <button type="submit" name="action" value="duplicate" class="qadmin-action qadmin-action-secondary" onclick="return confirm('کپی غیرفعال و بدون route فعال ساخته شود؟');">Duplicate</button>
-                                    </form>
+                                    {% if can_manage_catalog %}
+                                        <a href="{{ item.edit_url }}" class="qadmin-action qadmin-action-info">تنظیم route</a>
+                                        <form method="post">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="confirm_action" value="1">
+                                            <input type="hidden" name="plan_id" value="{{ item.plan.pk }}">
+                                            <button type="submit" name="action" value="deactivate" class="qadmin-action qadmin-action-warning" onclick="return confirm('پلن غیرفعال شود؟');">غیرفعال</button>
+                                        </form>
+                                        <form method="post">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="confirm_action" value="1">
+                                            <input type="hidden" name="plan_id" value="{{ item.plan.pk }}">
+                                            <button type="submit" name="action" value="duplicate" class="qadmin-action qadmin-action-secondary" onclick="return confirm('کپی غیرفعال و بدون route فعال ساخته شود؟');">Duplicate</button>
+                                        </form>
+                                    {% endif %}
                                 </div>
                             </td>
                         </tr>
@@ -199,8 +207,10 @@
                         </ul>
                     {% endif %}
                     <div class="qadmin-actions">
-                        <a href="{{ item.edit_url }}" class="qadmin-action qadmin-action-warning">اصلاح route</a>
-                        <a href="{{ item.bulk_assign_url }}" class="qadmin-action qadmin-action-info">Bulk assign</a>
+                        {% if can_manage_catalog %}
+                            <a href="{{ item.edit_url }}" class="qadmin-action qadmin-action-warning">اصلاح route</a>
+                            <a href="{{ item.bulk_assign_url }}" class="qadmin-action qadmin-action-info">Bulk assign</a>
+                        {% endif %}
                     </div>
                 </article>
             {% empty %}
@@ -288,7 +298,7 @@
                                 {% endfor %}
                             </td>
                             <td>
-                                {% if item.is_active %}
+                                {% if can_manage_catalog and item.is_active %}
                                     <form method="post">
                                         {% csrf_token %}
                                         <input type="hidden" name="confirm_action" value="1">

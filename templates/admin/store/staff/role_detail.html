@@ -1,0 +1,62 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_staff_roles' %}">نقش ها</a>
+    &rsaquo; {{ role.label }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-staff" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Role Detail</p>
+            <h1>{{ role.label }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ back_url }}" class="qadmin-action qadmin-action-secondary">همه نقش ها</a>
+        </div>
+    </section>
+
+    <section class="qadmin-permission-matrix">
+        <article>
+            <h2>بخش ها و عملیات مجاز</h2>
+            <div class="qadmin-permission-list">
+                {% for capability in allowed %}
+                    <span>{{ capability.label }}</span>
+                {% endfor %}
+            </div>
+        </article>
+        <article>
+            <h2>عملیات غیرمجاز</h2>
+            <div class="qadmin-permission-list qadmin-permission-denied">
+                {% for capability in denied %}
+                    <span>{{ capability.label }}</span>
+                {% endfor %}
+            </div>
+        </article>
+    </section>
+
+    <section class="qadmin-staff-section">
+        <header class="qadmin-section-header"><h2>کاربران این نقش</h2></header>
+        <div class="qadmin-role-users">
+            {% for user in users %}
+                <a href="{% url 'admin_store_staff_review' user.pk %}" class="qadmin-role-user">{{ user.username }}</a>
+            {% empty %}
+                <p class="qadmin-empty">کاربری با این نقش ثبت نشده است.</p>
+            {% endfor %}
+        </div>
+    </section>
+</div>
+{% endblock %}

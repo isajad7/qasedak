@@ -15,6 +15,7 @@ scripts/release_check.sh --full
 - Confirm CI is green on the release branch.
 - Confirm public docs use placeholders such as `example.com`, `203.0.113.10`, `/opt/qasedak`, `vpn-store-web.service`, and `vpn-store-telegram.service`.
 - Confirm no production domain, IP, path, personal deploy name, proxy credential, bot token, or card number appears in public source or docs.
+- Confirm Postgres readiness checks pass: `.env.example` has `DATABASE_ENGINE`/`POSTGRES_*`, `requirements.txt` includes `psycopg[binary]`, `backup.sh` uses `pg_dump -Fc`, and `doctor.sh` checks `pg_isready`, `pg_dump`, and `pg_restore`.
 - Choose a license before public release. See `docs/productization/06-license-decision.md`.
 - Keep any private audit notes, real environment files, install configs, databases, media, logs, and backups out of the public repository.
 
@@ -41,7 +42,8 @@ Dry-run release packages should use a timestamped name such as
 `dist/vpn-store-productized-YYYYMMDD-HHMM.tar.gz`.
 
 Include source code, scripts, docs, migrations, templates, static source files,
-`.env.example`, and `docs/productization/install.config.example.json`.
+compiled admin CSS (`static/admin/qasedak_admin_tailwind.css`), `.env.example`,
+and `docs/productization/install.config.example.json`.
 Exclude `.git`, `.env`, databases, `data/`, `media/`, `venv/`, `node_modules/`,
 `backups/`, `logs/`, `private_imports/`, Python caches, and archive artifacts.
 

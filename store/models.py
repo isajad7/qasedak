@@ -205,6 +205,17 @@ class TimeStampedModel(models.Model):
 
 
 class Store(TimeStampedModel):
+    class SetupStatus(models.TextChoices):
+        PROVISIONED = "provisioned", _("Provisioned")
+        SETUP_REQUIRED = "setup_required", _("Setup required")
+        TELEGRAM_CONFIGURED = "telegram_configured", _("Telegram configured")
+        PAYMENT_CONFIGURED = "payment_configured", _("Payment configured")
+        XUI_CONFIGURED = "xui_configured", _("X-UI configured")
+        PLANS_CONFIGURED = "plans_configured", _("Plans configured")
+        READY = "ready", _("Ready")
+        SUSPENDED = "suspended", _("Suspended")
+        ERROR = "error", _("Error")
+
     class SalesMode(models.TextChoices):
         TUNNEL = "tunnel", _("Tunnel")
         OPERATOR_BASED = "operator_based", _("Operator based")
@@ -219,6 +230,14 @@ class Store(TimeStampedModel):
     slug = models.SlugField(_("slug"), max_length=80, unique=True, null=True, blank=True)
     domain = models.CharField(_("domain"), max_length=255, blank=True, null=True)
     is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    setup_status = models.CharField(
+        _("setup status"),
+        max_length=32,
+        choices=SetupStatus.choices,
+        default=SetupStatus.READY,
+        db_index=True,
+        help_text=_("Tenant onboarding lifecycle. Existing/manual stores default to ready for backwards compatibility."),
+    )
     sales_mode = models.CharField(
         _("sales mode"),
         max_length=30,
@@ -821,10 +840,11 @@ class BotConfiguration(TimeStampedModel):
         blank=True,
         help_text=_("نام کاربری ربات بدون @، برای ساخت لینک دعوت و start parameter استفاده می‌شود."),
     )
-    bot_token = models.CharField(_("bot token"), max_length=255, help_text=_("Bot token from Bale or Telegram."))
+    bot_token = models.CharField(_("bot token"), max_length=255, blank=True, help_text=_("Bot token from Bale or Telegram."))
     admin_user_id = models.CharField(
         _("admin user ID"),
         max_length=80,
+        blank=True,
         help_text=_("Admin chat/user ID that receives notifications."),
     )
     additional_admin_user_ids = models.TextField(
@@ -2434,6 +2454,12 @@ class ReferralRewardLedger(TimeStampedModel):
 
 
 class Panel(TimeStampedModel):
+    class CapabilityProfile(models.TextChoices):
+        LEGACY_SINGLE_NODE = "legacy_single_node", _("Legacy single-node")
+        MODERN_SINGLE_NODE = "modern_single_node", _("Modern single-node")
+        MODERN_MULTI_NODE = "modern_multi_node", _("Modern multi-node")
+        UNKNOWN_SAFE = "unknown_safe", _("Unknown safe")
+
     store = models.ForeignKey(
         Store,
         verbose_name=_("store"),
@@ -2456,6 +2482,16 @@ class Panel(TimeStampedModel):
     )
     is_active = models.BooleanField(_("is active"), default=True, db_index=True)
     last_sync_at = models.DateTimeField(_("last sync at"), blank=True, null=True)
+    detected_xui_version = models.CharField(_("detected X-UI version"), max_length=50, blank=True)
+    capability_profile = models.CharField(
+        _("capability profile"),
+        max_length=50,
+        choices=CapabilityProfile.choices,
+        blank=True,
+        db_index=True,
+    )
+    capability_metadata = models.JSONField(_("capability metadata"), default=dict, blank=True)
+    last_capability_check_at = models.DateTimeField(_("last capability check at"), blank=True, null=True)
 
     class Meta:
         verbose_name = _("panel")
@@ -2470,6 +2506,10 @@ class Panel(TimeStampedModel):
 
 
 class Inbound(TimeStampedModel):
+    class XUISource(models.TextChoices):
+        LOCAL = "local", _("Local")
+        SYNCHRONIZED_NODE = "synchronized_node", _("Synchronized node")
+
     class Protocol(models.TextChoices):
         VLESS = "vless", _("VLESS")
         VMESS = "vmess", _("VMESS")
@@ -2540,6 +2580,17 @@ class Inbound(TimeStampedModel):
     ws_path = models.CharField(_("WebSocket path"), max_length=100, blank=True, null=True)
     ws_host = models.CharField(_("WebSocket host"), max_length=100, blank=True, null=True)
     last_synced_at = models.DateTimeField(_("last synced at"), blank=True, null=True)
+    xui_node_id = models.CharField(_("X-UI node ID"), max_length=100, blank=True, db_index=True)
+    xui_node_name = models.CharField(_("X-UI node name"), max_length=150, blank=True)
+    xui_source = models.CharField(
+        _("X-UI source"),
+        max_length=30,
+        choices=XUISource.choices,
+        default=XUISource.LOCAL,
+        db_index=True,
+    )
+    xui_remote_key = models.CharField(_("X-UI remote key"), max_length=300, blank=True, db_index=True)
+    is_synced_from_node = models.BooleanField(_("is synced from node"), default=False, db_index=True)
 
     class Meta:
         verbose_name = _("inbound")
@@ -2553,8 +2604,8 @@ class Inbound(TimeStampedModel):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=["panel", "inbound_id"],
-                name="unique_inbound_id_per_panel",
+                fields=["panel", "xui_node_id", "inbound_id"],
+                name="unique_inbound_remote_scope_per_panel",
             ),
         ]
 
@@ -2566,6 +2617,11 @@ class Inbound(TimeStampedModel):
     @property
     def xui_inbound_id(self):
         return self.inbound_id
+
+    @property
+    def xui_remote_scope_key(self):
+        node_id = (self.xui_node_id or "").strip() or "local"
+        return self.xui_remote_key or f"{self.panel_id or ''}:{node_id}:{self.inbound_id}"
 
     def clean(self):
         super().clean()
@@ -3013,6 +3069,13 @@ class Order(TimeStampedModel):
         VERIFIED = "verified", _("Verified")
         REJECTED = "rejected", _("Rejected")
 
+    class ProvisioningStatus(models.TextChoices):
+        NOT_REQUIRED = "not_required", _("Not required")
+        PENDING = "pending", _("Pending")
+        PROVISIONING = "provisioning", _("Provisioning")
+        PROVISIONED = "provisioned", _("Provisioned")
+        FAILED = "failed", _("Failed")
+
     class PaymentMethod(models.TextChoices):
         MANUAL_CARD = "manual_card", _("Manual card-to-card")
         GATEWAY = "gateway", _("Online gateway")
@@ -3153,6 +3216,23 @@ class Order(TimeStampedModel):
     verified_at = models.DateTimeField(_("verified at"), blank=True, null=True)
     rejection_reason = models.TextField(_("rejection reason"), blank=True)
 
+    provisioning_status = models.CharField(
+        _("provisioning status"),
+        max_length=20,
+        choices=ProvisioningStatus.choices,
+        default=ProvisioningStatus.NOT_REQUIRED,
+        db_index=True,
+    )
+    provisioning_attempts = models.PositiveIntegerField(_("provisioning attempts"), default=0)
+    last_provisioning_error = models.TextField(_("last provisioning error"), blank=True)
+    provisioned_at = models.DateTimeField(_("provisioned at"), blank=True, null=True)
+    provisioning_idempotency_key = models.CharField(
+        _("provisioning idempotency key"),
+        max_length=160,
+        blank=True,
+        db_index=True,
+    )
+
     bank_tracking_code = models.CharField(_("bank tracking code"), max_length=50, blank=True, null=True)
     card_last_four = models.CharField(_("card last four digits"), max_length=4, blank=True, null=True)
 
@@ -3183,6 +3263,7 @@ class Order(TimeStampedModel):
             models.Index(fields=["payment_method", "payment_gateway"]),
             models.Index(fields=["discount_code", "created_at"]),
             models.Index(fields=["uuid"]),
+            models.Index(fields=["provisioning_status", "created_at"]),
         ]
 
     def __str__(self):
@@ -3255,13 +3336,17 @@ class Order(TimeStampedModel):
         return bool(self.inbound_id and self.uuid)
 
     def get_vpn_clients(self):
-        return self.vpn_clients.select_related("plan", "inbound", "inbound__panel").all()
+        return (
+            self.vpn_clients.select_related("plan", "inbound", "inbound__panel")
+            .exclude(status=VPNClient.Status.DELETED)
+            .filter(deleted_at__isnull=True)
+        )
 
     def get_remaining_traffic(self):
         return sum(client.remaining_traffic_bytes for client in self.get_vpn_clients())
 
     def is_active(self):
-        return self.vpn_clients.filter(status=VPNClient.Status.ACTIVE).exists()
+        return self.vpn_clients.filter(status=VPNClient.Status.ACTIVE, deleted_at__isnull=True).exists()
 
     def apply_discount(self, discount_code, discount_amount, *, source=None, label=""):
         self.original_amount = self.original_amount or self.subtotal_amount
@@ -3359,6 +3444,16 @@ class VPNClient(TimeStampedModel):
         DELETED = "deleted", _("Deleted")
         ERROR = "error", _("Error")
 
+    class RemoteCheckStatus(models.TextChoices):
+        NOT_CHECKED = "not_checked", _("Not checked")
+        REMOTE_ACTIVE = "remote_active", _("Remote active")
+        REMOTE_DISABLED = "remote_disabled", _("Remote disabled")
+        REMOTE_MISSING = "remote_missing", _("Remote missing")
+        PANEL_UNREACHABLE = "panel_unreachable", _("Panel unreachable")
+        INBOUND_MISSING = "inbound_missing", _("Inbound missing")
+        AMBIGUOUS = "ambiguous", _("Ambiguous")
+        UNKNOWN = "unknown", _("Unknown")
+
     public_id = models.UUIDField(_("public ID"), default=generate_public_id, editable=False, unique=True)
     store = models.ForeignKey(
         Store,
@@ -3430,6 +3525,19 @@ class VPNClient(TimeStampedModel):
     remote_deleted_at = models.DateTimeField(_("remote deleted at"), blank=True, null=True)
     last_online_at = models.DateTimeField(_("last online at"), blank=True, null=True)
     last_synced_at = models.DateTimeField(_("last synced at"), blank=True, null=True)
+    xui_node_id = models.CharField(_("X-UI node ID"), max_length=100, blank=True, db_index=True)
+    remote_client_key = models.CharField(_("remote client key"), max_length=300, blank=True, db_index=True)
+    last_remote_check_status = models.CharField(
+        _("last remote check status"),
+        max_length=30,
+        choices=RemoteCheckStatus.choices,
+        default=RemoteCheckStatus.NOT_CHECKED,
+        db_index=True,
+    )
+    last_remote_check_at = models.DateTimeField(_("last remote check at"), blank=True, null=True, db_index=True)
+    last_remote_check_error = models.CharField(_("last remote check error"), max_length=300, blank=True)
+    last_remote_check_scope = models.JSONField(_("last remote check scope"), default=dict, blank=True)
+    last_remote_check_batch_id = models.CharField(_("last remote check batch ID"), max_length=64, blank=True, db_index=True)
     xui_raw = models.JSONField(_("X-UI raw data"), default=dict, blank=True)
 
     class Meta:
@@ -3442,6 +3550,8 @@ class VPNClient(TimeStampedModel):
             models.Index(fields=["deleted_at"]),
             models.Index(fields=["expires_at"]),
             models.Index(fields=["xui_email"]),
+            models.Index(fields=["inbound", "xui_node_id", "remote_client_key"]),
+            models.Index(fields=["last_remote_check_status", "last_remote_check_at"]),
         ]
 
     def __str__(self):
@@ -3515,6 +3625,8 @@ class VPNClientActionLog(TimeStampedModel):
         ADMIN_UPDATE_EXPIRY = "admin_update_expiry", _("Admin update expiry")
         ADMIN_UPDATE_TRAFFIC_AND_EXPIRY = "admin_update_traffic_and_expiry", _("Admin update traffic and expiry")
         ADMIN_REFRESH_LINK = "admin_refresh_link", _("Admin refresh link")
+        ADMIN_RECONCILE_CHECK = "admin_reconcile_check", _("Admin reconcile check")
+        ADMIN_SOFT_DELETE_REMOTE_MISSING = "admin_soft_delete_remote_missing", _("Admin soft-delete remote missing")
 
     class Status(models.TextChoices):
         PENDING = "pending", _("Pending")
@@ -3762,3 +3874,119 @@ class VPNClientUsageSnapshot(models.Model):
 
     def __str__(self):
         return f"{self.vpn_client} @ {self.recorded_at:%Y-%m-%d %H:%M}"
+
+
+class QasedakBackupJob(models.Model):
+    class BackupType(models.TextChoices):
+        DB_ONLY = "db_only", _("Database only")
+        DB_AND_MEDIA = "db_and_media", _("Database and media")
+        FULL_TRANSFER = "full_transfer", _("Server transfer package")
+
+    class Status(models.TextChoices):
+        PENDING = "pending", _("Pending")
+        RUNNING = "running", _("Running")
+        COMPLETED = "completed", _("Completed")
+        FAILED = "failed", _("Failed")
+        DELETED = "deleted", _("Deleted")
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name=_("created by"),
+        on_delete=models.SET_NULL,
+        related_name="qasedak_backup_jobs",
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(_("created at"), auto_now_add=True, db_index=True)
+    backup_type = models.CharField(
+        _("backup type"),
+        max_length=20,
+        choices=BackupType.choices,
+        default=BackupType.DB_ONLY,
+        db_index=True,
+    )
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    file_path = models.CharField(_("file path"), max_length=600, blank=True)
+    file_name = models.CharField(_("file name"), max_length=255, blank=True)
+    file_size = models.PositiveBigIntegerField(_("file size"), default=0)
+    sha256 = models.CharField(_("SHA256"), max_length=64, blank=True, db_index=True)
+    includes_media = models.BooleanField(_("includes media"), default=False)
+    includes_env = models.BooleanField(_("includes env"), default=False)
+    includes_system = models.BooleanField(_("includes system"), default=False)
+    safe_summary = models.JSONField(_("safe summary"), default=dict, blank=True)
+    error_message = models.TextField(_("error message"), blank=True)
+    completed_at = models.DateTimeField(_("completed at"), blank=True, null=True)
+
+    class Meta:
+        verbose_name = _("Qasedak backup job")
+        verbose_name_plural = _("Qasedak backup jobs")
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["backup_type", "created_at"]),
+        ]
+
+    def __str__(self):
+        return self.file_name or f"Backup #{self.pk}"
+
+
+class QasedakRestoreJob(models.Model):
+    class Status(models.TextChoices):
+        UPLOADED = "uploaded", _("Uploaded")
+        VALIDATED = "validated", _("Validated")
+        VALIDATION_FAILED = "validation_failed", _("Validation failed")
+        READY = "ready", _("Ready")
+        RESTORE_COMMAND_GENERATED = "restore_command_generated", _("Restore command generated")
+        RESTORING = "restoring", _("Restoring")
+        RESTORED = "restored", _("Restored")
+        FAILED = "failed", _("Failed")
+        CANCELLED = "cancelled", _("Cancelled")
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name=_("created by"),
+        on_delete=models.SET_NULL,
+        related_name="qasedak_restore_jobs",
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(_("created at"), auto_now_add=True, db_index=True)
+    uploaded_file_path = models.CharField(_("uploaded file path"), max_length=600, blank=True)
+    uploaded_file_name = models.CharField(_("uploaded file name"), max_length=255, blank=True)
+    uploaded_sha256 = models.CharField(_("uploaded SHA256"), max_length=64, blank=True, db_index=True)
+    status = models.CharField(
+        _("status"),
+        max_length=32,
+        choices=Status.choices,
+        default=Status.UPLOADED,
+        db_index=True,
+    )
+    validation_summary = models.JSONField(_("validation summary"), default=dict, blank=True)
+    restore_plan = models.JSONField(_("restore plan"), default=dict, blank=True)
+    pre_restore_backup_path = models.CharField(_("pre-restore backup path"), max_length=600, blank=True)
+    error_message = models.TextField(_("error message"), blank=True)
+    includes_env = models.BooleanField(_("includes env"), default=False)
+    includes_media = models.BooleanField(_("includes media"), default=False)
+    requires_service_restart = models.BooleanField(_("requires service restart"), default=True)
+    validated_at = models.DateTimeField(_("validated at"), blank=True, null=True)
+    restored_at = models.DateTimeField(_("restored at"), blank=True, null=True)
+
+    class Meta:
+        verbose_name = _("Qasedak restore job")
+        verbose_name_plural = _("Qasedak restore jobs")
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self):
+        return self.uploaded_file_name or f"Restore #{self.pk}"
+
+
+from .orchestrator_v2.models import ServerNode, TenantInstance  # noqa: E402,F401

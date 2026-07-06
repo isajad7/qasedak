@@ -1,0 +1,411 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static store_formatters %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{{ links.dashboard }}">داشبورد قاصدک</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-reports" dir="rtl">
+    <section class="qadmin-hero qadmin-reports-hero">
+        <div>
+            <p class="qadmin-eyebrow">Reports & Analytics Center</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+            <div class="qadmin-inline-badges">
+                <span class="qadmin-badge qadmin-badge-info">{{ period.display }}</span>
+                <span class="qadmin-badge qadmin-badge-secondary">مقایسه: {{ period.previous_display }}</span>
+                <span class="qadmin-badge qadmin-badge-secondary">{{ period.timezone_name }}</span>
+            </div>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ links.dashboard }}" class="qadmin-action qadmin-action-secondary">داشبورد</a>
+            <a href="{{ links.orders }}" class="qadmin-action qadmin-action-info">میز کار سفارش‌ها</a>
+            <a href="{{ links.services }}" class="qadmin-action qadmin-action-info">میز کار سرویس‌ها</a>
+        </div>
+    </section>
+
+    {% if period.errors %}
+        <section class="qadmin-report-alert qadmin-status-warning">
+            {% for error in period.errors %}
+                <p>{{ error }}</p>
+            {% endfor %}
+        </section>
+    {% endif %}
+
+    <section class="qadmin-toolbar qadmin-report-filters">
+        <div>
+            <strong>فروشگاه:</strong>
+            {% if selected_store %}{{ selected_store.name }}{% else %}همه فروشگاه‌ها{% endif %}
+        </div>
+        {% if stores|length > 1 %}
+            <form method="get" class="qadmin-store-switcher">
+                <input type="hidden" name="range" value="{{ period.key }}">
+                {% if period.is_custom %}
+                    <input type="hidden" name="start" value="{{ period.start_date|date:'Y-m-d' }}">
+                    <input type="hidden" name="end" value="{{ period.end_date|date:'Y-m-d' }}">
+                {% endif %}
+                <label for="qadmin-store">Store</label>
+                <select id="qadmin-store" name="store" onchange="this.form.submit()">
+                    {% for store in stores %}
+                        <option value="{{ store.pk }}" {% if selected_store and selected_store.pk == store.pk %}selected{% endif %}>
+                            {{ store.name }}{% if not store.is_active %} - غیرفعال{% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </form>
+        {% endif %}
+    </section>
+
+    <section class="qadmin-report-filter-panel">
+        <nav class="qadmin-report-ranges" aria-label="Date ranges">
+            {% for option in range_options %}
+                <a href="{% url 'admin_store_reports_center' %}?range={{ option.key }}{% if selected_store %}&store={{ selected_store.pk }}{% endif %}"
+                   class="qadmin-report-range {% if period.key == option.key and not period.is_custom %}qadmin-report-range-active{% endif %}">
+                    {{ option.label }}
+                </a>
+            {% endfor %}
+        </nav>
+        <form method="get" class="qadmin-report-custom-range">
+            {% if selected_store %}<input type="hidden" name="store" value="{{ selected_store.pk }}">{% endif %}
+            <label for="qadmin-report-start">از</label>
+            <input id="qadmin-report-start" type="date" name="start" value="{{ period.start_date|date:'Y-m-d' }}">
+            <label for="qadmin-report-end">تا</label>
+            <input id="qadmin-report-end" type="date" name="end" value="{{ period.end_date|date:'Y-m-d' }}">
+            <button type="submit" class="qadmin-action">اعمال بازه</button>
+        </form>
+    </section>
+
+    <section class="qadmin-report-kpis">
+        {% for card in kpi_cards %}
+            <article class="qadmin-report-kpi qadmin-status-{{ card.tone }}">
+                <header>
+                    <h2>{{ card.label }}</h2>
+                    {% if card.badge %}<span class="qadmin-badge qadmin-badge-secondary">{{ card.badge }}</span>{% endif %}
+                </header>
+                <strong>{{ card.value }}</strong>
+                <p>{{ card.note }}</p>
+                {% if card.comparison %}
+                    <span class="qadmin-comparison qadmin-comparison-{{ card.comparison_tone }}">
+                        {{ card.comparison_direction }} نسبت به دوره قبل: {{ card.comparison_label }}
+                    </span>
+                {% endif %}
+            </article>
+        {% endfor %}
+    </section>
+
+    <section class="qadmin-report-section" id="charts">
+        <header>
+            <div>
+                <h2>روند روزانه</h2>
+                <p>نمودارها از aggregate روزانه همین بازه ساخته می‌شوند.</p>
+            </div>
+        </header>
+        <div class="qadmin-chart-grid">
+            <div class="qadmin-chart-box"><canvas id="chart-revenue" height="180"></canvas></div>
+            <div class="qadmin-chart-box"><canvas id="chart-orders" height="180"></canvas></div>
+            <div class="qadmin-chart-box"><canvas id="chart-customers" height="180"></canvas></div>
+            <div class="qadmin-chart-box"><canvas id="chart-usage" height="180"></canvas></div>
+        </div>
+    </section>
+
+    <section class="qadmin-report-section" id="sales">
+        <header>
+            <div>
+                <h2>گزارش فروش</h2>
+                <p>درآمد فقط از سفارش‌های paid/completed محاسبه شده است.</p>
+            </div>
+            {% if can_export_reports %}<a href="{{ export_urls.sales }}" class="qadmin-action qadmin-action-secondary">CSV فروش</a>{% endif %}
+        </header>
+        <div class="qadmin-report-mini-grid">
+            <div><strong>{{ sales.revenue_display }}</strong><span>درآمد کل</span></div>
+            <div><strong>{{ sales.successful_orders|fa_digits }}</strong><span>سفارش موفق</span></div>
+            <div><strong>{{ sales.pending_orders|fa_digits }}</strong><span>pending</span></div>
+            <div><strong>{{ sales.failed_orders|fa_digits }}</strong><span>رد/لغو</span></div>
+            <div><strong>{{ sales.renewal_successful|fa_digits }}</strong><span>تمدید موفق</span></div>
+            <div><strong>{{ sales.new_purchase_successful|fa_digits }}</strong><span>خرید جدید موفق</span></div>
+            <div><strong>{{ sales.avg_order_value_display }}</strong><span>میانگین ارزش سفارش</span></div>
+        </div>
+        <div class="qadmin-table-wrap">
+            <table class="qadmin-report-table">
+                <thead>
+                    <tr>
+                        <th>پلن</th>
+                        <th>نوع</th>
+                        <th>تعداد</th>
+                        <th>درآمد</th>
+                        <th>حجم فروخته‌شده</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in sales.top_plans %}
+                        <tr>
+                            <td>{{ row.plan_name }}</td>
+                            <td>{{ row.type_label }}</td>
+                            <td>{{ row.count|fa_digits }}</td>
+                            <td>{{ row.revenue_display }}</td>
+                            <td>{{ row.sold_gb_display }} GB</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="5" class="qadmin-empty">فروش موفقی در این بازه ثبت نشده است.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="qadmin-report-section" id="customers">
+        <header>
+            <div>
+                <h2>تحلیل مشتری</h2>
+                <p>مشتری تکراری یعنی مشتری دارای حداقل دو سفارش موفق در کل.</p>
+            </div>
+            {% if can_export_reports %}<a href="{{ export_urls.customers }}" class="qadmin-action qadmin-action-secondary">CSV مشتریان</a>{% endif %}
+        </header>
+        <div class="qadmin-report-mini-grid">
+            <div><strong>{{ customers.new_customers|fa_digits }}</strong><span>مشتری جدید</span></div>
+            <div><strong>{{ customers.successful_customers|fa_digits }}</strong><span>دارای خرید موفق در دوره</span></div>
+            <div><strong>{{ customers.repeat_customers|fa_digits }}</strong><span>مشتری تکراری</span></div>
+            <div><strong>{{ customers.active_service_customers|fa_digits }}</strong><span>دارای سرویس فعال</span></div>
+            <div><strong>{{ customers.without_telegram_target|fa_digits }}</strong><span>بدون Telegram target</span></div>
+            <div><strong>{{ customers.returned_customers|fa_digits }}</strong><span>بازگشته</span></div>
+            <div><strong>{% if customers.telegram_ratio is not None %}{{ customers.telegram_ratio|floatformat:1|fa_digits }}٪{% else %}داده کافی نیست{% endif %}</strong><span>نسبت Telegram-linked</span></div>
+        </div>
+    </section>
+
+    <section class="qadmin-report-section" id="services">
+        <header>
+            <div>
+                <h2>تحلیل سرویس‌ها</h2>
+                <p>metricهای active/expired/expiring وضعیت فعلی هستند؛ created و تغییرات خطادار دوره‌ای‌اند.</p>
+            </div>
+            {% if can_export_reports %}<a href="{{ export_urls.services }}" class="qadmin-action qadmin-action-secondary">CSV سرویس‌ها</a>{% endif %}
+        </header>
+        <div class="qadmin-report-mini-grid">
+            <div><strong>{{ services.active_current|fa_digits }}</strong><span>active فعلی</span></div>
+            <div><strong>{{ services.expired_current|fa_digits }}</strong><span>expired فعلی</span></div>
+            <div><strong>{{ services.expiring_3d_current|fa_digits }}</strong><span>در حال انقضا</span></div>
+            <div><strong>{{ services.created_period|fa_digits }}</strong><span>ساخته‌شده در دوره</span></div>
+            <div><strong>{{ services.problem_changed_period|fa_digits }}</strong><span>deleted/suspended/error دوره</span></div>
+            <div><strong>{{ services.without_telegram_target|fa_digits }}</strong><span>بدون Telegram target</span></div>
+            <div><strong>{{ services.low_usage_current|fa_digits }}</strong><span>کم‌مصرف فعلی</span></div>
+            <div><strong>{{ services.silent_active_current|fa_digits }}</strong><span>silent-active</span></div>
+            <div><strong>{{ services.traffic_sold_gb_display }} GB</strong><span>traffic sold دوره</span></div>
+            <div><strong>{{ services.traffic_remaining_display }}</strong><span>traffic remaining فعلی</span></div>
+            <div><strong>{{ services.average_usage_percent_display }}</strong><span>average usage</span></div>
+            <a href="{{ services.links.remote_missing }}"><strong>{{ services.remote_missing_current|fa_digits }}</strong><span>حذف‌شده از پنل</span></a>
+            <a href="{{ services.links.remote_disabled }}"><strong>{{ services.remote_disabled_current|fa_digits }}</strong><span>غیرفعال در پنل</span></a>
+            <a href="{{ services.links.remote_problem }}"><strong>{{ services.reconciliation_failures_current|fa_digits }}</strong><span>خطای reconciliation</span></a>
+        </div>
+    </section>
+
+    <section class="qadmin-report-section" id="panel-usage">
+        <header>
+            <div>
+                <h2>مصرف و سلامت پنل</h2>
+                <p>مصرف از PanelDailyUsage خوانده می‌شود؛ unknown یا insufficient به معنی صفر نیست.</p>
+            </div>
+            {% if can_export_reports %}<a href="{{ export_urls.panel_usage }}" class="qadmin-action qadmin-action-secondary">CSV مصرف پنل</a>{% endif %}
+        </header>
+        <div class="qadmin-report-mini-grid">
+            <div><strong>{{ panel_usage.total_used_display }}</strong><span>مصرف کل دوره</span></div>
+            <div><strong>{{ panel_usage.avg_daily_display }}</strong><span>میانگین روزانه</span></div>
+            <div><strong>{{ panel_usage.max_daily_display }}</strong><span>بیشترین مصرف روزانه</span></div>
+            <div><strong>{% if panel_usage.avg_active_users is not None %}{{ panel_usage.avg_active_users|floatformat:1|fa_digits }}{% else %}نامشخص{% endif %}</strong><span>average active users</span></div>
+            <div><strong>{% if panel_usage.max_active_users is not None %}{{ panel_usage.max_active_users|fa_digits }}{% else %}نامشخص{% endif %}</strong><span>max active users</span></div>
+            <div><strong>{{ panel_usage.latest_health_label }}</strong><span>آخرین health{% if panel_usage.latest_health_panel %}: {{ panel_usage.latest_health_panel }}{% endif %}</span></div>
+            <div><strong>{{ panel_usage.warning_error_checks|fa_digits }}</strong><span>warning/error checks</span></div>
+            <div><strong>{{ panel_usage.quality_label }}</strong><span>data quality</span></div>
+        </div>
+        <div class="qadmin-table-wrap">
+            <table class="qadmin-report-table">
+                <thead>
+                    <tr>
+                        <th>Panel</th>
+                        <th>مصرف</th>
+                        <th>بیشترین روزانه</th>
+                        <th>میانگین active users</th>
+                        <th>روز دارای داده</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in panel_usage.per_panel %}
+                        <tr>
+                            <td>{{ row.name }}</td>
+                            <td>{{ row.used_display }}</td>
+                            <td>{{ row.max_used_display }}</td>
+                            <td>{{ row.avg_active_display }}</td>
+                            <td>{{ row.days|fa_digits }}</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="5" class="qadmin-empty">داده معتبر مصرف پنل برای این بازه وجود ندارد.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="qadmin-report-section" id="operations">
+        <header>
+            <div>
+                <h2>عملیات و خطاها</h2>
+                <p>همه اعداد از logها و صف‌های DB خوانده می‌شوند و هر مسیر به workbench مربوط وصل است.</p>
+            </div>
+            {% if can_export_reports %}<a href="{{ export_urls.operations }}" class="qadmin-action qadmin-action-secondary">CSV عملیات</a>{% endif %}
+        </header>
+        <div class="qadmin-report-mini-grid">
+            <a href="{{ operations.links.orders }}"><strong>{{ operations.pending_receipts|fa_digits }}</strong><span>رسید pending review</span></a>
+            <a href="{{ operations.links.orders }}"><strong>{{ operations.orders_requiring_action|fa_digits }}</strong><span>orders requiring action</span></a>
+            <div><strong>{{ operations.sms_matched|fa_digits }}</strong><span>SMS match موفق</span></div>
+            <div><strong>{{ operations.sms_no_match|fa_digits }}</strong><span>SMS no-match</span></div>
+            <a href="{{ operations.links.services }}"><strong>{{ operations.reminder_sent|fa_digits }}</strong><span>reminder sent</span></a>
+            <a href="{{ operations.links.services }}"><strong>{{ operations.reminder_failed|fa_digits }}</strong><span>reminder failed</span></a>
+            <a href="{{ operations.links.services }}"><strong>{{ operations.reminder_skipped|fa_digits }}</strong><span>reminder skipped</span></a>
+            <a href="{{ operations.links.orders }}"><strong>{{ operations.config_delivery_failed|fa_digits }}</strong><span>config delivery failed</span></a>
+            <a href="{{ operations.links.support }}"><strong>{{ operations.telegram_send_failed|fa_digits }}</strong><span>Telegram send failed</span></a>
+            <a href="{{ operations.links.health }}"><strong>{{ operations.xui_operation_failed|fa_digits }}</strong><span>X-UI operation failed</span></a>
+            <a href="{{ operations.links.services }}"><strong>{{ operations.soft_deleted_after_remote_missing|fa_digits }}</strong><span>soft-delete بعد از missing</span></a>
+            <a href="{{ operations.links.services }}"><strong>{{ operations.reconciliation_soft_delete_failed|fa_digits }}</strong><span>soft-delete ناموفق</span></a>
+            <a href="{{ operations.links.support }}"><strong>{{ support.open_current|fa_digits }}</strong><span>support open</span></a>
+            <a href="{{ operations.links.support }}"><strong>{{ support.waiting_admin_current|fa_digits }}</strong><span>waiting admin</span></a>
+        </div>
+    </section>
+
+    <section class="qadmin-report-section" id="revenue">
+        <header>
+            <div>
+                <h2>Revenue Engine</h2>
+                <p>mode فعلی: <span class="qadmin-badge qadmin-badge-{{ revenue_engine.mode_tone }}">{{ revenue_engine.mode_label }}</span></p>
+            </div>
+            {% if can_export_reports %}<a href="{{ export_urls.revenue }}" class="qadmin-action qadmin-action-secondary">CSV Revenue</a>{% endif %}
+        </header>
+        <div class="qadmin-report-mini-grid">
+            <div><strong>{{ revenue_engine.total|fa_digits }}</strong><span>کل لاگ‌ها</span></div>
+            <div><strong>{{ revenue_engine.dry_run|fa_digits }}</strong><span>dry_run</span></div>
+            <div><strong>{{ revenue_engine.sent|fa_digits }}</strong><span>sent</span></div>
+            <div><strong>{{ revenue_engine.skipped_suppressed|fa_digits }}</strong><span>skipped/suppressed</span></div>
+            <div><strong>{{ revenue_engine.failed|fa_digits }}</strong><span>failed</span></div>
+            <div><strong>{{ revenue_engine.converted|fa_digits }}</strong><span>converted</span></div>
+            <div><strong>{% if revenue_engine.conversion_rate is not None %}{{ revenue_engine.conversion_rate|floatformat:1|fa_digits }}٪{% else %}داده کافی نیست{% endif %}</strong><span>conversion rate</span></div>
+            <div><strong>{% if revenue_engine.top_variant %}{{ revenue_engine.top_variant.safe_variant }}{% else %}داده کافی نیست{% endif %}</strong><span>top converting variant</span></div>
+        </div>
+        <div class="qadmin-table-wrap qadmin-two-tables">
+            <table class="qadmin-report-table">
+                <thead><tr><th>engine_type</th><th>count</th><th>converted</th></tr></thead>
+                <tbody>
+                    {% for row in revenue_engine.engine_rows %}
+                        <tr><td>{{ row.label }}</td><td>{{ row.count|fa_digits }}</td><td>{{ row.converted|fa_digits }}</td></tr>
+                    {% empty %}
+                        <tr><td colspan="3" class="qadmin-empty">لاگی در این بازه نیست.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <table class="qadmin-report-table">
+                <thead><tr><th>decision_source</th><th>count</th><th>converted</th></tr></thead>
+                <tbody>
+                    {% for row in revenue_engine.decision_rows %}
+                        <tr><td>{{ row.label }}</td><td>{{ row.count|fa_digits }}</td><td>{{ row.converted|fa_digits }}</td></tr>
+                    {% empty %}
+                        <tr><td colspan="3" class="qadmin-empty">لاگی در این بازه نیست.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="qadmin-report-section" id="campaigns">
+        <header>
+            <div>
+                <h2>Broadcast / Campaign</h2>
+                <p>هیچ متن کامل پیام در خلاصه نمایش داده نمی‌شود.</p>
+            </div>
+            <div class="qadmin-actions">
+                <a href="{{ campaigns.links.workbench }}" class="qadmin-action">Campaign Workbench</a>
+                <a href="{{ campaigns.links.admin }}" class="qadmin-action qadmin-action-secondary">Broadcast admin</a>
+            </div>
+        </header>
+        <div class="qadmin-report-mini-grid">
+            <div><strong>{{ campaigns.campaigns_created|fa_digits }}</strong><span>campaigns created</span></div>
+            <div><strong>{{ campaigns.campaigns_sent|fa_digits }}</strong><span>campaigns sent</span></div>
+            <div><strong>{{ campaigns.recipients_sent|fa_digits }}</strong><span>recipients sent</span></div>
+            <div><strong>{{ campaigns.recipients_failed|fa_digits }}</strong><span>failed</span></div>
+            <div><strong>{{ campaigns.recipients_skipped|fa_digits }}</strong><span>skipped</span></div>
+            <div><strong>{% if campaigns.success_rate is not None %}{{ campaigns.success_rate|floatformat:1|fa_digits }}٪{% else %}داده کافی نیست{% endif %}</strong><span>success rate</span></div>
+        </div>
+        <div class="qadmin-table-wrap">
+            <table class="qadmin-report-table">
+                <thead><tr><th>Campaign</th><th>status</th><th>recipients</th><th>sent</th><th>failed</th></tr></thead>
+                <tbody>
+                    {% for campaign in campaigns.recent_campaigns %}
+                        <tr>
+                            <td><a href="{{ campaign.url }}">{{ campaign.title }}</a></td>
+                            <td>{{ campaign.status }}</td>
+                            <td>{{ campaign.total_recipients|fa_digits }}</td>
+                            <td>{{ campaign.success_count|fa_digits }}</td>
+                            <td>{{ campaign.failed_count|fa_digits }}</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="5" class="qadmin-empty">campaignی در این بازه ثبت نشده است.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+
+{{ charts|json_script:"reports-chart-data" }}
+<script src="{% static 'vendor/chartjs/chart.umd.min.js' %}"></script>
+<script>
+(function () {
+    var node = document.getElementById("reports-chart-data");
+    if (!node || typeof Chart === "undefined") {
+        return;
+    }
+    var data = JSON.parse(node.textContent);
+    var labels = data.labels || [];
+    function lineChart(id, label, values, color) {
+        var canvas = document.getElementById(id);
+        if (!canvas) {
+            return;
+        }
+        new Chart(canvas, {
+            type: "line",
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: label,
+                    data: values || [],
+                    borderColor: color,
+                    backgroundColor: color + "22",
+                    borderWidth: 2,
+                    pointRadius: 2,
+                    tension: 0.25,
+                    fill: true
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: true } },
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+    }
+    lineChart("chart-revenue", "درآمد روزانه", data.revenue, "#216c5c");
+    lineChart("chart-orders", "سفارش موفق روزانه", data.successful_orders, "#2d6cdf");
+    lineChart("chart-customers", "مشتری جدید روزانه", data.new_customers, "#8a5a10");
+    lineChart("chart-usage", "مصرف پنل روزانه (GB)", data.panel_usage_gb, "#7c3aed");
+})();
+</script>
+{% endblock %}

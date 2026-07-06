@@ -1,4 +1,5 @@
 import logging
+import os
 import signal
 import threading
 import time
@@ -12,6 +13,10 @@ from store.models import BotConfiguration
 from store.telegram_bot.client import BotClient, BotDeliveryError
 
 logger = logging.getLogger(__name__)
+
+
+def runtime_telegram_token_configured():
+    return bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip())
 
 
 class Command(BaseCommand):
@@ -92,7 +97,9 @@ class Command(BaseCommand):
         configs = BotConfiguration.objects.filter(
             provider=BotConfiguration.Provider.TELEGRAM,
             is_active=True,
-        ).exclude(bot_token="")
+        )
+        if not runtime_telegram_token_configured():
+            configs = configs.exclude(bot_token="")
         if config_id:
             configs = configs.filter(pk=config_id)
         return list(configs.values_list("pk", flat=True))

@@ -125,26 +125,30 @@
 
         <aside class="qadmin-action-box qadmin-reply-box">
             <h2>پاسخ</h2>
-            {{ message_templates|json_script:"support-message-templates" }}
-            <form method="post" class="qadmin-action-form">
-                {% csrf_token %}
-                <label for="support-reply-message">متن پاسخ</label>
-                <textarea id="support-reply-message" name="message" rows="8" maxlength="2000" required></textarea>
-                <div class="qadmin-template-buttons">
-                    {% for template in message_templates %}
-                        <button type="button" class="qadmin-template-button" data-template-key="{{ template.key }}">{{ template.label }}</button>
-                    {% endfor %}
-                </div>
-                <label class="qadmin-confirm-row">
-                    <input type="checkbox" name="confirm_customer" value="1" required>
-                    ارسال پاسخ به همین مشتری
-                </label>
-                {% if actions.has_telegram_target %}
-                    <button type="submit" name="action" value="reply" class="qadmin-button">ارسال پاسخ</button>
-                {% else %}
-                    <button type="submit" name="action" value="reply" class="qadmin-button qadmin-button-secondary">ثبت پاسخ و نمایش خطای target</button>
-                {% endif %}
-            </form>
+            {% if actions.can_reply %}
+                {{ message_templates|json_script:"support-message-templates" }}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <label for="support-reply-message">متن پاسخ</label>
+                    <textarea id="support-reply-message" name="message" rows="8" maxlength="2000" required></textarea>
+                    <div class="qadmin-template-buttons">
+                        {% for template in message_templates %}
+                            <button type="button" class="qadmin-template-button" data-template-key="{{ template.key }}">{{ template.label }}</button>
+                        {% endfor %}
+                    </div>
+                    <label class="qadmin-confirm-row">
+                        <input type="checkbox" name="confirm_customer" value="1" required>
+                        ارسال پاسخ به همین مشتری
+                    </label>
+                    {% if actions.has_telegram_target %}
+                        <button type="submit" name="action" value="reply" class="qadmin-button">ارسال پاسخ</button>
+                    {% else %}
+                        <button type="submit" name="action" value="reply" class="qadmin-button qadmin-button-secondary">ثبت پاسخ و نمایش خطای target</button>
+                    {% endif %}
+                </form>
+            {% else %}
+                <div class="qadmin-disabled-note"><strong>پاسخ پشتیبانی</strong><p>نقش شما اجازه ارسال یا تغییر وضعیت تیکت را ندارد.</p></div>
+            {% endif %}
 
             <h2>Action</h2>
             {% if actions.can_close %}

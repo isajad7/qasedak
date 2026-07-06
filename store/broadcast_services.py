@@ -19,6 +19,7 @@ from .customer_analytics import (
     get_customers_by_segment,
 )
 from .models import BotUser, BroadcastMessage, BroadcastRecipient, Customer, LegacyWizWizImportJob, LegacyWizWizImportRow, Store
+from .setup_readiness import SETUP_NOT_READY_MESSAGE, store_is_sellable
 
 
 AUDIENCE_SEGMENT_MAP = {
@@ -37,6 +38,38 @@ AUDIENCE_SEGMENT_MAP = {
 DELIVERY_CHANNELS = (
     BroadcastMessage.Channel.TELEGRAM,
     BroadcastMessage.Channel.BALE,
+)
+
+TARGET_INVALID_TERMS = (
+    "chat not found",
+    "invalid chat",
+    "invalid_chat_id",
+    "target invalid",
+    "telegram_target_invalid",
+)
+BLOCKED_TERMS = (
+    "blocked",
+    "forbidden",
+)
+RATE_LIMIT_TERMS = (
+    "429",
+    "too many requests",
+    "retry after",
+    "rate limit",
+    "rate_limited",
+)
+TRANSIENT_TERMS = (
+    "timeout",
+    "timed out",
+    "read timed out",
+    "temporarily unavailable",
+    "connection aborted",
+    "connection reset",
+    "connection refused",
+    "remote disconnected",
+    "502",
+    "503",
+    "504",
 )
 
 
@@ -247,6 +280,40 @@ def normalize_delivery_error(error):
     return message[:1000] or "Unknown delivery error."
 
 
+def classify_delivery_error(error_message):
+    lowered = str(error_message or "").strip().lower()
+    if not lowered:
+        return "none"
+    if "no active bot user" in lowered or "no target identifier" in lowered or "no botuser" in lowered:
+        return "no_target"
+    if any(term in lowered for term in TARGET_INVALID_TERMS):
+        return "target_invalid"
+    if any(term in lowered for term in BLOCKED_TERMS):
+        return "blocked"
+    if any(term in lowered for term in RATE_LIMIT_TERMS):
+        return "rate_limited"
+    if any(term in lowered for term in TRANSIENT_TERMS):
+        return "timeout_network"
+    return "api_error"
+
+
+def is_retryable_delivery_error(error_message):
+    return classify_delivery_error(error_message) in {"rate_limited", "timeout_network"}
+
+
+def safe_delivery_error(error_message):
+    category = classify_delivery_error(error_message)
+    return {
+        "none": "-",
+        "no_target": "No Telegram/Bale target",
+        "target_invalid": "Target invalid",
+        "blocked": "Bot blocked or forbidden",
+        "rate_limited": "Rate limited",
+        "timeout_network": "Timeout/network error",
+        "api_error": "Bot API error",
+    }.get(category, "Bot API error")
+
+
 def _mark_recipient(recipient, *, status, error_message="", sent_at=None):
     recipient.status = status
     recipient.error_message = error_message
@@ -310,7 +377,7 @@ def send_message_to_customer(campaign, recipient, *, bot_config=None):
 
 def _store_allows_broadcast(campaign, *, bot_config=None):
     store = getattr(campaign, "store", None) or getattr(bot_config, "store", None) or get_default_broadcast_store()
-    return bool(getattr(store, "broadcast_enabled", True)), store
+    return bool(getattr(store, "broadcast_enabled", True) and (not store or store_is_sellable(store))), store
 
 
 def send_campaign(campaign, *, bot_config=None):
@@ -326,7 +393,8 @@ def send_campaign(campaign, *, bot_config=None):
     enabled, store = _store_allows_broadcast(campaign, bot_config=bot_config)
     if not enabled:
         campaign.status = BroadcastMessage.Status.FAILED
-        campaign.metadata = {**(campaign.metadata or {}), "error": "Broadcast is disabled for this store."}
+        error = SETUP_NOT_READY_MESSAGE if store and not store_is_sellable(store) else "Broadcast is disabled for this store."
+        campaign.metadata = {**(campaign.metadata or {}), "error": error}
         campaign.save(update_fields=["status", "metadata", "updated_at"])
         return refresh_campaign_counts(campaign)
 

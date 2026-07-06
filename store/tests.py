@@ -1,6 +1,11 @@
 import json
 import base64
+import os
 import random
+import sqlite3
+import subprocess
+import sys
+import tarfile
 import tempfile
 import threading
 from io import BytesIO, StringIO
@@ -13,6 +18,7 @@ from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 import requests
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
@@ -22,7 +28,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import IntegrityError, transaction
 from django.http import HttpResponse
-from django.test import Client, TestCase, override_settings
+from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 from PIL import Image
@@ -60,6 +66,8 @@ from .models import (
     PanelUsageSnapshot,
     Plan,
     PlanInboundRoute,
+    QasedakBackupJob,
+    QasedakRestoreJob,
     Referral,
     ReferralRewardLedger,
     RevenueOfferLog,
@@ -71,6 +79,7 @@ from .models import (
     VPNClientReminderLog,
     WebTelegramLinkToken,
 )
+from .orchestrator_v2.models import ServerNode, TenantInstance
 from .broadcast_services import (
     create_campaign_recipients,
     get_customers_for_audience,
@@ -951,7 +960,8 @@ class IntegrationCheckCommandTests(TestCase):
             def __init__(self, panel):
                 self.panel = panel
 
-            def get_inbound(self, inbound_id, *, use_cache=True):
+            def get_inbound(self, inbound_or_id, *, use_cache=True):
+                inbound_id = getattr(inbound_or_id, "inbound_id", inbound_or_id)
                 if inbound_id == legacy_inbound.inbound_id:
                     raise XUIError("Obtain (record not found)")
                 return {"id": inbound_id, "protocol": "vless", "remark": "ok", "enable": True}
@@ -981,7 +991,7 @@ class IntegrationCheckCommandTests(TestCase):
             def __init__(self, panel):
                 self.panel = panel
 
-            def get_inbound(self, inbound_id, *, use_cache=True):
+            def get_inbound(self, inbound_or_id, *, use_cache=True):
                 raise XUIError("Obtain (record not found)")
 
         stdout = StringIO()
@@ -1156,6 +1166,577 @@ class XUIPanelProxyTests(TestCase):
         self.assertEqual(session.post.call_count, 2)
 
 
+class XUICompatibilityFacadeTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.store = Store.objects.create(
+            name="VPN Store",
+            english_name="VPN Store",
+            card_number="0000000000000000",
+            card_owner="VPN Store",
+        )
+        self.panel = Panel.objects.create(
+            store=self.store,
+            name="Modern panel",
+            url="https://panel.example.com",
+            username="admin",
+            password="secret",
+            is_active=True,
+        )
+        self.inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=1,
+            remark="Main",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="vpn.example.com",
+            port="443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+        )
+
+    def mark_modern(self, profile=Panel.CapabilityProfile.MODERN_MULTI_NODE):
+        self.panel.capability_profile = profile
+        self.panel.detected_xui_version = "3.4.0"
+        self.panel.save(update_fields=["capability_profile", "detected_xui_version", "updated_at"])
+        cache.clear()
+
+    def modern_api_mock(self, calls):
+        def api(method, path, **kwargs):
+            calls.append((method, path, kwargs))
+            if path == "/panel/api/clients/add":
+                return {"success": True, "obj": {"pendingNodes": False}}
+            if path.startswith("/panel/api/clients/update/"):
+                return {"success": True, "obj": {"pendingNodes": False}}
+            if path == "/panel/api/inbounds/get/1":
+                created_clients = [
+                    call[2]["json"]["client"]
+                    for call in calls
+                    if call[1] == "/panel/api/clients/add" and call[2].get("json", {}).get("client")
+                ]
+                return {
+                    "success": True,
+                    "obj": {
+                        "id": self.inbound.inbound_id,
+                        "protocol": "vless",
+                        "remark": "Main",
+                        "port": self.inbound.port,
+                        "settings": json.dumps({"clients": created_clients}),
+                        "streamSettings": "{}",
+                    },
+                }
+            if path == "/panel/api/hosts/byInbound/1":
+                return {"success": True, "obj": []}
+            return {"success": True, "obj": []}
+
+        return api
+
+    def test_modern_enabled_create_uses_clients_add_payload(self):
+        from .xui_api import XUIService
+
+        self.mark_modern()
+        service = XUIService(self.panel)
+        calls = []
+        with (
+            patch.object(service, "login", return_value=service.session),
+            patch.object(service, "authenticated_json", side_effect=self.modern_api_mock(calls)),
+        ):
+            result = service.create_enabled_client(
+                email_prefix="alice",
+                total_gb=1,
+                duration_hours=1,
+                inbound=self.inbound,
+            )
+
+        self.assertEqual(calls[0][0], "POST")
+        self.assertEqual(calls[0][1], "/panel/api/clients/add")
+        self.assertEqual(calls[0][2]["json"]["inboundIds"], [self.inbound.inbound_id])
+        self.assertTrue(calls[0][2]["json"]["client"]["enable"])
+        self.assertEqual(calls[0][2]["json"]["client"]["tgId"], 0)
+        self.assertEqual(result["xui_node_id"], "")
+        self.assertTrue(result["remote_client_key"])
+
+    def test_modern_inactive_create_is_refused(self):
+        from .xui_api import XUIService
+        from .xui_compat.errors import XUICompatibilityError
+
+        self.mark_modern()
+        service = XUIService(self.panel)
+        with (
+            patch.object(service, "login", return_value=service.session),
+            self.assertRaises(XUICompatibilityError),
+        ):
+            service.create_inactive_client(
+                email_prefix="alice",
+                total_gb=1,
+                expire_days=30,
+                inbound=self.inbound,
+            )
+
+    def test_modern_update_uses_email_endpoint_with_inbound_filter(self):
+        from .xui_api import XUIService
+
+        self.mark_modern(Panel.CapabilityProfile.MODERN_SINGLE_NODE)
+        service = XUIService(self.panel)
+        found = {
+            "client": {"id": "client-alpha", "email": "alice@example.com", "totalGB": 100, "expiryTime": 0, "enable": True},
+            "client_stats": {},
+            "matched_field": "id",
+        }
+        verified = {
+            "client": {"id": "client-alpha", "email": "alice@example.com", "totalGB": 2048, "expiryTime": 0, "enable": True},
+            "client_stats": {},
+            "matched_field": "id",
+        }
+        calls = []
+
+        with (
+            patch.object(service, "_find_client_in_inbound", side_effect=[found, verified]),
+            patch.object(service, "authenticated_json", side_effect=self.modern_api_mock(calls)),
+        ):
+            result = service.update_client_traffic_and_expiry(
+                self.inbound,
+                "client-alpha",
+                total_bytes=2048,
+            )
+
+        update_call = next(call for call in calls if call[1].startswith("/panel/api/clients/update/"))
+        self.assertIn("/panel/api/clients/update/alice%40example.com", update_call[1])
+        self.assertIn("inboundIds=1", update_call[1])
+        self.assertEqual(update_call[2]["json"]["totalGB"], 2048)
+        self.assertEqual(result["new_total_bytes"], 2048)
+
+    def test_modern_delete_refuses_multi_attachment_without_explicit_scope(self):
+        from .xui_api import XUIService
+        from .xui_compat.errors import XUIAmbiguousScopeError
+
+        self.mark_modern()
+        service = XUIService(self.panel)
+        found = {
+            "client": {"id": "client-alpha", "email": "alice@example.com"},
+            "client_stats": {},
+            "matched_field": "id",
+        }
+        with (
+            patch.object(service, "_find_client_in_inbound", return_value=found),
+            patch.object(service, "_modern_client_attachments", return_value=[1, 2]),
+            self.assertRaises(XUIAmbiguousScopeError),
+        ):
+            service.delete_client_from_inbound(self.inbound, "client-alpha")
+
+    def test_audit_command_no_write_keeps_panel_metadata_unchanged(self):
+        stdout = StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "xui-audit.json"
+            call_command(
+                "audit_xui_compatibility",
+                "--panel-id",
+                str(self.panel.pk),
+                "--no-write",
+                "--export-json",
+                str(report_path),
+                stdout=stdout,
+            )
+            self.panel.refresh_from_db()
+
+            self.assertEqual(self.panel.capability_profile, "")
+            self.assertTrue(report_path.exists())
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["summary"]["panels"], 1)
+            self.assertIn("profiles", payload["summary"])
+
+
+class ModernPaidProvisioningTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.store = Store.objects.create(
+            name="VPN Store",
+            english_name="VPN Store",
+            card_number="0000000000000000",
+            card_owner="VPN Store",
+        )
+        self.customer = Customer.objects.create(display_name="Alice", username="alice")
+        self.plan = Plan.objects.create(
+            store=self.store,
+            name="30 days",
+            slug="30-days-modern",
+            price=100000,
+            volume_gb=Decimal("10"),
+            duration_days=30,
+            device_limit=2,
+            is_active=True,
+            is_public=True,
+        )
+        self.panel = Panel.objects.create(
+            store=self.store,
+            name="Modern panel",
+            url="https://modern.example.com",
+            username="admin",
+            password="secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+            detected_xui_version="3.4.0",
+        )
+        self.inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=7,
+            xui_node_id="node-alpha",
+            xui_node_name="Node Alpha",
+            remark="Modern node inbound",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="vpn.example.com",
+            port="443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        PlanInboundRoute.objects.create(store=self.store, plan=self.plan, inbound=self.inbound, priority=1)
+
+    def create_paid_order(self):
+        return create_manual_payment_order(
+            store=self.store,
+            customer=self.customer,
+            plan=self.plan,
+            inbound=self.inbound,
+            sender_card_name="Alice Buyer",
+            sender_card_last4="1234",
+            payment_time=time(14, 35),
+            metadata={"source": "modern_paid_test"},
+        )
+
+    def remote_result_for_order(self, order, *, index=1):
+        from .provisioning_services import order_identity
+
+        identity = order_identity(order, self.inbound, index=index)
+        result = fake_client_result(identity["uuid"])
+        result.update(
+            {
+                "email": identity["email"],
+                "sub_id": identity["sub_id"],
+                "xui_node_id": self.inbound.xui_node_id,
+                "remote_client_key": f"{self.panel.pk}:{self.inbound.xui_node_id}:{self.inbound.inbound_id}:{identity['uuid']}",
+                "raw": {"id": identity["uuid"], "email": identity["email"], "enable": True},
+            }
+        )
+        return result
+
+    @patch("store.order_services.create_inactive_client_details")
+    def test_modern_paid_checkout_defers_remote_create_and_freezes_scope(self, inactive_create):
+        result = self.create_paid_order()
+
+        self.assertTrue(result.success)
+        inactive_create.assert_not_called()
+        order = result.order
+        self.assertEqual(order.provisioning_status, Order.ProvisioningStatus.PENDING)
+        self.assertFalse(order.uuid)
+        self.assertFalse(order.vpn_clients.exists())
+        self.assertEqual(order.metadata["provisioning_strategy"], "deferred_create_enabled")
+        self.assertEqual(order.metadata["provisioning_scope"]["panel_id"], self.panel.pk)
+        self.assertEqual(order.metadata["provisioning_scope"]["node_id"], "node-alpha")
+        self.assertEqual(order.metadata["provisioning_scope"]["xui_inbound_id"], self.inbound.inbound_id)
+
+    @patch("store.provisioning_services.create_enabled_client_details")
+    @patch("store.provisioning_services.lookup_existing_remote_client")
+    def test_modern_paid_approval_creates_enabled_after_payment_and_completes_after_verify(self, lookup_remote, create_enabled):
+        order = self.create_paid_order().order
+        remote = self.remote_result_for_order(order)
+        lookup_remote.side_effect = [None, remote]
+        create_enabled.return_value = remote
+
+        result = activate_order(order, notify=False)
+
+        self.assertTrue(result.success)
+        create_enabled.assert_called_once()
+        self.assertEqual(lookup_remote.call_count, 2)
+        order.refresh_from_db()
+        client = order.vpn_clients.get()
+        self.assertEqual(order.status, Order.Status.COMPLETED)
+        self.assertEqual(order.provisioning_status, Order.ProvisioningStatus.PROVISIONED)
+        self.assertEqual(client.status, VPNClient.Status.ACTIVE)
+        self.assertEqual(client.inbound, self.inbound)
+        self.assertEqual(client.xui_node_id, "node-alpha")
+        self.assertEqual(order.uuid, remote["uuid"])
+
+    @patch("store.provisioning_services.create_enabled_client_details", return_value=None)
+    @patch("store.provisioning_services.lookup_existing_remote_client", return_value=None)
+    def test_modern_remote_create_failure_does_not_complete_or_create_active_client(self, lookup_remote, create_enabled):
+        order = self.create_paid_order().order
+
+        result = activate_order(order, notify=False)
+
+        self.assertFalse(result.success)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CONFIRMED)
+        self.assertEqual(order.provisioning_status, Order.ProvisioningStatus.FAILED)
+        self.assertFalse(order.vpn_clients.filter(status=VPNClient.Status.ACTIVE).exists())
+        create_enabled.assert_called_once()
+        self.assertEqual(lookup_remote.call_count, 1)
+
+    @patch("store.provisioning_services.create_enabled_client_details")
+    @patch("store.provisioning_services.lookup_existing_remote_client")
+    def test_central_approval_refuses_terminal_or_rejected_payment_states(self, lookup_remote, create_enabled):
+        cases = (
+            (Order.Status.REJECTED, Order.VerificationStatus.PENDING),
+            (Order.Status.CANCELLED, Order.VerificationStatus.PENDING),
+            (Order.Status.PENDING_VERIFICATION, Order.VerificationStatus.REJECTED),
+        )
+        for status, verification_status in cases:
+            with self.subTest(status=status, verification_status=verification_status):
+                order = self.create_paid_order().order
+                Order.objects.filter(pk=order.pk).update(
+                    status=status,
+                    verification_status=verification_status,
+                )
+                order.refresh_from_db()
+                lookup_remote.reset_mock()
+                create_enabled.reset_mock()
+
+                result = activate_order(order, notify=False)
+
+                self.assertFalse(result.success)
+                lookup_remote.assert_not_called()
+                create_enabled.assert_not_called()
+                order.refresh_from_db()
+                self.assertEqual(order.status, status)
+                self.assertEqual(order.verification_status, verification_status)
+                self.assertFalse(order.vpn_clients.exists())
+
+    def test_nullable_order_relation_lock_query_is_postgres_compatible(self):
+        from .db_locking import select_for_update_self
+
+        order = self.create_paid_order().order
+        Order.objects.filter(pk=order.pk).update(store=None, customer=None, inbound=None)
+
+        with transaction.atomic():
+            locked = select_for_update_self(
+                Order.objects.select_related("store", "customer", "plan", "inbound", "inbound__panel")
+            ).get(pk=order.pk)
+
+        self.assertEqual(locked.pk, order.pk)
+        self.assertIsNone(locked.customer_id)
+        self.assertIsNone(locked.inbound_id)
+
+    def test_nullable_vpn_client_relation_lock_query_is_postgres_compatible(self):
+        from .db_locking import select_for_update_self
+
+        vpn_client = VPNClient.objects.create(
+            store=None,
+            order=None,
+            plan=None,
+            inbound=None,
+            username="orphan-client",
+            xui_email="orphan-client",
+            uuid="00000000-0000-4000-8000-000000000001",
+            status=VPNClient.Status.INACTIVE,
+        )
+
+        with transaction.atomic():
+            locked = select_for_update_self(
+                VPNClient.objects.select_related(
+                    "store",
+                    "order",
+                    "order__customer",
+                    "plan",
+                    "inbound",
+                    "inbound__panel",
+                )
+            ).get(pk=vpn_client.pk)
+
+        self.assertEqual(locked.pk, vpn_client.pk)
+        self.assertIsNone(locked.order_id)
+        self.assertIsNone(locked.inbound_id)
+
+    def test_approval_lock_path_handles_nullable_relations_before_remote_lookup(self):
+        order = self.create_paid_order().order
+        Order.objects.filter(pk=order.pk).update(
+            store=None,
+            customer=None,
+            inbound=None,
+            status=Order.Status.REJECTED,
+        )
+        order.refresh_from_db()
+
+        with patch("store.provisioning_services.lookup_existing_remote_client") as lookup_remote, patch(
+            "store.provisioning_services.create_enabled_client_details"
+        ) as create_enabled:
+            result = activate_order(order, notify=False)
+
+        self.assertFalse(result.success)
+        lookup_remote.assert_not_called()
+        create_enabled.assert_not_called()
+
+    def test_approval_lock_path_handles_existing_related_rows(self):
+        order = self.create_paid_order().order
+        Order.objects.filter(pk=order.pk).update(
+            status=Order.Status.COMPLETED,
+            verification_status=Order.VerificationStatus.VERIFIED,
+        )
+        order.refresh_from_db()
+
+        with patch("store.provisioning_services.lookup_existing_remote_client") as lookup_remote, patch(
+            "store.provisioning_services.create_enabled_client_details"
+        ) as create_enabled:
+            result = activate_order(order, notify=False)
+
+        self.assertTrue(result.success)
+        lookup_remote.assert_not_called()
+        create_enabled.assert_not_called()
+
+    def test_admin_notification_claim_lock_handles_nullable_order_relations(self):
+        from .admin_notifications import _claim_notification
+
+        order = self.create_paid_order().order
+        Order.objects.filter(pk=order.pk).update(store=None, customer=None, inbound=None)
+
+        claimed = _claim_notification(order.pk, "admin_notified_at")
+
+        self.assertEqual(claimed.pk, order.pk)
+        claimed.refresh_from_db()
+        self.assertIsNotNone(claimed.admin_notified_at)
+
+    @patch("store.provisioning_services.create_enabled_client_details")
+    @patch("store.provisioning_services.lookup_existing_remote_client")
+    def test_modern_approval_refuses_changed_frozen_node_scope_before_remote_call(self, lookup_remote, create_enabled):
+        order = self.create_paid_order().order
+        self.inbound.xui_node_id = "node-beta"
+        self.inbound.xui_node_name = "Node Beta"
+        self.inbound.save(update_fields=["xui_node_id", "xui_node_name", "updated_at"])
+
+        result = activate_order(order, notify=False)
+
+        self.assertFalse(result.success)
+        lookup_remote.assert_not_called()
+        create_enabled.assert_not_called()
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CONFIRMED)
+        self.assertEqual(order.provisioning_status, Order.ProvisioningStatus.FAILED)
+        self.assertFalse(order.vpn_clients.exists())
+        self.assertIn("frozen_provisioning_scope", order.last_provisioning_error)
+
+    @patch("store.provisioning_services.create_enabled_client_details")
+    @patch("store.provisioning_services.lookup_existing_remote_client")
+    def test_modern_remote_verify_failure_does_not_complete_or_create_local_client(self, lookup_remote, create_enabled):
+        order = self.create_paid_order().order
+        remote = self.remote_result_for_order(order)
+        lookup_remote.side_effect = [None, None]
+        create_enabled.return_value = remote
+
+        result = activate_order(order, notify=False)
+
+        self.assertFalse(result.success)
+        create_enabled.assert_called_once()
+        self.assertEqual(lookup_remote.call_count, 2)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CONFIRMED)
+        self.assertEqual(order.provisioning_status, Order.ProvisioningStatus.FAILED)
+        self.assertFalse(order.vpn_clients.exists())
+
+    @patch("store.provisioning_services.create_enabled_client_details")
+    @patch("store.provisioning_services.lookup_existing_remote_client")
+    def test_modern_admin_direct_purchase_uses_direct_create_enabled_strategy(self, lookup_remote, create_enabled):
+        result = create_manual_payment_order(
+            store=self.store,
+            customer=self.customer,
+            plan=self.plan,
+            inbound=self.inbound,
+            sender_card_name="Admin Buyer",
+            sender_card_last4="",
+            payment_time=time(15, 0),
+            metadata={"admin_direct_purchase": True, "source": "test_admin_direct"},
+        )
+        self.assertTrue(result.success)
+        order = result.order
+        remote = self.remote_result_for_order(order)
+        lookup_remote.side_effect = [None, remote]
+        create_enabled.return_value = remote
+
+        activation = activate_order(order, notify=False)
+
+        self.assertTrue(activation.success)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.COMPLETED)
+        self.assertEqual(order.metadata["provisioning_strategy"], "direct_create_enabled")
+        create_enabled.assert_called_once()
+
+    @patch("store.provisioning_services.create_enabled_client_details")
+    @patch("store.provisioning_services.lookup_existing_remote_client")
+    def test_modern_retry_reuses_existing_remote_and_does_not_duplicate_local_client(self, lookup_remote, create_enabled):
+        order = self.create_paid_order().order
+        remote = self.remote_result_for_order(order)
+        lookup_remote.side_effect = [None, remote]
+        create_enabled.return_value = remote
+        first = activate_order(order, notify=False)
+        self.assertTrue(first.success)
+
+        second = activate_order(order, notify=False)
+
+        self.assertTrue(second.success)
+        self.assertEqual(VPNClient.objects.filter(order=order).count(), 1)
+        create_enabled.assert_called_once()
+
+    @patch("store.provisioning_services.create_enabled_client_details")
+    @patch("store.provisioning_services.lookup_existing_remote_client")
+    def test_modern_bulk_paid_approval_creates_requested_client_count(self, lookup_remote, create_enabled):
+        result = create_manual_payment_order(
+            store=self.store,
+            customer=self.customer,
+            plan=self.plan,
+            inbound=self.inbound,
+            sender_card_name="Bulk Buyer",
+            sender_card_last4="1234",
+            payment_time=time(16, 0),
+            quantity=2,
+            metadata={"source": "modern_bulk"},
+        )
+        self.assertTrue(result.success)
+        order = result.order
+        first_remote = self.remote_result_for_order(order, index=1)
+        second_remote = self.remote_result_for_order(order, index=2)
+        lookup_remote.side_effect = [None, first_remote, None, second_remote]
+        create_enabled.side_effect = [first_remote, second_remote]
+
+        activation = activate_order(order, notify=False)
+
+        self.assertTrue(activation.success)
+        order.refresh_from_db()
+        clients = list(order.vpn_clients.order_by("created_at", "pk"))
+        self.assertEqual(order.status, Order.Status.COMPLETED)
+        self.assertEqual(len(clients), 2)
+        self.assertNotEqual(clients[0].uuid, clients[1].uuid)
+        self.assertEqual(create_enabled.call_count, 2)
+
+    @patch("store.provisioning_services.create_enabled_client_details")
+    @patch("store.provisioning_services.lookup_existing_remote_client")
+    def test_modern_existing_remote_on_retry_is_reused_after_prior_failure(self, lookup_remote, create_enabled):
+        order = self.create_paid_order().order
+        remote = self.remote_result_for_order(order)
+        lookup_remote.side_effect = [Exception("timeout"), remote, remote]
+        create_enabled.return_value = remote
+
+        first = activate_order(order, notify=False)
+        self.assertFalse(first.success)
+        order.refresh_from_db()
+        self.assertEqual(order.provisioning_status, Order.ProvisioningStatus.FAILED)
+
+        second = activate_order(order, notify=False)
+
+        self.assertTrue(second.success)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.COMPLETED)
+        self.assertEqual(VPNClient.objects.filter(order=order).count(), 1)
+        create_enabled.assert_not_called()
+
+    @patch("store.management.commands.reconcile_order_provisioning.lookup_existing_remote_client", return_value=None)
+    def test_reconcile_order_provisioning_dry_run_does_not_write(self, _lookup_remote):
+        order = self.create_paid_order().order
+        stdout = StringIO()
+
+        call_command("reconcile_order_provisioning", "--order-id", str(order.pk), "--dry-run", stdout=stdout)
+
+        order.refresh_from_db()
+        self.assertEqual(order.provisioning_status, Order.ProvisioningStatus.PENDING)
+        self.assertIn("state=remote_missing", stdout.getvalue())
+
+
 class PanelHealthServiceTests(TestCase):
     def setUp(self):
         self.store = Store.objects.create(
@@ -1195,6 +1776,22 @@ class PanelHealthServiceTests(TestCase):
         }
         if inbound_side_effect is not None:
             service.get_inbound.side_effect = inbound_side_effect
+        service.authenticated_json.side_effect = lambda method, path, **kwargs: {
+            "/panel/api/server/getPanelUpdateInfo": {"success": True, "obj": {"version": "2.9.4"}},
+            "/panel/api/server/status": {"success": True, "obj": {"panelVersion": "2.9.4"}},
+            "/panel/api/inbounds/list": {
+                "success": True,
+                "obj": [
+                    {
+                        "id": self.inbound.inbound_id,
+                        "remark": self.inbound.remark,
+                        "protocol": self.inbound.protocol,
+                    }
+                ],
+            },
+            "/panel/api/nodes/list": {"success": True, "obj": []},
+            "/panel/api/hosts/list": {"success": True, "obj": []},
+        }.get(path, {"success": True, "obj": []})
         return service
 
     def test_panel_ok_records_status_and_log(self):
@@ -1250,6 +1847,50 @@ class PanelHealthServiceTests(TestCase):
         self.assertEqual(result["status"], PanelHealthStatus.Status.WARNING)
         self.assertEqual(result["inbounds_error"], 1)
         self.assertEqual(PanelHealthStatus.objects.get(panel=self.panel).status, PanelHealthStatus.Status.WARNING)
+
+    def test_node_offline_becomes_health_warning_metadata(self):
+        from .panel_health_services import check_panel_health
+
+        service = self.service_mock()
+
+        def api_response(method, path, **kwargs):
+            if path == "/panel/api/server/getPanelUpdateInfo":
+                return {"success": True, "obj": {"version": "3.4.0"}}
+            if path == "/panel/api/server/status":
+                return {"success": True, "obj": {"panelVersion": "3.4.0"}}
+            if path == "/panel/api/inbounds/list":
+                return {
+                    "success": True,
+                    "obj": [
+                        {
+                            "id": self.inbound.inbound_id,
+                            "remark": self.inbound.remark,
+                            "protocol": self.inbound.protocol,
+                            "nodeId": "node-guid-alpha",
+                        }
+                    ],
+                }
+            if path == "/panel/api/nodes/list":
+                return {
+                    "success": True,
+                    "obj": [
+                        {
+                            "guid": "node-guid-alpha",
+                            "name": "Node A",
+                            "status": "offline",
+                        }
+                    ],
+                }
+            return {"success": True, "obj": []}
+
+        service.authenticated_json.side_effect = api_response
+
+        with patch("store.panel_health_services.XUIService", return_value=service):
+            result = check_panel_health(self.panel)
+
+        self.assertEqual(result["status"], PanelHealthStatus.Status.WARNING)
+        self.assertEqual(result["metadata"]["node_issue_count"], 1)
+        self.assertEqual(result["metadata"]["compatibility"]["profile"], Panel.CapabilityProfile.MODERN_MULTI_NODE)
 
     def test_health_monitor_disabled_inbound_is_ignored(self):
         from .panel_health_services import check_panel_health
@@ -1545,6 +2186,51 @@ class PanelUsageServiceTests(TestCase):
         self.assertNotIn("alice@example.com", payload)
         self.assertNotIn("11111111-1111-4111-8111-111111111111", payload)
 
+    def test_collect_panel_usage_snapshot_dedupes_same_client_across_inbounds(self):
+        from .panel_usage_services import collect_panel_usage_snapshot
+
+        Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=2,
+            remark="Node mirror",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="127.0.0.1",
+            port="8443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+            xui_node_id="node-a-guid",
+            xui_node_name="Node A",
+            xui_source=Inbound.XUISource.SYNCHRONIZED_NODE,
+        )
+        payload = self.inbound_payload(
+            clients=[
+                {
+                    "id": "client-alpha",
+                    "email": "alice@example.com",
+                    "enable": True,
+                }
+            ],
+            stats=[
+                {
+                    "email": "alice@example.com",
+                    "up": 100,
+                    "down": 200,
+                    "total": 1000,
+                    "enable": True,
+                }
+            ],
+        )
+        service = self.service_mock(inbound_side_effect=lambda inbound, *, use_cache=True: payload)
+
+        with patch("store.xui_api.XUIService", return_value=service):
+            result = collect_panel_usage_snapshot(self.panel)
+
+        snapshot = PanelUsageSnapshot.objects.get(panel=self.panel)
+        self.assertEqual(result["status"], PanelUsageSnapshot.Status.OK)
+        self.assertEqual(snapshot.total_used_bytes, 300)
+        self.assertEqual(snapshot.clients_count, 1)
+        self.assertEqual(snapshot.metadata["duplicate_usage_count"], 1)
+
     def test_collect_panel_usage_snapshot_partial_when_one_inbound_fails(self):
         from .panel_usage_services import collect_panel_usage_snapshot
         from .xui_api import XUIError
@@ -1560,8 +2246,9 @@ class PanelUsageServiceTests(TestCase):
             is_active=True,
         )
 
-        def get_inbound(inbound_id, *, use_cache=True):
-            if inbound_id == second_inbound.inbound_id:
+        def get_inbound(inbound_or_id, *, use_cache=True):
+            remote_id = getattr(inbound_or_id, "inbound_id", inbound_or_id)
+            if remote_id == second_inbound.inbound_id:
                 raise XUIError("Inbound was not found on https://panel.example.com/secret with panel-password")
             return self.inbound_payload(
                 clients=[{"id": "client-1", "email": "alice@example.com"}],
@@ -3321,7 +4008,7 @@ class InboundPanelRoutingTests(TestCase):
         self.inbound = self.create_inbound(self.panel, inbound_id=10, current_users=5)
         self.other_inbound = self.create_inbound(self.other_panel, inbound_id=10, current_users=0)
 
-    def create_inbound(self, panel, *, inbound_id, current_users=0, is_active=True):
+    def create_inbound(self, panel, *, inbound_id, current_users=0, is_active=True, **extra_fields):
         return Inbound.objects.create(
             panel=panel,
             inbound_id=inbound_id,
@@ -3331,6 +4018,7 @@ class InboundPanelRoutingTests(TestCase):
             config_params="type=tcp&security=none",
             is_active=is_active,
             current_users=current_users,
+            **extra_fields,
         )
 
     def order_kwargs(self, *, inbound=None):
@@ -3350,10 +4038,23 @@ class InboundPanelRoutingTests(TestCase):
         self.assertEqual(self.inbound.panel, self.panel)
         self.assertIn(self.inbound, self.panel.inbounds.all())
 
-    def test_inbound_id_is_unique_per_panel(self):
+    def test_inbound_id_is_unique_per_panel_and_node_scope(self):
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 self.create_inbound(self.panel, inbound_id=self.inbound.inbound_id)
+
+    def test_same_inbound_id_is_allowed_on_different_nodes_of_same_panel(self):
+        node_inbound = self.create_inbound(
+            self.panel,
+            inbound_id=self.inbound.inbound_id,
+            xui_node_id="node-a-guid",
+            xui_node_name="Node A",
+            xui_source=Inbound.XUISource.SYNCHRONIZED_NODE,
+        )
+
+        self.assertEqual(node_inbound.inbound_id, self.inbound.inbound_id)
+        self.assertEqual(node_inbound.panel, self.panel)
+        self.assertEqual(node_inbound.xui_node_id, "node-a-guid")
 
     def test_same_inbound_id_is_allowed_on_different_panels(self):
         self.assertEqual(self.inbound.inbound_id, self.other_inbound.inbound_id)
@@ -4025,6 +4726,42 @@ class PlanInboundRouteTests(TestCase):
         call_command("check_integrations", "--no-fail", stdout=out)
 
         self.assertIn("Invalid active route", out.getvalue())
+
+    def test_check_integrations_errors_for_modern_node_route_without_node_identity(self):
+        self.panel.capability_profile = Panel.CapabilityProfile.MODERN_MULTI_NODE
+        self.panel.save(update_fields=["capability_profile", "updated_at"])
+        self.route_inbound.xui_source = Inbound.XUISource.SYNCHRONIZED_NODE
+        self.route_inbound.xui_node_id = ""
+        self.route_inbound.save(update_fields=["xui_source", "xui_node_id", "updated_at"])
+        self.create_route(inbound=self.route_inbound)
+        out = StringIO()
+
+        call_command("check_integrations", "--no-fail", stdout=out)
+
+        self.assertIn("no node identity", out.getvalue())
+
+    def test_sync_xui_topology_skips_duplicate_remote_inbound_id_without_exact_local_scope(self):
+        from store.management.commands.sync_xui_topology import Command
+
+        planned = Command().plan_updates(
+            self.panel,
+            [
+                {
+                    "remote_key": f"{self.panel.pk}:node-a:{self.route_inbound.inbound_id}",
+                    "inbound_external_id": str(self.route_inbound.inbound_id),
+                    "node_external_id": "node-a",
+                },
+                {
+                    "remote_key": f"{self.panel.pk}:node-b:{self.route_inbound.inbound_id}",
+                    "inbound_external_id": str(self.route_inbound.inbound_id),
+                    "node_external_id": "node-b",
+                },
+            ],
+        )
+
+        self.assertEqual(planned["updates"], [])
+        self.assertEqual(len(planned["skipped"]), 2)
+        self.assertTrue(all("ambiguous" in item["reason"] for item in planned["skipped"]))
 
     def test_check_integrations_has_no_missing_route_after_bulk_assign(self):
         self.store.allow_global_inbound_fallback = False
@@ -4720,7 +5457,8 @@ class FreeTrialServiceTests(TestCase):
         self.assertEqual(cleanup_target.uuid, "67676767-6767-4767-8767-676767676767")
         log_output = "\n".join(logs.output)
         self.assertIn("local persistence failed", log_output)
-        self.assertIn("67676767-6767-4767-8767-676767676767", log_output)
+        self.assertIn("676767...6767", log_output)
+        self.assertNotIn("67676767-6767-4767-8767-676767676767", log_output)
         self.assertNotIn("vless://secret-config", log_output)
         self.assertIn("<config-link-redacted>", log_output)
 
@@ -5610,6 +6348,414 @@ class AdminOwnerDashboardTests(TestCase):
         self.assertEqual(changelist_response.status_code, 200)
         self.assertContains(index_response, reverse("admin_store_owner_dashboard"))
         self.assertContains(changelist_response, reverse("admin_store_owner_dashboard"))
+
+    def test_admin_index_renders_responsive_qasedak_dashboard(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin:index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "tw-admin-home")
+        self.assertContains(response, 'dir="rtl"')
+        self.assertContains(response, "داشبورد قاصدک")
+        self.assertContains(response, "شاخص‌های امروز")
+        self.assertContains(response, "میز کار سفارش‌ها")
+        self.assertContains(response, "نیازمند اقدام")
+        self.assertContains(response, "مدیریت پیشرفته")
+        self.assertContains(response, "qasedak_admin_tailwind.css")
+        self.assertContains(response, "qasedak_admin.js")
+        self.assertContains(response, "tw-grid")
+        self.assertNotContains(response, 'class="card mb-3"')
+
+    def test_admin_index_fresh_install_empty_state_does_not_500(self):
+        BotConfiguration.objects.all().delete()
+        Panel.objects.all().delete()
+        Plan.objects.all().delete()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin:index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "نیازمند اقدام")
+        self.assertContains(response, "مدیریت پیشرفته")
+
+    def test_admin_index_does_not_call_live_integrations(self):
+        self.login_admin()
+
+        with patch("store.telegram_bot.client.BotClient.get_me") as get_me_mock, patch(
+            "store.xui_api.login_to_panel"
+        ) as login_mock:
+            response = self.client.get(reverse("admin:index"))
+
+        self.assertEqual(response.status_code, 200)
+        get_me_mock.assert_not_called()
+        login_mock.assert_not_called()
+
+    def test_admin_index_recent_activity_redacts_sensitive_values(self):
+        from django.contrib.admin.models import CHANGE, LogEntry
+        from django.contrib.contenttypes.models import ContentType
+
+        secret_phone = "09123456789"
+        secret_email = "buyer@example.com"
+        secret_uuid = "123e4567-e89b-12d3-a456-426614174000"
+        secret_card = "621986" + "1234567890"
+        LogEntry.objects.create(
+            user=self.admin_user,
+            content_type=ContentType.objects.get_for_model(Store),
+            object_id=str(self.store.pk),
+            object_repr=f"{secret_phone} {secret_email} {secret_uuid} {secret_card}",
+            action_flag=CHANGE,
+            change_message="[]",
+        )
+        self.login_admin()
+
+        response = self.client.get(reverse("admin:index"))
+        body = response.content.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(secret_phone, body)
+        self.assertNotIn(secret_email, body)
+        self.assertNotIn(secret_uuid, body)
+        self.assertNotIn(secret_card, body)
+        self.assertIn("[redacted-phone]", body)
+        self.assertIn("[redacted-email]", body)
+
+    def test_admin_tailwind_static_is_scoped_without_preflight(self):
+        css_path = Path("static/admin/qasedak_admin_tailwind.css")
+
+        self.assertTrue(css_path.exists())
+        css = css_path.read_text(encoding="utf-8")
+        self.assertIn(".tw-admin-home", css)
+        self.assertIn(".tw-grid", css)
+        self.assertNotIn("@layer base", css)
+        self.assertNotIn("button,input,select,optgroup,textarea", css)
+
+
+@override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")
+class AdminReportsCenterTests(TestCase):
+    def setUp(self):
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="reports-admin",
+            email="reports-admin@example.com",
+            password="secret",
+        )
+        self.store = Store.objects.create(
+            name="Reports Store",
+            english_name="Reports Store",
+            slug="reports-store",
+            card_number="0000000000000000",
+            card_owner="Configure Payment Owner",
+        )
+        self.plan = Plan.objects.create(
+            store=self.store,
+            name="Reports 10GB",
+            slug="reports-10gb",
+            volume_gb=Decimal("10.000"),
+            duration_days=30,
+            price=200000,
+            currency=Plan.Currency.TOMAN,
+            is_active=True,
+            is_public=True,
+        )
+
+    def login_admin(self):
+        self.client.force_login(self.admin_user)
+
+    def create_order(self, *, customer=None, status=Order.Status.COMPLETED, is_paid=True, amount=200000, created_at=None, verified_at=None, metadata=None):
+        order = Order.objects.create(
+            store=self.store,
+            customer=customer,
+            plan=self.plan,
+            amount=amount,
+            original_amount=amount,
+            currency=Plan.Currency.TOMAN,
+            status=status,
+            is_paid=is_paid,
+            verification_status=Order.VerificationStatus.VERIFIED if is_paid and status == Order.Status.COMPLETED else Order.VerificationStatus.PENDING,
+            verified_at=verified_at,
+            metadata=metadata or {},
+        )
+        updates = {}
+        if created_at:
+            updates["created_at"] = created_at
+        if verified_at:
+            updates["verified_at"] = verified_at
+        if updates:
+            Order.objects.filter(pk=order.pk).update(**updates)
+            order.refresh_from_db()
+        return order
+
+    def reports_url(self):
+        return reverse("admin_store_reports_center")
+
+    def export_url(self):
+        return reverse("admin_store_reports_export")
+
+    def test_reports_center_url_loads_for_superuser(self):
+        self.login_admin()
+
+        response = self.client.get(self.reports_url(), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "گزارش‌ها و تحلیل کسب‌وکار")
+        self.assertContains(response, "Reports & Analytics Center")
+
+    def test_reports_center_requires_staff_login(self):
+        response = self.client.get(self.reports_url())
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        regular_user = get_user_model().objects.create_user(username="reports-regular", password="secret")
+        self.client.force_login(regular_user)
+
+        response = self.client.get(self.reports_url())
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_reports_center_empty_database_does_not_500(self):
+        Store.objects.all().delete()
+        self.login_admin()
+
+        response = self.client.get(self.reports_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "نامشخص")
+
+    def test_period_resolution_and_comparison_are_safe(self):
+        from .admin_reports_center import compare_metric, resolve_report_period
+
+        today = resolve_report_period({"range": "today"}, store=self.store)
+        last_7 = resolve_report_period({"range": "7d"}, store=self.store)
+        last_30 = resolve_report_period({"range": "30d"}, store=self.store)
+        custom = resolve_report_period({"start": "2026-06-01", "end": "2026-06-10"}, store=self.store)
+        invalid = resolve_report_period({"start": "bad", "end": "2026-06-10"}, store=self.store)
+        comparison = compare_metric(100, 0)
+
+        self.assertEqual(today.days, 1)
+        self.assertEqual(last_7.days, 7)
+        self.assertEqual(last_30.days, 30)
+        self.assertEqual(custom.days, 10)
+        self.assertEqual((last_7.previous_end - last_7.previous_start).days, 7)
+        self.assertTrue(invalid.errors)
+        self.assertFalse(comparison["comparable"])
+        self.assertIsNone(comparison["percent"])
+
+    def test_invalid_custom_period_shows_safe_error_and_long_export_blocks(self):
+        self.login_admin()
+
+        response = self.client.get(self.reports_url(), {"start": "not-a-date", "end": "2026-06-10"})
+        export_response = self.client.get(
+            self.export_url(),
+            {"report": "sales", "start": "2020-01-01", "end": "2022-01-10"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "بازه سفارشی معتبر نیست")
+        self.assertEqual(export_response.status_code, 400)
+
+    def test_revenue_counts_only_paid_completed_orders(self):
+        self.create_order(status=Order.Status.COMPLETED, is_paid=True, amount=200000)
+        self.create_order(status=Order.Status.COMPLETED, is_paid=False, amount=900000)
+        self.create_order(status=Order.Status.CONFIRMED, is_paid=True, amount=700000)
+        self.create_order(status=Order.Status.REJECTED, is_paid=True, amount=500000)
+        self.login_admin()
+
+        response = self.client.get(self.reports_url(), {"store": self.store.pk, "range": "30d"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["sales"]["revenue"], 200000)
+        self.assertEqual(response.context["sales"]["successful_orders"], 1)
+        self.assertContains(response, "۲۰۰,۰۰۰ تومان")
+
+    def test_repeat_customer_metric_uses_successful_orders(self):
+        repeat_customer = Customer.objects.create(username="repeat-reports")
+        one_time_customer = Customer.objects.create(username="once-reports")
+        self.create_order(customer=repeat_customer)
+        self.create_order(customer=repeat_customer, metadata={"renewal": True})
+        self.create_order(customer=one_time_customer)
+        self.login_admin()
+
+        response = self.client.get(self.reports_url(), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["customers"]["repeat_customers"], 1)
+        self.assertEqual(response.context["sales"]["renewal_successful"], 1)
+
+    def test_active_and_expiring_service_metrics_are_current_state(self):
+        VPNClient.objects.create(
+            store=self.store,
+            plan=self.plan,
+            username="expiring-report-client",
+            status=VPNClient.Status.ACTIVE,
+            traffic_limit_bytes=10 * 1024**3,
+            used_traffic_bytes=1024**3,
+            duration_days=30,
+            expires_at=timezone.now() + timedelta(days=2),
+        )
+        VPNClient.objects.create(
+            store=self.store,
+            plan=self.plan,
+            username="expired-report-client",
+            status=VPNClient.Status.EXPIRED,
+            traffic_limit_bytes=10 * 1024**3,
+            used_traffic_bytes=10 * 1024**3,
+            duration_days=30,
+            expires_at=timezone.now() - timedelta(days=1),
+        )
+        self.login_admin()
+
+        response = self.client.get(self.reports_url(), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["services"]["active_current"], 1)
+        self.assertEqual(response.context["services"]["expiring_3d_current"], 1)
+        self.assertEqual(response.context["services"]["expired_current"], 1)
+
+    def test_unknown_panel_usage_is_not_rendered_as_zero(self):
+        self.login_admin()
+
+        response = self.client.get(self.reports_url(), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.context["panel_usage"]["total_used"])
+        self.assertEqual(response.context["panel_usage"]["quality"], "unknown")
+        self.assertContains(response, "unknown یا insufficient به معنی صفر نیست")
+
+    def test_panel_usage_and_revenue_offer_metrics_are_aggregated(self):
+        panel = Panel.objects.create(
+            store=self.store,
+            name="Reports Panel",
+            url="https://panel.example.com",
+            username="panel-admin",
+            password="panel-secret",
+        )
+        PanelDailyUsage.objects.create(
+            panel=panel,
+            usage_date=timezone.localdate(),
+            used_bytes=2 * 1024**3,
+            upload_bytes=1024,
+            download_bytes=2 * 1024**3,
+            active_users_count=5,
+            data_quality=PanelDailyUsage.DataQuality.COMPLETE,
+        )
+        RevenueOfferLog.objects.create(
+            store=self.store,
+            engine_type=RevenueOfferLog.EngineType.RETENTION,
+            event_type="inactive",
+            offer_type="retention",
+            decision_source=RevenueOfferLog.DecisionSource.RULE,
+            status=RevenueOfferLog.Status.SENT,
+            variant="A",
+        )
+        RevenueOfferLog.objects.create(
+            store=self.store,
+            engine_type=RevenueOfferLog.EngineType.RETENTION,
+            event_type="inactive",
+            offer_type="retention",
+            decision_source=RevenueOfferLog.DecisionSource.RULE,
+            status=RevenueOfferLog.Status.CONVERTED,
+            variant="A",
+        )
+        self.login_admin()
+
+        response = self.client.get(self.reports_url(), {"store": self.store.pk, "range": "today"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["panel_usage"]["total_used"], 2 * 1024**3)
+        self.assertEqual(response.context["revenue_engine"]["sent"], 1)
+        self.assertEqual(response.context["revenue_engine"]["converted"], 1)
+        self.assertEqual(response.context["revenue_engine"]["conversion_rate"], 50.0)
+
+    def test_csv_export_requires_staff_and_redacts_sensitive_values(self):
+        secret_uuid = "11111111-2222-3333-4444-555555555555"
+        secret_phone = "09123456789"
+        secret_email = "customer-secret@example.com"
+        self.plan.name = f"vless://{secret_uuid}@example.com {secret_phone} {secret_email}"
+        self.plan.save(update_fields=["name", "updated_at"])
+        self.create_order()
+
+        response = self.client.get(self.export_url(), {"report": "sales", "range": "30d"})
+        self.assertEqual(response.status_code, 302)
+
+        self.login_admin()
+        page_response = self.client.get(self.reports_url(), {"range": "30d", "store": self.store.pk})
+        response = self.client.get(self.export_url(), {"report": "sales", "range": "30d", "store": self.store.pk})
+        body = response.content.decode("utf-8")
+
+        page_body = page_response.content.decode("utf-8")
+        self.assertEqual(page_response.status_code, 200)
+        self.assertNotIn(secret_uuid, page_body)
+        self.assertNotIn(secret_phone, page_body)
+        self.assertNotIn(secret_email, page_body)
+        self.assertNotIn("vless://", page_body)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body.startswith("\ufeff"))
+        self.assertIn("qasedak-sales-report", response["Content-Disposition"])
+        self.assertNotIn(secret_uuid, body)
+        self.assertNotIn(secret_phone, body)
+        self.assertNotIn(secret_email, body)
+        self.assertNotIn("vless://", body)
+        self.assertIn("[redacted-config-link]", body)
+
+    def test_reports_get_and_export_do_not_call_live_integrations_or_scan(self):
+        self.login_admin()
+
+        with patch("store.revenue_engine.scheduler.run_revenue_scan") as scan_mock, patch(
+            "store.telegram_bot.client.BotClient.get_me"
+        ) as get_me_mock, patch("store.xui_api.login_to_panel") as login_mock:
+            page_response = self.client.get(self.reports_url(), {"store": self.store.pk})
+            export_response = self.client.get(
+                self.export_url(),
+                {"report": "operations", "range": "30d", "store": self.store.pk},
+            )
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertEqual(export_response.status_code, 200)
+        scan_mock.assert_not_called()
+        get_me_mock.assert_not_called()
+        login_mock.assert_not_called()
+
+    def test_dashboard_admin_index_and_workbenches_link_to_reports_center(self):
+        self.login_admin()
+
+        dashboard_response = self.client.get(reverse("admin_store_owner_dashboard"), {"store": self.store.pk})
+        index_response = self.client.get(reverse("admin:index"))
+        store_response = self.client.get(reverse("admin:store_store_changelist"))
+        orders_response = self.client.get(reverse("admin_store_order_workbench"), {"store": self.store.pk})
+        services_response = self.client.get(reverse("admin_store_service_workbench"), {"store": self.store.pk})
+        support_response = self.client.get(reverse("admin_store_support_workbench"), {"store": self.store.pk})
+        revenue_response = self.client.get(reverse("admin_store_revenue_control"), {"store": self.store.pk})
+
+        for response in [
+            dashboard_response,
+            index_response,
+            store_response,
+            orders_response,
+            services_response,
+            support_response,
+            revenue_response,
+        ]:
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, reverse("admin_store_reports_center"))
+
+    def test_chart_json_and_campaign_titles_are_escaped(self):
+        BroadcastMessage.objects.create(
+            store=self.store,
+            title='</script><script>alert("x")</script>',
+            message_text="full campaign message must not be rendered",
+            status=BroadcastMessage.Status.DRAFT,
+        )
+        self.login_admin()
+
+        response = self.client.get(self.reports_url(), {"store": self.store.pk})
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="reports-chart-data"', body)
+        self.assertNotIn('</script><script>alert("x")</script>', body)
+        self.assertNotIn("full campaign message must not be rendered", body)
 
 
 @override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")
@@ -6554,6 +7700,269 @@ class AdminServiceWorkbenchTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, reverse("admin_store_service_review", args=[vpn_client.pk]))
 
+    def remote_inbound_payload(self, clients):
+        return {"id": self.inbound.inbound_id, "settings": json.dumps({"clients": clients})}
+
+    def test_reconcile_get_is_post_only_and_requires_modify_capability(self):
+        self.login_admin()
+
+        get_response = self.client.get(reverse("admin_store_services_reconcile"))
+        self.assertEqual(get_response.status_code, 405)
+
+        staff_user = get_user_model().objects.create_user(
+            username="services-view-only",
+            password="secret",
+            is_staff=True,
+        )
+        self.client.force_login(staff_user)
+        response = self.client.post(reverse("admin_store_services_reconcile"), {"confirm_reconcile": "1"})
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_service_workbench_get_does_not_call_reconciliation_xui_service(self):
+        self.create_vpn_client()
+        self.login_admin()
+
+        with patch("store.vpn_client_reconciliation_services.XUIService") as service_mock:
+            response = self.client.get(reverse("admin_store_service_workbench"))
+
+        self.assertEqual(response.status_code, 200)
+        service_mock.assert_not_called()
+
+    def test_reconcile_batches_by_panel_node_inbound_and_sets_active_disabled(self):
+        active_client = self.create_vpn_client()
+        disabled_client = self.create_vpn_client(
+            username="disabled-service",
+            xui_email="disabled-service",
+            uuid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        )
+        service = Mock()
+        service.get_inbound.return_value = self.remote_inbound_payload(
+            [
+                {"id": active_client.uuid, "email": active_client.xui_email, "enable": True},
+                {"id": disabled_client.uuid, "email": disabled_client.xui_email, "enable": False},
+            ]
+        )
+
+        with patch("store.vpn_client_reconciliation_services.XUIService", return_value=service):
+            from .vpn_client_reconciliation_services import reconcile_vpn_clients
+
+            result = reconcile_vpn_clients(VPNClient.objects.filter(pk__in=[active_client.pk, disabled_client.pk]))
+
+        self.assertEqual(result.api_calls, 1)
+        service.get_inbound.assert_called_once()
+        active_client.refresh_from_db()
+        disabled_client.refresh_from_db()
+        self.assertEqual(active_client.last_remote_check_status, VPNClient.RemoteCheckStatus.REMOTE_ACTIVE)
+        self.assertEqual(disabled_client.last_remote_check_status, VPNClient.RemoteCheckStatus.REMOTE_DISABLED)
+
+    def test_reconcile_exact_missing_and_timeout_are_distinct(self):
+        missing_client = self.create_vpn_client()
+        service = Mock()
+        service.get_inbound.return_value = self.remote_inbound_payload([])
+        with patch("store.vpn_client_reconciliation_services.XUIService", return_value=service):
+            from .vpn_client_reconciliation_services import reconcile_vpn_clients
+
+            reconcile_vpn_clients(VPNClient.objects.filter(pk=missing_client.pk))
+        missing_client.refresh_from_db()
+        self.assertEqual(missing_client.last_remote_check_status, VPNClient.RemoteCheckStatus.REMOTE_MISSING)
+
+        timeout_client = self.create_vpn_client(
+            username="timeout-service",
+            xui_email="timeout-service",
+            uuid="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        )
+        timeout_service = Mock()
+        timeout_service.get_inbound.side_effect = requests.Timeout("timed out")
+        with patch("store.vpn_client_reconciliation_services.XUIService", return_value=timeout_service):
+            reconcile_vpn_clients(VPNClient.objects.filter(pk=timeout_client.pk))
+        timeout_client.refresh_from_db()
+        self.assertEqual(timeout_client.last_remote_check_status, VPNClient.RemoteCheckStatus.PANEL_UNREACHABLE)
+
+    def test_reconcile_inbound_missing_and_duplicate_match(self):
+        inbound_missing_client = self.create_vpn_client()
+        service = Mock()
+        service.get_inbound.side_effect = Exception("Inbound was not found on panel.")
+        with patch("store.vpn_client_reconciliation_services.XUIService", return_value=service):
+            from .vpn_client_reconciliation_services import reconcile_vpn_clients
+
+            reconcile_vpn_clients(VPNClient.objects.filter(pk=inbound_missing_client.pk))
+        inbound_missing_client.refresh_from_db()
+        self.assertEqual(inbound_missing_client.last_remote_check_status, VPNClient.RemoteCheckStatus.INBOUND_MISSING)
+
+        duplicate_client = self.create_vpn_client(
+            username="duplicate-service",
+            xui_email="duplicate-service",
+            uuid="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        )
+        duplicate_service = Mock()
+        duplicate_service.get_inbound.return_value = self.remote_inbound_payload(
+            [
+                {"id": duplicate_client.uuid, "email": "first-duplicate", "enable": True},
+                {"id": duplicate_client.uuid, "email": "second-duplicate", "enable": True},
+            ]
+        )
+        with patch("store.vpn_client_reconciliation_services.XUIService", return_value=duplicate_service):
+            reconcile_vpn_clients(VPNClient.objects.filter(pk=duplicate_client.pk))
+        duplicate_client.refresh_from_db()
+        self.assertEqual(duplicate_client.last_remote_check_status, VPNClient.RemoteCheckStatus.AMBIGUOUS)
+
+    def test_same_email_on_other_node_does_not_match_wrong_scope(self):
+        self.inbound.xui_node_id = "node-alpha"
+        self.inbound.save(update_fields=["xui_node_id", "updated_at"])
+        other_inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=18,
+            remark="Other node inbound",
+            server_ip="vpn.example.com",
+            port="8443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+            available_for_new_orders=True,
+            xui_node_id="node-beta",
+        )
+        client = self.create_vpn_client(xui_node_id="node-alpha", xui_email="shared-email")
+        service = Mock()
+        service.get_inbound.return_value = self.remote_inbound_payload([])
+
+        with patch("store.vpn_client_reconciliation_services.XUIService", return_value=service):
+            from .vpn_client_reconciliation_services import reconcile_vpn_clients
+
+            reconcile_vpn_clients(VPNClient.objects.filter(pk=client.pk))
+
+        client.refresh_from_db()
+        self.assertEqual(client.last_remote_check_status, VPNClient.RemoteCheckStatus.REMOTE_MISSING)
+        called_inbound = service.get_inbound.call_args.args[0]
+        self.assertEqual(called_inbound.pk, self.inbound.pk)
+        self.assertNotEqual(called_inbound.pk, other_inbound.pk)
+
+    def test_workbench_renders_remote_status_and_does_not_leak_secret(self):
+        vpn_client = self.create_vpn_client(
+            last_remote_check_status=VPNClient.RemoteCheckStatus.REMOTE_MISSING,
+            last_remote_check_at=timezone.now(),
+            last_remote_check_scope={
+                "panel_id": self.panel.pk,
+                "inbound_pk": self.inbound.pk,
+                "inbound_id": self.inbound.inbound_id,
+                "node_id": "",
+                "remote_scope_key": f"{self.panel.pk}:local:{self.inbound.inbound_id}",
+            },
+        )
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_service_workbench"))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "حذف‌شده از پنل")
+        self.assertNotIn(vpn_client.uuid, body)
+        self.assertNotIn("SECRET-SUB-TOKEN", body)
+        self.assertNotIn("vless://", body)
+
+    def test_soft_delete_revalidates_and_never_calls_remote_delete(self):
+        vpn_client = self.create_vpn_client(
+            last_remote_check_status=VPNClient.RemoteCheckStatus.REMOTE_MISSING,
+            last_remote_check_at=timezone.now(),
+            last_remote_check_scope={
+                "panel_id": self.panel.pk,
+                "inbound_pk": self.inbound.pk,
+                "inbound_id": self.inbound.inbound_id,
+                "node_id": "",
+                "remote_scope_key": f"{self.panel.pk}:local:{self.inbound.inbound_id}",
+            },
+        )
+        service = Mock()
+        service.get_inbound.return_value = self.remote_inbound_payload([])
+
+        with (
+            patch("store.vpn_client_reconciliation_services.XUIService", return_value=service),
+            patch("store.vpn_client_management_services.delete_client_from_inbound") as remote_delete_mock,
+        ):
+            from .vpn_client_reconciliation_services import soft_delete_remote_missing_clients
+
+            result = soft_delete_remote_missing_clients([vpn_client.pk], actor="test")
+
+        vpn_client.refresh_from_db()
+        self.order.refresh_from_db()
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(vpn_client.status, VPNClient.Status.DELETED)
+        self.assertTrue(vpn_client.deleted_at)
+        self.assertEqual(vpn_client.delete_reason, "remote_client_missing_confirmed")
+        self.assertTrue(Order.objects.filter(pk=self.order.pk).exists())
+        self.assertTrue(Customer.objects.filter(pk=self.customer.pk).exists())
+        self.assertTrue(
+            VPNClientActionLog.objects.filter(
+                vpn_client=vpn_client,
+                action=VPNClientActionLog.Action.ADMIN_SOFT_DELETE_REMOTE_MISSING,
+                status=VPNClientActionLog.Status.SUCCESS,
+            ).exists()
+        )
+        remote_delete_mock.assert_not_called()
+
+    def test_soft_delete_revalidation_failure_blocks_delete(self):
+        vpn_client = self.create_vpn_client(
+            last_remote_check_status=VPNClient.RemoteCheckStatus.REMOTE_MISSING,
+            last_remote_check_at=timezone.now(),
+            last_remote_check_scope={
+                "panel_id": self.panel.pk,
+                "inbound_pk": self.inbound.pk,
+                "inbound_id": self.inbound.inbound_id,
+                "node_id": "",
+                "remote_scope_key": f"{self.panel.pk}:local:{self.inbound.inbound_id}",
+            },
+        )
+        service = Mock()
+        service.get_inbound.side_effect = requests.Timeout("timed out")
+
+        with patch("store.vpn_client_reconciliation_services.XUIService", return_value=service):
+            from .vpn_client_reconciliation_services import soft_delete_remote_missing_clients
+
+            result = soft_delete_remote_missing_clients([vpn_client.pk], actor="test")
+
+        vpn_client.refresh_from_db()
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(vpn_client.status, VPNClient.Status.ACTIVE)
+        self.assertEqual(vpn_client.last_remote_check_status, VPNClient.RemoteCheckStatus.PANEL_UNREACHABLE)
+
+    def test_stale_remote_missing_result_blocks_direct_soft_delete(self):
+        vpn_client = self.create_vpn_client(
+            last_remote_check_status=VPNClient.RemoteCheckStatus.REMOTE_MISSING,
+            last_remote_check_at=timezone.now() - timedelta(hours=2),
+            last_remote_check_scope={
+                "panel_id": self.panel.pk,
+                "inbound_pk": self.inbound.pk,
+                "inbound_id": self.inbound.inbound_id,
+                "node_id": "",
+                "remote_scope_key": f"{self.panel.pk}:local:{self.inbound.inbound_id}",
+            },
+        )
+        service = Mock()
+        service.get_inbound.return_value = self.remote_inbound_payload([])
+
+        with patch("store.vpn_client_reconciliation_services.XUIService", return_value=service):
+            from .vpn_client_reconciliation_services import soft_delete_remote_missing_clients
+
+            result = soft_delete_remote_missing_clients([vpn_client.pk], actor="test")
+
+        vpn_client.refresh_from_db()
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(result["blocked"], 1)
+        self.assertEqual(vpn_client.status, VPNClient.Status.ACTIVE)
+        service.get_inbound.assert_not_called()
+
+    def test_command_dry_run_does_not_persist_check_results(self):
+        vpn_client = self.create_vpn_client()
+        service = Mock()
+        service.get_inbound.return_value = self.remote_inbound_payload([])
+
+        with patch("store.vpn_client_reconciliation_services.XUIService", return_value=service):
+            output = StringIO()
+            call_command("reconcile_vpn_clients", "--all", "--dry-run", stdout=output)
+
+        vpn_client.refresh_from_db()
+        self.assertEqual(vpn_client.last_remote_check_status, VPNClient.RemoteCheckStatus.NOT_CHECKED)
+        self.assertIn("dry_run=True", output.getvalue())
+
 
 @override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")
 class AdminSupportWorkbenchTests(TestCase):
@@ -7011,10 +8420,32 @@ class AdminSetupWizardTests(TestCase):
         data.update(kwargs)
         return Plan.objects.create(**data)
 
+    def create_tenant_instance(self, tenant_id="tenant-a", domain="tenant-a.example.com"):
+        server = ServerNode.objects.create(
+            name=f"node-{tenant_id}",
+            ip="127.0.0.1",
+            ssh_user="root",
+            max_instances=100,
+        )
+        return TenantInstance.objects.create(
+            tenant_id=tenant_id,
+            server_node=server,
+            container_name=f"qasedak_{tenant_id}",
+            port=8001,
+            domain=domain,
+            subdomain=domain,
+            instance_url=f"https://{domain}",
+            status=TenantInstance.Status.RUNNING,
+            deployment_status=TenantInstance.DeploymentStatus.DEPLOYED,
+        )
+
     def assert_response_has_no_secrets(self, response, secrets):
         body = response.content.decode()
         for secret in secrets:
             self.assertNotIn(secret, body)
+
+    def wizard_step_status(self, response, slug):
+        return next(item for item in response.context["wizard_steps"] if item["step"].slug == slug)
 
     def test_wizard_index_loads_for_superuser(self):
         self.login_admin()
@@ -7145,6 +8576,58 @@ class AdminSetupWizardTests(TestCase):
         self.assertEqual(config.bot_token, previous_token)
         self.assertEqual(config.admin_user_id, "1000")
 
+    def test_telegram_activation_starts_tenant_bot_worker(self):
+        token = "123456" + ":" + "telegram-secret-token"
+        self.store.domain = "tenant-a.example.com"
+        self.store.save(update_fields=["domain"])
+        self.create_tenant_instance()
+        self.login_admin()
+
+        with patch("store.admin_views.TenantOwnerToolkit") as toolkit_class:
+            response = self.client.post(
+                self.step_url("telegram"),
+                {
+                    "is_active": "on",
+                    "name": "Telegram bot",
+                    "telegram_bot_username": "wizard_bot",
+                    "bot_token": token,
+                    "admin_user_id": "1000",
+                    "additional_admin_user_ids": "",
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("admin_store_setup_wizard_telegram_proxy"), response["Location"])
+        toolkit_class.return_value.start_or_restart_bot_worker.assert_called_once_with(tenant_id="tenant-a")
+
+    def test_telegram_connection_test_is_explicit_get_me_only_and_does_not_save(self):
+        token = "123456" + ":" + "telegram-secret-token"
+        self.login_admin()
+
+        with patch("store.admin_views.BotClient.get_me", return_value={"ok": True, "result": {"username": "wizard_bot"}}) as get_me_mock, patch(
+            "store.admin_views.BotClient.send_message"
+        ) as send_message_mock:
+            get_response = self.client.get(self.step_url("telegram"))
+            post_response = self.client.post(
+                self.step_url("telegram"),
+                {
+                    "wizard_action": "test_telegram",
+                    "is_active": "on",
+                    "name": "Telegram bot",
+                    "telegram_bot_username": "wizard_bot",
+                    "bot_token": token,
+                    "admin_user_id": "999",
+                    "additional_admin_user_ids": "",
+                },
+            )
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(post_response.status_code, 200)
+        get_me_mock.assert_called_once()
+        send_message_mock.assert_not_called()
+        self.assertFalse(BotConfiguration.objects.filter(store=self.store, provider=BotConfiguration.Provider.TELEGRAM).exists())
+        self.assert_response_has_no_secrets(post_response, [token])
+
     def test_panel_step_masks_password_and_proxy(self):
         secret_password = "panel-super-secret"
         secret_proxy = "http://" + "proxy-user" + ":" + "proxy-secret" + "@proxy.example:8080"
@@ -7180,6 +8663,31 @@ class AdminSetupWizardTests(TestCase):
         self.assertIn(reverse("admin_store_setup_wizard_inbounds"), response["Location"])
         self.assertEqual(panel.password, previous_password)
         self.assertEqual(panel.proxy_url, previous_proxy)
+
+    def test_xui_connection_test_is_explicit_read_only_and_does_not_save(self):
+        password = "panel-super-secret"
+        self.login_admin()
+
+        with patch("store.admin_views.XUIService.authenticated_json", return_value={"success": True, "obj": []}) as read_mock:
+            get_response = self.client.get(self.step_url("panel"))
+            post_response = self.client.post(
+                self.step_url("panel"),
+                {
+                    "wizard_action": "test_xui",
+                    "name": "Primary panel",
+                    "url": "https://panel.example.com/admin",
+                    "username": "panel-admin",
+                    "password": password,
+                    "proxy_url": "",
+                    "is_active": "on",
+                },
+            )
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(post_response.status_code, 200)
+        read_mock.assert_called_once_with("GET", "/panel/api/inbounds/list")
+        self.assertFalse(Panel.objects.filter(store=self.store).exists())
+        self.assert_response_has_no_secrets(post_response, [password])
 
     def test_plan_step_creates_plan(self):
         self.login_admin()
@@ -7232,15 +8740,128 @@ class AdminSetupWizardTests(TestCase):
         self.assertContains(response, "route معتبر ندارد")
         self.assertContains(response, "Revenue Engine")
 
+    def test_review_activation_requires_complete_checklist_and_explicit_post(self):
+        self.store.setup_status = Store.SetupStatus.SETUP_REQUIRED
+        self.store.card_number = "6219861234567890"
+        self.store.card_owner = "Wizard Owner"
+        self.store.revenue_engine_enabled = True
+        self.store.revenue_engine_dry_run = True
+        self.store.save()
+        BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Telegram bot",
+            telegram_bot_username="wizard_bot",
+            bot_token="123456:telegram-secret-token",
+            admin_user_id="999",
+            is_active=True,
+        )
+        inbound = self.create_inbound()
+        plan = self.create_plan()
+        PlanInboundRoute.objects.create(store=self.store, plan=plan, inbound=inbound, is_active=True)
+        self.login_admin()
+
+        get_response = self.client.get(self.step_url("review"))
+        self.store.refresh_from_db()
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(self.store.setup_status, Store.SetupStatus.PLANS_CONFIGURED)
+
+        response = self.client.post(
+            self.step_url("review"),
+            {"wizard_action": "activate_store", "activation_confirmation": "ACTIVATE_STORE"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.store.refresh_from_db()
+        self.assertEqual(self.store.setup_status, Store.SetupStatus.READY)
+
+    def test_setup_required_store_blocks_public_orders_and_plan_listing(self):
+        from .setup_readiness import SETUP_NOT_READY_MESSAGE
+
+        self.store.setup_status = Store.SetupStatus.SETUP_REQUIRED
+        self.store.save(update_fields=["setup_status"])
+        plan = self.create_plan()
+        customer = Customer.objects.create(display_name="Wizard Customer")
+
+        result = create_manual_payment_order(
+            store=self.store,
+            customer=customer,
+            plan=plan,
+            sender_card_name="Alice Buyer",
+            payment_time="12:00",
+            receipt_text="paid",
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.message, SETUP_NOT_READY_MESSAGE)
+        self.assertEqual(list(get_store_plans(self.store)), [])
+        self.assertFalse(Order.objects.exists())
+
     def test_skip_marks_step_as_skipped(self):
         self.login_admin()
 
-        response = self.client.post(self.step_url("telegram_proxy"), {"_skip": "1"})
+        form_response = self.client.get(self.step_url("telegram_proxy"))
+        response = self.client.post(self.step_url("telegram_proxy"), {"wizard_action": "skip"})
         index_response = self.client.get(reverse("admin_store_setup_wizard"), {"store": self.store.pk})
+        step_status = self.wizard_step_status(index_response, "telegram-proxy")
 
+        self.assertEqual(form_response.status_code, 200)
+        self.assertContains(form_response, 'data-testid="wizard-skip"')
+        self.assertContains(form_response, 'name="wizard_action"')
+        self.assertContains(form_response, 'value="skip"')
+        self.assertContains(form_response, "بعداً انجام می‌دهم")
         self.assertEqual(response.status_code, 302)
         self.assertIn(reverse("admin_store_setup_wizard_panel"), response["Location"])
+        self.store.refresh_from_db()
+        self.assertEqual(self.store.name, "Wizard Store")
+        self.assertEqual(self.store.card_number, "0000000000000000")
+        self.assertEqual(step_status["status"], "skipped")
+        self.assertEqual(step_status["status_label"], "بعداً انجام می‌دهم")
         self.assertContains(index_response, "بعداً انجام می‌دهم")
+
+    @override_settings(TELEGRAM_PROXY_URL="http://" + "proxy-user" + ":" + "proxy-secret" + "@proxy.example:7880")
+    def test_skip_status_is_stable_when_optional_step_is_configured(self):
+        self.login_admin()
+
+        response = self.client.post(self.step_url("telegram_proxy"), {"wizard_action": "skip"})
+        index_response = self.client.get(reverse("admin_store_setup_wizard"), {"store": self.store.pk})
+        step_status = self.wizard_step_status(index_response, "telegram-proxy")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(step_status["status"], "skipped")
+        self.assertEqual(step_status["status_label"], "بعداً انجام می‌دهم")
+        self.assertContains(index_response, "بعداً انجام می‌دهم")
+        self.assert_response_has_no_secrets(index_response, ["proxy-secret", "proxy-user" + ":" + "proxy-secret"])
+
+    def test_skip_is_not_a_get_side_effect(self):
+        self.login_admin()
+
+        response = self.client.get(self.step_url("telegram_proxy"), {"wizard_action": "skip"})
+        index_response = self.client.get(reverse("admin_store_setup_wizard"), {"store": self.store.pk})
+        step_status = self.wizard_step_status(index_response, "telegram-proxy")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotEqual(step_status["status"], "skipped")
+
+    def test_mandatory_store_step_does_not_expose_or_accept_skip(self):
+        self.login_admin()
+
+        form_response = self.client.get(self.step_url("store"))
+        post_response = self.client.post(self.step_url("store"), {"wizard_action": "skip"})
+        index_response = self.client.get(reverse("admin_store_setup_wizard"), {"store": self.store.pk})
+        step_status = self.wizard_step_status(index_response, "store")
+
+        self.assertEqual(form_response.status_code, 200)
+        self.assertNotContains(form_response, 'data-testid="wizard-skip"')
+        self.assertEqual(post_response.status_code, 302)
+        self.assertIn(reverse("admin_store_setup_wizard_store"), post_response["Location"])
+        self.assertNotEqual(step_status["status"], "skipped")
+
+    def test_anonymous_user_cannot_invoke_skip(self):
+        response = self.client.post(self.step_url("telegram_proxy"), {"wizard_action": "skip"})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
 
     def test_wizard_does_not_call_live_integrations(self):
         self.login_admin()
@@ -9672,6 +11293,252 @@ class BroadcastCampaignTests(TestCase):
         )
 
 
+class CampaignAdminUXTests(TestCase):
+    def setUp(self):
+        self.store = Store.objects.create(
+            name="Admin UX Store",
+            english_name="Admin UX Store",
+            card_number="0000000000000000",
+            card_owner="Admin UX Store",
+            bank_name="Test Bank",
+            broadcast_rate_limit_per_second=1000,
+            broadcast_max_recipients_per_campaign=100,
+        )
+        self.plan = Plan.objects.create(
+            store=self.store,
+            name="Admin UX Plan",
+            slug="admin-ux-plan",
+            volume_gb=Decimal("5.000"),
+            duration_days=30,
+            price=100000,
+            currency=Plan.Currency.TOMAN,
+            is_active=True,
+            is_public=True,
+        )
+        self.bot_config = BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Telegram admin UX",
+            bot_token="telegram-token",
+            admin_user_id="999",
+            is_active=True,
+        )
+        self.user = get_user_model().objects.create_superuser(
+            username="campaign-admin",
+            email="campaign-admin@example.com",
+            password="pass",
+        )
+        self.client.force_login(self.user)
+
+    def customer(self, name, *, username=None, phone=""):
+        return Customer.objects.create(display_name=name, username=username or "", phone_number=phone)
+
+    def order(self, customer):
+        return Order.objects.create(
+            store=self.store,
+            customer=customer,
+            plan=self.plan,
+            amount=100000,
+            original_amount=100000,
+            currency=Plan.Currency.TOMAN,
+            is_paid=True,
+            status=Order.Status.COMPLETED,
+            verification_status=Order.VerificationStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+
+    def bot_user(self, customer, *, chat_id):
+        return BotUser.objects.create(
+            bot_config=self.bot_config,
+            customer=customer,
+            provider_user_id=str(chat_id),
+            chat_id=str(chat_id),
+            username=f"adminux_{chat_id}",
+            display_name=f"Admin UX {chat_id}",
+        )
+
+    def campaign(self, *, status=BroadcastMessage.Status.DRAFT, audience_type=BroadcastMessage.AudienceType.ACTIVE_CUSTOMERS):
+        return BroadcastMessage.objects.create(
+            store=self.store,
+            title="Admin campaign",
+            message_text="سلام مشتری",
+            audience_type=audience_type,
+            channel=BroadcastMessage.Channel.TELEGRAM,
+            status=status,
+        )
+
+    def test_workbench_requires_admin_and_handles_empty_db(self):
+        response = self.client.get(reverse("admin_store_campaign_workbench"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "کمپین‌ها و پیام‌رسانی")
+
+        self.client.logout()
+        response = self.client.get(reverse("admin_store_campaign_workbench"))
+        self.assertEqual(response.status_code, 302)
+
+    def test_wizard_creates_draft_without_recipients(self):
+        response = self.client.post(
+            reverse("admin_store_campaign_new"),
+            {
+                "store": self.store.pk,
+                "title": "کمپین تست",
+                "message_text": "سلام، تست کمپین",
+                "scheduled_at": "",
+                "admin_note": "note",
+            },
+        )
+
+        campaign = BroadcastMessage.objects.get()
+        self.assertRedirects(response, reverse("admin_store_campaign_audience", args=[campaign.pk]))
+        self.assertEqual(campaign.status, BroadcastMessage.Status.DRAFT)
+        self.assertEqual(campaign.recipients.count(), 0)
+
+    def test_message_validation_rejects_empty_and_sensitive_content(self):
+        response = self.client.post(
+            reverse("admin_store_campaign_new"),
+            {
+                "store": self.store.pk,
+                "title": "Bad campaign",
+                "message_text": "",
+                "scheduled_at": "",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(BroadcastMessage.objects.exists())
+
+        response = self.client.post(
+            reverse("admin_store_campaign_new"),
+            {
+                "store": self.store.pk,
+                "title": "Bad campaign",
+                "message_text": "token " + "123456:" + "abcdefghijklmnopqrstuvwxyzABCDE",
+                "scheduled_at": "",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(BroadcastMessage.objects.exists())
+
+    @patch("store.telegram_bot.client.requests.post", return_value=DummyBotResponse())
+    def test_preview_counts_duplicates_missing_targets_and_has_no_side_effects(self, post_mock):
+        first = self.customer("First")
+        second = self.customer("Second")
+        self.order(first)
+        self.order(second)
+        self.bot_user(first, chat_id="7001")
+        self.bot_user(first, chat_id="7002")
+        campaign = self.campaign()
+
+        response = self.client.get(reverse("admin_store_campaign_preview", args=[campaign.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Duplicates removed")
+        self.assertContains(response, "Missing target")
+        self.assertEqual(BroadcastRecipient.objects.count(), 0)
+        post_mock.assert_not_called()
+
+    @patch("store.telegram_bot.client.requests.post", return_value=DummyBotResponse())
+    def test_confirm_requires_phrase_and_only_queues_without_sending(self, post_mock):
+        customer = self.customer("Target")
+        self.order(customer)
+        self.bot_user(customer, chat_id="7101")
+        campaign = self.campaign()
+        url = reverse("admin_store_campaign_confirm", args=[campaign.pk])
+
+        get_response = self.client.get(url)
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(BroadcastRecipient.objects.count(), 0)
+
+        response = self.client.post(url, {"confirmation": "WRONG"})
+        self.assertRedirects(response, url)
+        campaign.refresh_from_db()
+        self.assertEqual(campaign.status, BroadcastMessage.Status.DRAFT)
+        self.assertEqual(BroadcastRecipient.objects.count(), 0)
+
+        response = self.client.post(url, {"confirmation": f"SEND_CAMPAIGN_{campaign.pk}"})
+        self.assertRedirects(response, reverse("admin_store_campaign_review", args=[campaign.pk]))
+        campaign.refresh_from_db()
+        self.assertEqual(campaign.status, BroadcastMessage.Status.QUEUED)
+        self.assertEqual(campaign.recipients.filter(status=BroadcastRecipient.Status.PENDING).count(), 1)
+        post_mock.assert_not_called()
+
+    @patch("store.telegram_bot.client.requests.post", return_value=DummyBotResponse())
+    def test_queue_processor_does_not_resend_sent_recipient(self, post_mock):
+        first = self.customer("First")
+        second = self.customer("Second")
+        self.order(first)
+        self.order(second)
+        self.bot_user(first, chat_id="7201")
+        self.bot_user(second, chat_id="7202")
+        campaign = self.campaign(status=BroadcastMessage.Status.QUEUED)
+        create_campaign_recipients(campaign)
+        sent = campaign.recipients.get(customer=first)
+        sent.status = BroadcastRecipient.Status.SENT
+        sent.sent_at = timezone.now()
+        sent.save(update_fields=["status", "sent_at", "updated_at"])
+
+        call_command("process_broadcast_queue", "--campaign-id", str(campaign.pk), "--batch-size", "10")
+
+        sent.refresh_from_db()
+        self.assertEqual(sent.status, BroadcastRecipient.Status.SENT)
+        sent_chat_ids = [call.kwargs.get("json", {}).get("chat_id") for call in post_mock.call_args_list]
+        self.assertEqual(sent_chat_ids, ["7202"])
+
+    def test_retry_action_skips_blocked_and_requeues_timeout(self):
+        customer = self.customer("Retry")
+        campaign = self.campaign(status=BroadcastMessage.Status.SENT)
+        blocked = BroadcastRecipient.objects.create(
+            campaign=campaign,
+            customer=customer,
+            channel=BroadcastMessage.Channel.TELEGRAM,
+            target_identifier="7301",
+            status=BroadcastRecipient.Status.FAILED,
+            error_message="Forbidden: bot was blocked by the user",
+        )
+        timeout = BroadcastRecipient.objects.create(
+            campaign=campaign,
+            customer=self.customer("Timeout"),
+            channel=BroadcastMessage.Channel.TELEGRAM,
+            target_identifier="7302",
+            status=BroadcastRecipient.Status.FAILED,
+            error_message="timeout",
+        )
+
+        response = self.client.post(
+            reverse("admin_store_campaign_review", args=[campaign.pk]),
+            {"action": "retry", "confirmation": f"RETRY_CAMPAIGN_{campaign.pk}"},
+        )
+
+        self.assertRedirects(response, reverse("admin_store_campaign_review", args=[campaign.pk]))
+        blocked.refresh_from_db()
+        timeout.refresh_from_db()
+        campaign.refresh_from_db()
+        self.assertEqual(blocked.status, BroadcastRecipient.Status.FAILED)
+        self.assertEqual(timeout.status, BroadcastRecipient.Status.PENDING)
+        self.assertEqual(campaign.status, BroadcastMessage.Status.QUEUED)
+
+    def test_safe_csv_export_does_not_leak_target_or_pii(self):
+        customer = self.customer("PII", username="person@example.com", phone="+989121234567")
+        campaign = self.campaign(status=BroadcastMessage.Status.SENT)
+        BroadcastRecipient.objects.create(
+            campaign=campaign,
+            customer=customer,
+            channel=BroadcastMessage.Channel.TELEGRAM,
+            target_identifier="9876543210",
+            status=BroadcastRecipient.Status.FAILED,
+            error_message="timeout with https://example.com/sub/secret",
+        )
+
+        response = self.client.get(reverse("admin_store_campaign_export", args=[campaign.pk]))
+        body = response.content.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("recipient_id", body)
+        self.assertNotIn("9876543210", body)
+        self.assertNotIn("+989121234567", body)
+        self.assertNotIn("person@example.com", body)
+        self.assertNotIn("sub/secret", body)
+
+
 class SupportChatTests(TestCase):
     def setUp(self):
         self.store = Store.objects.create(
@@ -9922,6 +11789,21 @@ class TelegramPurchaseFlowTests(TestCase):
             return DummyBotResponse()
 
         return side_effect
+
+    @patch("store.bots.requests.post", return_value=DummyBotResponse())
+    def test_setup_required_store_blocks_non_admin_bot_start(self, post_mock):
+        from .setup_readiness import SETUP_NOT_READY_MESSAGE
+
+        self.store.setup_status = Store.SetupStatus.SETUP_REQUIRED
+        self.store.save(update_fields=["setup_status"])
+
+        response = self.post_update(self.message("/start"))
+
+        self.assertEqual(response.status_code, 200)
+        payload = post_mock.call_args.kwargs["json"]
+        self.assertEqual(payload["chat_id"], "42")
+        self.assertEqual(payload["text"], SETUP_NOT_READY_MESSAGE)
+        self.assertFalse(BotUser.objects.exists())
 
     @patch("store.order_services.create_inactive_client_details", return_value=fake_client_result("10101010-1010-4010-8010-101010101010"))
     @patch("store.bots.requests.get", return_value=DummyBotResponse(content=image_bytes("JPEG")))
@@ -14178,6 +16060,21 @@ class RevenueEnginePhaseOneTests(TestCase):
         self.assertEqual(second["action"]["reason"], "cooldown_active")
         send_mock.assert_called_once()
 
+    @patch("store.revenue_engine.actions.send_to_config", return_value=True)
+    def test_setup_required_store_suppresses_revenue_send(self, send_mock):
+        from .revenue_engine.engine import RevenueEngine
+        from .revenue_engine.triggers import USER_EXPIRED
+
+        self.store.setup_status = Store.SetupStatus.SETUP_REQUIRED
+        self.store.save(update_fields=["setup_status"])
+        client = self.make_client(expires_at=timezone.now() - timedelta(hours=1))
+
+        result = RevenueEngine().handle(USER_EXPIRED, client, {"usage_percent": Decimal("10")})
+
+        self.assertTrue(result["handled"])
+        self.assertEqual(result["action"]["reason"], "setup_required")
+        send_mock.assert_not_called()
+
     def test_user_expired_logic(self):
         from .revenue_engine.rules import RuleEngine
         from .revenue_engine.triggers import USER_EXPIRED
@@ -16411,6 +18308,107 @@ class RevenueCanaryPhaseSevenDTests(TestCase):
         scan_mock.assert_not_called()
 
 
+class DatabaseSettingsSwitchTests(SimpleTestCase):
+    repo_dir = Path(__file__).resolve().parent.parent
+
+    def run_settings_import(self, env_updates=None):
+        env = os.environ.copy()
+        for key in (
+            "DATABASE_ENGINE",
+            "SQLITE_DATABASE_PATH",
+            "POSTGRES_DB",
+            "POSTGRES_USER",
+            "POSTGRES_PASSWORD",
+            "POSTGRES_HOST",
+            "POSTGRES_PORT",
+            "POSTGRES_CONN_MAX_AGE",
+            "POSTGRES_SSLMODE",
+        ):
+            env.pop(key, None)
+        env["PYTHONPATH"] = str(self.repo_dir)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env.update(env_updates or {})
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import json; "
+                    "from core.settings import base; "
+                    "print(json.dumps(base.DATABASES['default'], default=str, sort_keys=True))"
+                ),
+            ],
+            cwd=self.repo_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_default_database_engine_uses_sqlite(self):
+        result = self.run_settings_import()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        database = json.loads(result.stdout)
+        self.assertEqual(database["ENGINE"], "django.db.backends.sqlite3")
+        self.assertTrue(database["NAME"].endswith("db.sqlite3"))
+
+    def test_sqlite_database_engine_uses_configured_path(self):
+        result = self.run_settings_import(
+            {
+                "DATABASE_ENGINE": "sqlite",
+                "SQLITE_DATABASE_PATH": "/tmp/qasedak-test.sqlite3",
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        database = json.loads(result.stdout)
+        self.assertEqual(database["ENGINE"], "django.db.backends.sqlite3")
+        self.assertEqual(database["NAME"], "/tmp/qasedak-test.sqlite3")
+
+    def test_postgres_database_engine_uses_postgres_backend(self):
+        result = self.run_settings_import(
+            {
+                "DATABASE_ENGINE": "postgresql",
+                "POSTGRES_DB": "qasedak_test",
+                "POSTGRES_USER": "qasedak_user",
+                "POSTGRES_PASSWORD": "runtime-only-password",
+                "POSTGRES_HOST": "db.internal",
+                "POSTGRES_PORT": "5544",
+                "POSTGRES_CONN_MAX_AGE": "120",
+                "POSTGRES_SSLMODE": "require",
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        database = json.loads(result.stdout)
+        self.assertEqual(database["ENGINE"], "django.db.backends.postgresql")
+        self.assertEqual(database["NAME"], "qasedak_test")
+        self.assertEqual(database["USER"], "qasedak_user")
+        self.assertEqual(database["PASSWORD"], "runtime-only-password")
+        self.assertEqual(database["HOST"], "db.internal")
+        self.assertEqual(database["PORT"], "5544")
+        self.assertEqual(database["CONN_MAX_AGE"], 120)
+        self.assertEqual(database["OPTIONS"], {"sslmode": "require"})
+
+    def test_invalid_database_engine_raises_improperly_configured(self):
+        result = self.run_settings_import({"DATABASE_ENGINE": "mysql"})
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("DATABASE_ENGINE must be one of", result.stderr)
+
+    def test_postgres_requires_password(self):
+        result = self.run_settings_import({"DATABASE_ENGINE": "postgres"})
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("POSTGRES_PASSWORD", result.stderr)
+
+
+class StaticFilesMiddlewareTests(SimpleTestCase):
+    def test_whitenoise_serves_collected_static_in_container_runtime(self):
+        self.assertIn("whitenoise.middleware.WhiteNoiseMiddleware", settings.MIDDLEWARE)
+
+
 class BootstrapInstallCommandTests(TestCase):
     admin_password = "admin-super-secret"
     bot_token = "test-bot-token:placeholder"
@@ -16570,6 +18568,28 @@ class BootstrapInstallCommandTests(TestCase):
         self.assertIn("would_create", out)
         self.assertEqual(err, "")
 
+    def test_dry_run_accepts_postgres_install_config_without_db_writes(self):
+        config = self.minimal_config()
+        config["database"] = {
+            "engine": "postgres",
+            "postgres": {
+                "database": "qasedak",
+                "user": "qasedak",
+                "password_env": "QASEDAK_DB_PASSWORD",
+                "host": "127.0.0.1",
+                "port": 5432,
+            },
+            "sqlite_path": "/opt/qasedak/data/db.sqlite3",
+        }
+        before = self.object_counts()
+
+        out, err = self.call_bootstrap(config, "--dry-run")
+
+        self.assertEqual(self.object_counts(), before)
+        self.assertIn("Bootstrap install dry-run", out)
+        self.assertEqual(err, "")
+        self.assertNotIn("QASEDAK_DB_PASSWORD", out)
+
     def test_real_run_creates_admin_store_and_revenue_dry_run(self):
         config = self.base_config(telegram=False, xui=False)
 
@@ -16583,6 +18603,7 @@ class BootstrapInstallCommandTests(TestCase):
         store = Store.objects.get(slug="bootstrap-store")
         self.assertTrue(store.revenue_engine_enabled)
         self.assertTrue(store.revenue_engine_dry_run)
+        self.assertEqual(store.setup_status, Store.SetupStatus.SETUP_REQUIRED)
 
     def test_minimal_config_creates_admin_store_only_and_reports_setup_incomplete(self):
         config = self.minimal_config()
@@ -16597,6 +18618,7 @@ class BootstrapInstallCommandTests(TestCase):
         store = Store.objects.get(name="Qasedak")
         self.assertTrue(store.revenue_engine_enabled)
         self.assertTrue(store.revenue_engine_dry_run)
+        self.assertEqual(store.setup_status, Store.SetupStatus.SETUP_REQUIRED)
         self.assertEqual(BotConfiguration.objects.count(), 0)
         self.assertEqual(Panel.objects.count(), 0)
         self.assertEqual(Inbound.objects.count(), 0)
@@ -16604,6 +18626,21 @@ class BootstrapInstallCommandTests(TestCase):
         self.assertEqual(PlanInboundRoute.objects.count(), 0)
         self.assertIn("install_status=complete", out)
         self.assertIn("business_setup=incomplete", out)
+        self.assertNotIn(self.admin_password, out + err)
+
+    def test_saas_bootstrap_creates_inactive_telegram_placeholder_without_token(self):
+        config = self.minimal_config()
+        config["telegram"]["create_inactive_placeholder"] = True
+
+        out, err = self.call_bootstrap(config, "--yes")
+
+        store = Store.objects.get(name="Qasedak")
+        bot_config = BotConfiguration.objects.get(store=store, provider=BotConfiguration.Provider.TELEGRAM)
+        self.assertEqual(store.setup_status, Store.SetupStatus.SETUP_REQUIRED)
+        self.assertFalse(bot_config.is_active)
+        self.assertEqual(bot_config.bot_token, "")
+        self.assertEqual(bot_config.admin_user_id, "")
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", out + err)
         self.assertNotIn(self.admin_password, out + err)
 
     def test_rerun_is_idempotent(self):
@@ -16736,3 +18773,841 @@ class BootstrapInstallCommandTests(TestCase):
 
         self.assertEqual(Store.objects.count(), 0)
         self.assertEqual(get_user_model().objects.filter(username="bootstrap-admin").count(), 0)
+
+
+class AdminStaffRoleSyncP11Tests(TestCase):
+    def test_sync_staff_roles_dry_run_does_not_create_groups(self):
+        from django.contrib.auth.models import Group
+
+        out = StringIO()
+        call_command("sync_staff_roles", "--dry-run", stdout=out)
+
+        self.assertEqual(Group.objects.filter(name__startswith="Qasedak ").count(), 0)
+        self.assertIn("Staff role sync dry-run", out.getvalue())
+
+    def test_sync_staff_roles_apply_is_idempotent(self):
+        from django.contrib.auth.models import Group
+
+        first = StringIO()
+        second = StringIO()
+        call_command("sync_staff_roles", "--apply", stdout=first)
+        group_count = Group.objects.filter(name__startswith="Qasedak ").count()
+
+        call_command("sync_staff_roles", "--apply", stdout=second)
+
+        self.assertEqual(group_count, 8)
+        self.assertEqual(Group.objects.filter(name__startswith="Qasedak ").count(), group_count)
+        self.assertIn("permissions_added=0", second.getvalue())
+
+
+class AdminStaffAccessCenterP11Tests(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import Group
+        from .admin_access import role_group_name
+
+        call_command("sync_staff_roles", "--apply", stdout=StringIO())
+        self.User = get_user_model()
+        self.superuser = self.User.objects.create_superuser("root", "root@example.com", "secret")
+        self.owner = self.create_role_user("owner", "store_owner")
+        self.support = self.create_role_user("support", "support_agent")
+        self.finance = self.create_role_user("finance", "finance")
+        self.catalog = self.create_role_user("catalog", "catalog_manager")
+        self.marketing = self.create_role_user("marketing", "marketing_manager")
+        self.analyst = self.create_role_user("analyst", "analyst")
+        self.order_operator = self.create_role_user("orders", "order_operator")
+        self.store = Store.objects.create(
+            name="P11 Store",
+            slug="p11-store",
+            card_number="0000000000000001",
+            card_owner="Owner",
+        )
+        self.plan = Plan.objects.create(
+            store=self.store,
+            name="P11 Plan",
+            slug="p11-plan",
+            volume_gb=Decimal("10.000"),
+            duration_days=30,
+            price=100000,
+            currency=Plan.Currency.TOMAN,
+        )
+        self.customer = Customer.objects.create(username="p11customer", phone_number="09120000000")
+        self.order = Order.objects.create(
+            store=self.store,
+            customer=self.customer,
+            plan=self.plan,
+            amount=100000,
+            currency=Plan.Currency.TOMAN,
+            status=Order.Status.PENDING_VERIFICATION,
+            verification_status=Order.VerificationStatus.PENDING,
+            is_paid=True,
+            payment_method=Order.PaymentMethod.MANUAL_CARD,
+        )
+        self.support_ticket = SupportConversation.objects.create(
+            store=self.store,
+            customer=self.customer,
+            status=SupportConversation.Status.WAITING_ADMIN,
+            subject="Need help",
+        )
+        self.campaign = BroadcastMessage.objects.create(
+            store=self.store,
+            title="P11 Campaign",
+            message_text="سلام",
+            status=BroadcastMessage.Status.DRAFT,
+        )
+        self.role_group = Group.objects.get(name=role_group_name("store_owner"))
+
+    def create_role_user(self, username, role_key):
+        from django.contrib.auth.models import Group
+        from .admin_access import role_group_name
+
+        user = self.User.objects.create_user(
+            username=username,
+            email=f"{username}@example.com",
+            password="secret",
+            is_staff=True,
+        )
+        user.groups.add(Group.objects.get(name=role_group_name(role_key)))
+        return user
+
+    def login(self, user):
+        client = Client()
+        client.force_login(user)
+        return client
+
+    def test_staff_center_superuser_and_owner_can_view(self):
+        for user in (self.superuser, self.owner):
+            response = self.login(user).get(reverse("admin_store_staff_access"))
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, "کارکنان و دسترسی")
+
+    def test_staff_center_denies_non_staff_and_support_agent(self):
+        regular = self.User.objects.create_user("regular", password="secret")
+
+        self.assertNotEqual(self.login(regular).get(reverse("admin_store_staff_access")).status_code, 200)
+        self.assertEqual(self.login(self.support).get(reverse("admin_store_staff_access")).status_code, 403)
+
+    def test_owner_created_staff_is_not_superuser_and_hash_is_not_rendered(self):
+        response = self.login(self.owner).post(
+            reverse("admin_store_staff_new"),
+            {
+                "username": "newstaff",
+                "email": "newstaff@example.com",
+                "first_name": "New",
+                "last_name": "Staff",
+                "is_active": "on",
+                "role_key": "support_agent",
+                "password_mode": "generated",
+                "is_superuser": "1",
+            },
+        )
+
+        created = self.User.objects.get(username="newstaff")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(created.is_staff)
+        self.assertFalse(created.is_superuser)
+        self.assertNotContains(response, created.password)
+        self.assertNotIn("pbkdf2", response.content.decode())
+
+    def test_last_superuser_cannot_be_deactivated(self):
+        response = self.login(self.superuser).post(
+            reverse("admin_store_staff_edit", args=[self.superuser.pk]),
+            {
+                "username": self.superuser.username,
+                "email": self.superuser.email,
+                "first_name": "",
+                "last_name": "",
+                "role_key": "store_owner",
+            },
+        )
+
+        self.superuser.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.superuser.is_active)
+        self.assertContains(response, "آخرین superuser")
+
+    def test_owner_cannot_demote_or_lock_self(self):
+        response = self.login(self.owner).post(
+            reverse("admin_store_staff_edit", args=[self.owner.pk]),
+            {
+                "username": self.owner.username,
+                "email": self.owner.email,
+                "first_name": "",
+                "last_name": "",
+                "is_active": "",
+                "role_key": "finance",
+            },
+        )
+
+        self.owner.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.owner.is_active)
+        self.assertContains(response, "lock-out")
+
+    def test_role_change_is_audited(self):
+        from django.contrib.admin.models import LogEntry
+
+        target = self.create_role_user("audit-target", "support_agent")
+
+        response = self.login(self.owner).post(
+            reverse("admin_store_staff_edit", args=[target.pk]),
+            {
+                "username": target.username,
+                "email": target.email,
+                "first_name": "",
+                "last_name": "",
+                "is_active": "on",
+                "role_key": "finance",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(LogEntry.objects.filter(object_id=str(target.pk), change_message__contains="role.changed").exists())
+
+    def test_support_agent_can_view_support_but_not_revenue(self):
+        client = self.login(self.support)
+
+        self.assertEqual(client.get(reverse("admin_store_support_workbench")).status_code, 200)
+        self.assertEqual(client.get(reverse("admin_store_revenue_control")).status_code, 403)
+
+    def test_admin_home_cards_are_permission_aware_for_support_finance_and_analyst(self):
+        support_response = self.login(self.support).get(reverse("admin:index"))
+        finance_response = self.login(self.finance).get(reverse("admin:index"))
+        analyst_response = self.login(self.analyst).get(reverse("admin:index"))
+
+        self.assertEqual(support_response.status_code, 200)
+        self.assertContains(support_response, "میز کار پشتیبانی")
+        self.assertContains(support_response, "میز کار سرویس‌ها")
+        self.assertNotContains(support_response, "کنترل درآمد هوشمند")
+        self.assertNotContains(support_response, "کارکنان و دسترسی‌ها")
+
+        self.assertEqual(finance_response.status_code, 200)
+        self.assertContains(finance_response, "میز کار سفارش‌ها")
+        self.assertContains(finance_response, "گزارش‌ها و تحلیل کسب‌وکار")
+        self.assertNotContains(finance_response, "کارکنان و دسترسی‌ها")
+        self.assertNotContains(finance_response, "کمپین‌ها و پیام‌رسانی")
+
+        self.assertEqual(analyst_response.status_code, 200)
+        self.assertContains(analyst_response, "گزارش‌ها و تحلیل کسب‌وکار")
+        self.assertNotContains(analyst_response, "راه‌اندازی فروشگاه")
+        self.assertNotContains(analyst_response, "tw-button-danger")
+
+    def test_finance_can_view_orders_but_not_catalog_mutation(self):
+        client = self.login(self.finance)
+
+        self.assertEqual(client.get(reverse("admin_store_order_workbench")).status_code, 200)
+        self.assertEqual(
+            client.post(reverse("admin_store_catalog"), {"action": "duplicate", "plan_id": self.plan.pk, "confirm_action": "1"}).status_code,
+            403,
+        )
+
+    def test_catalog_manager_cannot_queue_campaign(self):
+        response = self.login(self.catalog).post(
+            reverse("admin_store_campaign_confirm", args=[self.campaign.pk]),
+            {"confirmation": f"SEND_CAMPAIGN_{self.campaign.pk}"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_marketing_manager_cannot_enable_revenue_real_send(self):
+        response = self.login(self.marketing).post(
+            reverse("admin_store_revenue_control"),
+            {"store": self.store.pk, "action": "enable_real_send", "confirmation": "ENABLE_REAL_REVENUE_SEND"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_analyst_can_view_reports_without_csv_export(self):
+        client = self.login(self.analyst)
+
+        response = client.get(reverse("admin_store_reports_center"))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "CSV فروش")
+        self.assertEqual(client.get(reverse("admin_store_reports_export"), {"report": "sales"}).status_code, 403)
+
+    def test_order_operator_can_approve_and_support_agent_cannot_post_order_action(self):
+        operator_client = self.login(self.order_operator)
+        support_client = self.login(self.support)
+
+        review_response = operator_client.get(reverse("admin_store_order_review", args=[self.order.pk]))
+        self.assertEqual(review_response.status_code, 200)
+        self.assertContains(review_response, "تایید پرداخت / تکمیل سفارش")
+        self.assertEqual(
+            support_client.post(
+                reverse("admin_store_order_review", args=[self.order.pk]),
+                {"action": "approve", "confirm_external": "1"},
+            ).status_code,
+            403,
+        )
+
+    def test_action_button_not_rendered_without_capability(self):
+        response = self.login(self.support).get(reverse("admin_store_support_review", args=[self.support_ticket.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "ارسال پاسخ")
+        response = self.login(self.order_operator).get(reverse("admin_store_support_review", args=[self.support_ticket.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "ارسال پاسخ")
+
+    def test_raw_import_export_surfaces_are_superuser_only(self):
+        from django.contrib import admin as django_admin
+        from .admin import OrderAdmin
+
+        model_admin = OrderAdmin(Order, django_admin.site)
+
+        self.assertFalse(model_admin.has_export_permission(SimpleNamespace(user=self.owner)))
+        self.assertFalse(model_admin.has_import_permission(SimpleNamespace(user=self.owner)))
+        self.assertTrue(model_admin.has_export_permission(SimpleNamespace(user=self.superuser)))
+
+    def test_view_only_store_admin_does_not_render_full_card(self):
+        response = self.login(self.analyst).get(reverse("admin:store_store_change", args=[self.store.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, self.store.card_number)
+        self.assertContains(response, self.store.card_number[-4:])
+
+    def test_view_only_panel_admin_masks_password_proxy_and_url_credentials(self):
+        panel = Panel.objects.create(
+            store=self.store,
+            name="P11 Panel",
+            url="https://panel-user@example.com",
+            username="panel-admin",
+            password="panel-password-secret",
+            proxy_url="http://proxy-user@example.net:8080",
+        )
+
+        response = self.login(self.catalog).get(reverse("admin:store_panel_change", args=[panel.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, panel.password)
+        self.assertNotContains(response, panel.proxy_url)
+        self.assertNotContains(response, "panel-user")
+        self.assertNotContains(response, "proxy-user")
+
+    def test_direct_view_only_bot_configuration_permission_does_not_render_token(self):
+        from django.contrib.auth.models import Permission
+
+        bot_config = BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="P11 Bot",
+            bot_token="123456:raw-token-secret",
+            admin_user_id="99887766",
+            is_active=True,
+        )
+        user = self.User.objects.create_user("bot-viewer", password="secret", is_staff=True)
+        user.user_permissions.add(Permission.objects.get(codename="view_botconfiguration"))
+
+        response = self.login(user).get(reverse("admin:store_botconfiguration_change", args=[bot_config.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, bot_config.bot_token)
+        self.assertNotContains(response, bot_config.admin_user_id)
+
+
+class AdminBackupRestoreCenterP1Tests(TestCase):
+    raw_secret = "raw-token-secret-1234567890"
+
+    def setUp(self):
+        from django.contrib.auth.models import Group
+        from .admin_access import role_group_name
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.base_path = Path(self.temp_dir.name)
+        self.backup_root = self.base_path / "private-backups"
+        self.upload_root = self.base_path / "restore-uploads"
+        self.settings_override = override_settings(
+            QASEDAK_PRIVATE_BACKUP_ROOT=self.backup_root,
+            QASEDAK_RESTORE_UPLOAD_ROOT=self.upload_root,
+            QASEDAK_BACKUP_MAX_UPLOAD_SIZE=8 * 1024 * 1024,
+            QASEDAK_BACKUP_MAX_EXTRACTED_SIZE=16 * 1024 * 1024,
+            QASEDAK_ADMIN_RESTORE_ENABLED=False,
+        )
+        self.settings_override.enable()
+        self.addCleanup(self.settings_override.disable)
+
+        call_command("sync_staff_roles", "--apply", stdout=StringIO())
+        self.User = get_user_model()
+        self.superuser = self.User.objects.create_superuser("backup-root", "root@example.com", "secret")
+        self.owner = self.create_role_user("backup-owner", "store_owner")
+        self.technical = self.create_role_user("backup-tech", "technical_operator")
+        self.support = self.create_role_user("backup-support", "support_agent")
+        self.owner_group = Group.objects.get(name=role_group_name("store_owner"))
+
+    def create_role_user(self, username, role_key):
+        from django.contrib.auth.models import Group
+        from .admin_access import role_group_name
+
+        user = self.User.objects.create_user(
+            username=username,
+            email=f"{username}@example.com",
+            password="secret",
+            is_staff=True,
+        )
+        user.groups.add(Group.objects.get(name=role_group_name(role_key)))
+        return user
+
+    def login(self, user):
+        client = Client()
+        client.force_login(user)
+        return client
+
+    def write_sqlite_database(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE smoke (id integer primary key, name text)")
+            connection.execute("INSERT INTO smoke (name) VALUES ('ok')")
+            connection.commit()
+
+    def make_backup_archive(self, *, engine="sqlite", name="qasedak-backup-test.tar.gz", manifest_overrides=None, checksum_mismatch=False):
+        from .backup_restore_services import create_archive, write_checksums
+
+        stage = self.base_path / f"stage-{random.randint(1000, 9999)}"
+        payload = stage / "payload"
+        db_dir = payload / "database"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        if engine == "postgres":
+            (db_dir / "db.postgres.dump").write_bytes(b"PGDMP qasedak test dump")
+        else:
+            self.write_sqlite_database(db_dir / "db.sqlite3")
+        manifest = {
+            "qasedak_backup_version": "1",
+            "created_at": "2026-06-27T12:00:00+00:00",
+            "app_version": "test",
+            "git_commit": "abc123",
+            "django_settings_module": "core.settings.test",
+            "database_engine": engine,
+            "database_vendor": "postgresql" if engine == "postgres" else "sqlite",
+            "postgres_dump_format": "custom" if engine == "postgres" else "",
+            "database_name_redacted": "[configured]",
+            "database_schema_migrations": {"store": "0054"},
+            "backup_type": "db_only",
+            "includes_media": False,
+            "includes_env": False,
+            "includes_system": False,
+            "media_file_count": 0,
+            "db_size_bytes": 1,
+            "archive_size_bytes": 0,
+            "created_by": "backup-owner",
+            "hostname": "test-host",
+            "install_dir": "/opt/qasedak",
+            "revenue_engine_dry_run": True,
+            "allow_global_inbound_fallback": False,
+            "warnings": [],
+            "checksums": {},
+            "redaction_policy": "test metadata only",
+        }
+        manifest.update(manifest_overrides or {})
+        (payload / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        write_checksums(payload)
+        if checksum_mismatch:
+            target = db_dir / ("db.postgres.dump" if engine == "postgres" else "db.sqlite3")
+            target.write_bytes(target.read_bytes() + b"tampered")
+        archive = self.base_path / name
+        create_archive(payload, archive)
+        return archive
+
+    def make_unsafe_archive(self, name, *, member_name=None, symlink=False):
+        archive = self.base_path / name
+        with tarfile.open(archive, "w:gz") as tar:
+            if symlink:
+                info = tarfile.TarInfo("manifest-link")
+                info.type = tarfile.SYMTYPE
+                info.linkname = "manifest.json"
+                tar.addfile(info)
+            else:
+                data = b"unsafe"
+                info = tarfile.TarInfo(member_name or "../evil.txt")
+                info.size = len(data)
+                tar.addfile(info, BytesIO(data))
+        return archive
+
+    def upload_archive(self, archive):
+        from .backup_restore_services import create_restore_job
+
+        uploaded = SimpleUploadedFile(archive.name, archive.read_bytes(), content_type="application/gzip")
+        return create_restore_job(self.superuser, uploaded)
+
+    def write_install_env(self, engine="sqlite"):
+        install_dir = self.base_path / f"install-{engine}"
+        install_dir.mkdir(parents=True, exist_ok=True)
+        (install_dir / ".env").write_text(f"DATABASE_ENGINE={engine}\n", encoding="utf-8")
+        return install_dir
+
+    def run_restore_script(self, *args):
+        env = os.environ.copy()
+        env["QASEDAK_BACKUP_MAX_UPLOAD_SIZE"] = str(8 * 1024 * 1024)
+        env["QASEDAK_BACKUP_MAX_EXTRACTED_SIZE"] = str(16 * 1024 * 1024)
+        return subprocess.run(
+            [str(Path("scripts") / "restore.sh"), *map(str, args)],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
+    def run_backup_script(self, *args):
+        return subprocess.run(
+            [str(Path("scripts") / "backup.sh"), *map(str, args)],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_backup_center_superuser_and_owner_can_view(self):
+        for user in (self.superuser, self.owner):
+            response = self.login(user).get(reverse("admin_store_backup_center"))
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, "پشتیبان‌گیری و انتقال سرور")
+
+    def test_backup_center_denies_non_staff_and_support_agent(self):
+        regular = self.User.objects.create_user("backup-regular", password="secret")
+
+        self.assertNotEqual(self.login(regular).get(reverse("admin_store_backup_center")).status_code, 200)
+        self.assertEqual(self.login(self.support).get(reverse("admin_store_backup_center")).status_code, 403)
+
+    def test_get_create_backup_has_no_side_effect_and_no_subprocess(self):
+        with patch("store.backup_restore_services.subprocess.run") as run_mock:
+            response = self.login(self.superuser).get(reverse("admin_store_backup_create"))
+
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(QasedakBackupJob.objects.count(), 0)
+        run_mock.assert_not_called()
+
+    def test_db_only_backup_post_creates_job_without_live_integrations(self):
+        def fake_run(job):
+            archive = self.backup_root / "qasedak-backup-fake.tar.gz"
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            archive.write_bytes(b"fake")
+            job.status = QasedakBackupJob.Status.COMPLETED
+            job.file_path = str(archive)
+            job.file_name = archive.name
+            job.file_size = archive.stat().st_size
+            job.sha256 = "a" * 64
+            job.save()
+            return job
+
+        with (
+            patch("store.admin_backup_restore.run_backup_job", side_effect=fake_run) as run_mock,
+            patch("store.bots.requests.post") as telegram_mock,
+            patch("store.xui_api.requests.Session") as xui_mock,
+        ):
+            response = self.login(self.superuser).post(
+                reverse("admin_store_backup_create"),
+                {"backup_type": QasedakBackupJob.BackupType.DB_ONLY},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        job = QasedakBackupJob.objects.get()
+        self.assertEqual(job.backup_type, QasedakBackupJob.BackupType.DB_ONLY)
+        self.assertEqual(job.status, QasedakBackupJob.Status.COMPLETED)
+        self.assertFalse(job.includes_media)
+        run_mock.assert_called_once()
+        telegram_mock.assert_not_called()
+        xui_mock.assert_not_called()
+
+    def test_env_including_backup_requires_stronger_permission(self):
+        client = self.login(self.technical)
+        client.raise_request_exception = False
+
+        with patch("store.admin_backup_restore.run_backup_job") as run_mock:
+            response = client.post(
+                reverse("admin_store_backup_create"),
+                {"backup_type": QasedakBackupJob.BackupType.FULL_TRANSFER},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(QasedakBackupJob.objects.count(), 0)
+        run_mock.assert_not_called()
+
+    def test_backup_archive_contains_required_files_and_checksums(self):
+        archive = self.make_backup_archive()
+
+        with tarfile.open(archive, "r:gz") as tar:
+            names = set(tar.getnames())
+
+        self.assertIn("manifest.json", names)
+        self.assertIn("checksums.sha256", names)
+        self.assertIn("database/db.sqlite3", names)
+
+    def test_backup_script_db_only_package_has_root_manifest_and_excludes_env_by_default(self):
+        install_dir = self.base_path / "script-install"
+        db_path = install_dir / "data" / "db.sqlite3"
+        output_dir = self.base_path / "script-backups"
+        install_dir.mkdir(parents=True, exist_ok=True)
+        self.write_sqlite_database(db_path)
+        (install_dir / ".env").write_text(
+            "\n".join(
+                [
+                    "DATABASE_ENGINE=sqlite",
+                    f"SQLITE_DATABASE_PATH={db_path}",
+                    f"SECRET_KEY={self.raw_secret}",
+                    "BOT_TOKEN=dummy-token",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_backup_script("--install-dir", install_dir, "--output-dir", output_dir, "--yes")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        archives = list(output_dir.glob("qasedak-backup-*.tar.gz"))
+        self.assertEqual(len(archives), 1)
+        with tarfile.open(archives[0], "r:gz") as tar:
+            raw_names = tar.getnames()
+            names = {name.removeprefix("./") for name in raw_names if name not in {".", "./"}}
+            manifest_member = next(name for name in raw_names if name.removeprefix("./") == "manifest.json")
+            manifest = json.loads(tar.extractfile(manifest_member).read().decode("utf-8"))
+
+        self.assertIn("manifest.json", names)
+        self.assertIn("checksums.sha256", names)
+        self.assertIn("database/db.sqlite3", names)
+        self.assertNotIn("env/production.env", names)
+        self.assertFalse(any(name.startswith("qasedak-backup-") for name in names))
+        manifest_text = json.dumps(manifest, ensure_ascii=False)
+        self.assertNotIn(self.raw_secret, manifest_text)
+        self.assertEqual(manifest["backup_type"], "db_only")
+        self.assertFalse(manifest["includes_env"])
+
+    def test_validate_redacts_secret_manifest_values_and_accepts_postgres_shape(self):
+        from .backup_restore_services import validate_backup_archive
+
+        archive = self.make_backup_archive(
+            engine="postgres",
+            manifest_overrides={
+                "bot_token": self.raw_secret,
+                "panel_password": "panel-password-secret",
+                "customer_email": "alice.private@example.com",
+                "config_link": "vless://11111111-1111-4111-8111-111111111111@example.com",
+            },
+        )
+
+        with patch("store.backup_restore_services.shutil.which", return_value="/usr/bin/pg_restore"):
+            summary = validate_backup_archive(archive)
+
+        self.assertEqual(summary["database_engine"], "postgres")
+        self.assertEqual(summary["database_vendor"], "postgresql")
+        summary_text = json.dumps(summary, ensure_ascii=False)
+        self.assertNotIn(self.raw_secret, summary_text)
+        self.assertNotIn("panel-password-secret", summary_text)
+        self.assertNotIn("alice.private@example.com", summary_text)
+        self.assertNotIn("vless://", summary_text)
+
+    def test_download_requires_capability_env_requires_superuser_and_traversal_is_blocked(self):
+        archive = self.backup_root / "qasedak-backup-download.tar.gz"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(b"download")
+        normal = QasedakBackupJob.objects.create(
+            created_by=self.superuser,
+            status=QasedakBackupJob.Status.COMPLETED,
+            file_path=str(archive),
+            file_name=archive.name,
+            file_size=archive.stat().st_size,
+            sha256="b" * 64,
+        )
+        env_job = QasedakBackupJob.objects.create(
+            created_by=self.superuser,
+            status=QasedakBackupJob.Status.COMPLETED,
+            file_path=str(archive),
+            file_name=archive.name,
+            file_size=archive.stat().st_size,
+            sha256="c" * 64,
+            includes_env=True,
+        )
+        outside = self.base_path / "outside.tar.gz"
+        outside.write_bytes(b"outside")
+        traversal = QasedakBackupJob.objects.create(
+            created_by=self.superuser,
+            status=QasedakBackupJob.Status.COMPLETED,
+            file_path=str(outside),
+            file_name=outside.name,
+            file_size=outside.stat().st_size,
+            sha256="d" * 64,
+        )
+
+        self.assertEqual(self.login(self.support).get(reverse("admin_store_backup_download", args=[normal.pk])).status_code, 403)
+        self.assertEqual(self.login(self.technical).get(reverse("admin_store_backup_download", args=[env_job.pk])).status_code, 403)
+        self.assertEqual(self.login(self.superuser).get(reverse("admin_store_backup_download", args=[env_job.pk])).status_code, 200)
+        client = self.login(self.superuser)
+        client.raise_request_exception = False
+        self.assertEqual(client.get(reverse("admin_store_backup_download", args=[traversal.pk])).status_code, 400)
+
+    def test_delete_backup_requires_post_and_exact_confirmation(self):
+        archive = self.backup_root / "qasedak-backup-delete.tar.gz"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(b"delete")
+        job = QasedakBackupJob.objects.create(
+            created_by=self.superuser,
+            status=QasedakBackupJob.Status.COMPLETED,
+            file_path=str(archive),
+            file_name=archive.name,
+            file_size=archive.stat().st_size,
+            sha256="e" * 64,
+        )
+        client = self.login(self.superuser)
+
+        self.assertEqual(client.get(reverse("admin_store_backup_delete", args=[job.pk])).status_code, 405)
+        self.assertEqual(
+            client.post(reverse("admin_store_backup_delete", args=[job.pk]), {"confirmation": "wrong"}).status_code,
+            302,
+        )
+        job.refresh_from_db()
+        self.assertEqual(job.status, QasedakBackupJob.Status.COMPLETED)
+        self.assertTrue(archive.exists())
+        response = client.post(
+            reverse("admin_store_backup_delete", args=[job.pk]),
+            {"confirmation": f"DELETE_QASEDAK_BACKUP_{job.pk}"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        job.refresh_from_db()
+        self.assertEqual(job.status, QasedakBackupJob.Status.DELETED)
+        self.assertFalse(archive.exists())
+
+    def test_restore_upload_requires_post_and_private_tar_gz_name(self):
+        client = self.login(self.superuser)
+
+        self.assertEqual(client.get(reverse("admin_store_restore_upload")).status_code, 405)
+        response = client.post(
+            reverse("admin_store_restore_upload"),
+            {"backup_file": SimpleUploadedFile("backup.zip", b"not accepted")},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(QasedakRestoreJob.objects.count(), 0)
+
+    def test_invalid_missing_manifest_checksum_traversal_symlink_and_version_rejected(self):
+        from .backup_restore_services import BackupValidationError, validate_backup_archive
+
+        invalid = self.base_path / "qasedak-invalid.tar.gz"
+        invalid.write_bytes(b"not a tarball")
+        missing_manifest = self.base_path / "qasedak-missing-manifest.tar.gz"
+        with tarfile.open(missing_manifest, "w:gz") as tar:
+            data = b"hello"
+            info = tarfile.TarInfo("database/db.sqlite3")
+            info.size = len(data)
+            tar.addfile(info, BytesIO(data))
+        checksum_mismatch = self.make_backup_archive(name="qasedak-checksum.tar.gz", checksum_mismatch=True)
+        traversal = self.make_unsafe_archive("qasedak-traversal.tar.gz", member_name="../evil.txt")
+        symlink = self.make_unsafe_archive("qasedak-symlink.tar.gz", symlink=True)
+        unsupported = self.make_backup_archive(
+            name="qasedak-unsupported.tar.gz",
+            manifest_overrides={"qasedak_backup_version": "999"},
+        )
+
+        for archive in (invalid, missing_manifest, checksum_mismatch, traversal, symlink, unsupported):
+            with self.subTest(archive=archive.name):
+                with self.assertRaises(BackupValidationError):
+                    validate_backup_archive(archive)
+
+    def test_restore_validate_creates_safe_plan(self):
+        archive = self.make_backup_archive(
+            manifest_overrides={
+                "bot_token": self.raw_secret,
+                "customer_email": "alice.private@example.com",
+            }
+        )
+        response = self.login(self.superuser).post(
+            reverse("admin_store_restore_upload"),
+            {"backup_file": SimpleUploadedFile(archive.name, archive.read_bytes(), content_type="application/gzip")},
+        )
+        job = QasedakRestoreJob.objects.get()
+
+        self.assertEqual(response.status_code, 302)
+        response = self.login(self.superuser).post(reverse("admin_store_restore_validate", args=[job.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        job.refresh_from_db()
+        self.assertEqual(job.status, QasedakRestoreJob.Status.VALIDATED)
+        self.assertEqual(job.restore_plan["source_database_engine"], "sqlite")
+        plan_text = json.dumps(job.restore_plan, ensure_ascii=False)
+        summary_text = json.dumps(job.validation_summary, ensure_ascii=False)
+        self.assertNotIn(self.raw_secret, plan_text + summary_text)
+        self.assertNotIn("alice.private@example.com", plan_text + summary_text)
+
+    def test_restore_command_requires_validated_job_confirmation_and_has_no_secrets(self):
+        from .backup_restore_services import restore_confirmation_phrase, validate_restore_job
+
+        archive = self.make_backup_archive(manifest_overrides={"bot_token": self.raw_secret})
+        job = self.upload_archive(archive)
+        client = self.login(self.superuser)
+
+        response = client.post(
+            reverse("admin_store_restore_command", args=[job.pk]),
+            {"confirmation": restore_confirmation_phrase(job.pk)},
+        )
+        job.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(job.status, QasedakRestoreJob.Status.UPLOADED)
+
+        validate_restore_job(job, actor=self.superuser)
+        response = client.post(reverse("admin_store_restore_command", args=[job.pk]), {"confirmation": "wrong"})
+        job.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(job.status, QasedakRestoreJob.Status.VALIDATED)
+
+        response = client.post(
+            reverse("admin_store_restore_command", args=[job.pk]),
+            {"confirmation": restore_confirmation_phrase(job.pk), "include_media": "on"},
+        )
+        job.refresh_from_db()
+        command = job.restore_plan.get("restore_command", "")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(job.status, QasedakRestoreJob.Status.RESTORE_COMMAND_GENERATED)
+        self.assertIn("scripts/restore.sh", command)
+        self.assertIn(f"--restore-job-id {job.pk}", command)
+        self.assertNotIn(self.raw_secret, json.dumps(job.restore_plan, ensure_ascii=False))
+        self.assertEqual(job.restore_plan["web_restore_apply"], "disabled")
+
+    def test_restore_detail_does_not_offer_one_click_apply_by_default(self):
+        archive = self.make_backup_archive()
+        job = self.upload_archive(archive)
+
+        response = self.login(self.superuser).get(reverse("admin_store_restore_detail", args=[job.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "One-click restore در P1 غیرفعال است")
+        self.assertNotContains(response, "QASEDAK_ADMIN_RESTORE_ENABLED=True")
+
+    def test_restore_script_dry_run_validates_without_mutation(self):
+        install_dir = self.write_install_env("sqlite")
+        archive = self.make_backup_archive()
+        before_env = (install_dir / ".env").read_text(encoding="utf-8")
+
+        result = self.run_restore_script("--install-dir", install_dir, "--backup-file", archive, "--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("validation=ok", result.stdout)
+        self.assertIn("DRY-RUN", result.stdout)
+        self.assertEqual((install_dir / ".env").read_text(encoding="utf-8"), before_env)
+
+    def test_restore_script_refuses_missing_confirmation(self):
+        install_dir = self.write_install_env("sqlite")
+        archive = self.make_backup_archive()
+
+        result = self.run_restore_script("--install-dir", install_dir, "--backup-file", archive)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--confirm is required", result.stderr)
+
+    def test_restore_script_refuses_path_traversal_archive(self):
+        install_dir = self.write_install_env("sqlite")
+        archive = self.make_unsafe_archive("script-traversal.tar.gz", member_name="../evil.txt")
+
+        result = self.run_restore_script("--install-dir", install_dir, "--backup-file", archive, "--dry-run")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("path traversal", result.stdout + result.stderr)
+
+    def test_restore_script_detects_engine_mismatch(self):
+        install_dir = self.write_install_env("postgres")
+        archive = self.make_backup_archive()
+
+        result = self.run_restore_script("--install-dir", install_dir, "--backup-file", archive, "--dry-run")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("engine mismatch", result.stdout + result.stderr)

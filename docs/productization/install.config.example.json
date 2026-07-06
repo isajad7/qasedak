@@ -12,7 +12,16 @@
     "password_env": "QASEDAK_ADMIN_PASSWORD"
   },
   "database": {
-    "engine": "sqlite",
+    "engine": "postgres",
+    "postgres": {
+      "database": "qasedak",
+      "user": "qasedak",
+      "password_env": "QASEDAK_DB_PASSWORD",
+      "host": "127.0.0.1",
+      "port": 5432,
+      "conn_max_age": 60,
+      "sslmode": "prefer"
+    },
     "sqlite_path": "/opt/qasedak/data/db.sqlite3"
   },
   "store": {
@@ -29,7 +38,7 @@
   },
   "telegram": {
     "enabled": true,
-    "bot_token": "REPLACE_WITH_TELEGRAM_BOT_TOKEN",
+    "bot_token_env": "QASEDAK_TELEGRAM_BOT_TOKEN",
     "bot_username": "your_bot_username",
     "admin_ids": [
       "123456789"

@@ -1,0 +1,8 @@
+<a href="{{ card.url }}" class="tw-workspace-card tw-tone-{{ card.tone|default:'blue' }}">
+    <span class="tw-card-topline">
+        <span class="tw-card-icon"><i class="{{ card.icon }}" aria-hidden="true"></i></span>
+        {% if card.badge %}<span class="tw-card-badge">{{ card.badge }}</span>{% endif %}
+    </span>
+    <span class="tw-workspace-title">{{ card.title }}</span>
+    <span class="tw-workspace-description">{{ card.description }}</span>
+</a>

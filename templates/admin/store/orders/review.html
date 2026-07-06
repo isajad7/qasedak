@@ -97,6 +97,11 @@
                     <div><dt>Panel</dt><dd>{% if delivery.panel %}{{ delivery.panel }}{% else %}-{% endif %}</dd></div>
                     <div><dt>Inbound</dt><dd>{% if delivery.inbound %}{{ delivery.inbound }}{% else %}-{% endif %}</dd></div>
                     <div><dt>Route status</dt><dd><span class="qadmin-badge qadmin-badge-{{ delivery.route_tone }}">{{ delivery.route_label }}</span></dd></div>
+                    <div><dt>Provisioning strategy</dt><dd>{% if delivery.provisioning_strategy %}{{ delivery.provisioning_strategy }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Compatibility profile</dt><dd>{% if delivery.compatibility_profile %}{{ delivery.compatibility_profile }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Provisioning status</dt><dd>{{ delivery.provisioning_status }} · attempts {{ delivery.provisioning_attempts }}</dd></div>
+                    <div><dt>Exact scope</dt><dd>panel {{ delivery.scope_panel_id|default:"-" }} / node {{ delivery.scope_node_id|default:"local" }} / inbound {{ delivery.scope_xui_inbound_id|default:"-" }}</dd></div>
+                    <div><dt>Provisioned at</dt><dd>{% if delivery.provisioned_at %}{{ delivery.provisioned_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
                     <div><dt>Config ساخته شده؟</dt><dd>{% if delivery.config_created %}بله{% else %}خیر{% endif %}</dd></div>
                     <div><dt>Config ارسال شده؟</dt><dd>{{ delivery.config_sent }}</dd></div>
                     <div><dt>تعداد کانفیگ</dt><dd>{{ delivery.active_client_count }} فعال از {{ delivery.client_count }}</dd></div>
@@ -164,7 +169,9 @@
             {% if customer_message_url %}
                 <a href="{{ customer_message_url }}" class="qadmin-action qadmin-action-warning">ارسال پیام موردی</a>
             {% endif %}
-            <a href="{{ support_workbench_url }}" class="qadmin-action qadmin-action-secondary">میز کار پشتیبانی</a>
+            {% if support_workbench_url %}
+                <a href="{{ support_workbench_url }}" class="qadmin-action qadmin-action-secondary">میز کار پشتیبانی</a>
+            {% endif %}
         </aside>
     </section>
 </div>

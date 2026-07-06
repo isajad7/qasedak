@@ -4,6 +4,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
+from .db_locking import select_for_update_self
 from .models import Customer, CustomerReward, DiscountCode, Plan, Referral, Store, generate_short_code
 
 REFERRAL_REWARD_PERCENTAGE = 20
@@ -185,8 +186,7 @@ def process_referral_purchase(order):
 
     with transaction.atomic():
         referral = (
-            Referral.objects.select_for_update()
-            .select_related("referrer", "referred_customer")
+            select_for_update_self(Referral.objects.select_related("referrer", "referred_customer"))
             .filter(referred_customer=customer)
             .first()
         )

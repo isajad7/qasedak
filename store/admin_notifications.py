@@ -3,6 +3,7 @@ import logging
 from django.db import transaction
 from django.utils import timezone
 
+from .db_locking import select_for_update_self
 from .models import BotEventLog, Order
 
 logger = logging.getLogger(__name__)
@@ -115,7 +116,7 @@ def _notification_configs(order):
 
 def _claim_notification(order_id, field_name, *, also_claim_receipt=False, require_payment_evidence=False):
     with transaction.atomic():
-        order = _order_queryset().select_for_update().filter(pk=order_id).first()
+        order = select_for_update_self(_order_queryset()).filter(pk=order_id).first()
         if not order:
             logger.warning("Admin notification skipped because order_id=%s was not found.", order_id)
             return None

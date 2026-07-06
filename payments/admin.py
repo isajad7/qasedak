@@ -5,7 +5,7 @@ from django.utils.html import format_html, format_html_join
 from django.utils.text import Truncator
 from django.utils.translation import gettext_lazy as _
 from import_export import fields, resources
-from import_export.admin import ImportExportModelAdmin
+from import_export.admin import ImportExportModelAdmin as BaseImportExportModelAdmin
 
 from store.models import normalize_payment_digits
 
@@ -15,6 +15,20 @@ from .payment_matching import (
     dismiss_incoming_payment_sms,
     process_incoming_payment_sms,
 )
+
+
+class ImportExportModelAdmin(BaseImportExportModelAdmin):
+    """Keep raw import/export surfaces for superusers only."""
+
+    def has_import_permission(self, request):
+        parent = getattr(super(), "has_import_permission", None)
+        allowed = parent(request) if parent else True
+        return bool(getattr(request.user, "is_superuser", False) and allowed)
+
+    def has_export_permission(self, request):
+        parent = getattr(super(), "has_export_permission", None)
+        allowed = parent(request) if parent else True
+        return bool(getattr(request.user, "is_superuser", False) and allowed)
 
 
 class IncomingPaymentSMSResource(resources.ModelResource):

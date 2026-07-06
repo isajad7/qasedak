@@ -1,0 +1,139 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_owner_dashboard' %}">داشبورد قاصدک</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-campaigns" dir="rtl">
+    <section class="qadmin-hero qadmin-campaign-hero">
+        <div>
+            <p class="qadmin-eyebrow">Campaign Workbench</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            {% if can_create_campaign %}
+                <a href="{% url 'admin_store_campaign_new' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action">ساخت کمپین جدید</a>
+            {% endif %}
+            <a href="{% url 'admin_store_reports_center' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}#campaigns" class="qadmin-action qadmin-action-info">Reports Center</a>
+            <a href="{% url 'admin:store_broadcastmessage_changelist' %}" class="qadmin-action qadmin-action-secondary">Broadcast admin خام</a>
+        </div>
+    </section>
+
+    <section class="qadmin-toolbar">
+        <div>
+            <strong>فروشگاه:</strong>
+            {% if selected_store %}{{ selected_store.name }}{% else %}همه فروشگاه‌ها{% endif %}
+        </div>
+        {% if stores|length > 1 %}
+            <form method="get" class="qadmin-store-switcher">
+                <label for="qadmin-store">Store</label>
+                <select id="qadmin-store" name="store" onchange="this.form.submit()">
+                    {% for store in stores %}
+                        <option value="{{ store.pk }}" {% if selected_store and selected_store.pk == store.pk %}selected{% endif %}>
+                            {{ store.name }}{% if not store.is_active %} - غیرفعال{% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </form>
+        {% endif %}
+    </section>
+
+    <section class="qadmin-campaign-metrics">
+        <div><strong>{{ metrics.draft }}</strong><span>draft</span></div>
+        <div><strong>{{ metrics.queued }}</strong><span>queued</span></div>
+        <div><strong>{{ metrics.sending }}</strong><span>sending</span></div>
+        <div><strong>{{ metrics.sent_campaigns_30d }}</strong><span>sent campaigns / 30d</span></div>
+        <div><strong>{{ metrics.total_recipients_30d }}</strong><span>total recipients / 30d</span></div>
+        <div><strong>{{ metrics.sent_recipients }}</strong><span>sent recipients</span></div>
+        <div><strong>{{ metrics.failed_recipients }}</strong><span>failed recipients</span></div>
+        <div><strong>{{ metrics.blocked_recipients }}</strong><span>blocked recipients</span></div>
+        <div><strong>{{ metrics.skipped_recipients }}</strong><span>skipped recipients</span></div>
+        <div>
+            <strong>{% if metrics.success_rate is not None %}{{ metrics.success_rate|floatformat:1 }}٪{% else %}-{% endif %}</strong>
+            <span>delivery success rate</span>
+        </div>
+    </section>
+
+    <section class="qadmin-campaign-quick">
+        {% for action in quick_actions %}
+            <a href="{{ action.url }}" class="qadmin-action qadmin-action-{{ action.tone }}">{{ action.label }}</a>
+        {% endfor %}
+        <code class="qadmin-small-command">{{ processor_command }}</code>
+    </section>
+
+    <nav class="qadmin-order-tabs qadmin-campaign-tabs" aria-label="Campaign queues">
+        {% for section in sections %}
+            <a href="#{{ section.key }}" class="qadmin-order-tab qadmin-status-{{ section.tone }}">
+                <span>{{ section.title }}</span>
+                <strong>{{ section.count }}</strong>
+            </a>
+        {% endfor %}
+    </nav>
+
+    {% for section in sections %}
+        <section id="{{ section.key }}" class="qadmin-order-section qadmin-status-{{ section.tone }}">
+            <header class="qadmin-order-section-header">
+                <div>
+                    <h2>{{ section.title }}</h2>
+                    <p>{{ section.description }}</p>
+                </div>
+                <span class="qadmin-badge qadmin-badge-{{ section.tone }}">{{ section.count }}</span>
+            </header>
+            <div class="qadmin-order-table-wrap">
+                <table class="qadmin-order-table qadmin-campaign-table">
+                    <thead>
+                        <tr>
+                            <th>Campaign</th>
+                            <th>Audience</th>
+                            <th>Status</th>
+                            <th>Delivery</th>
+                            <th>زمان</th>
+                            <th>اقدام</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in section.items %}
+                            <tr>
+                                <td>
+                                    <a href="{{ item.review_url }}" class="qadmin-order-code">{{ item.title }}</a>
+                                    <small>#{{ item.campaign.pk }} | {{ item.channel }}</small>
+                                </td>
+                                <td>{{ item.audience }}</td>
+                                <td><span class="qadmin-badge qadmin-badge-{{ item.tone }}">{{ item.status }}</span></td>
+                                <td>
+                                    <span>total {{ item.metrics.total }}</span>
+                                    <small>sent {{ item.metrics.sent }} | failed {{ item.metrics.failed }} | skipped {{ item.metrics.skipped }}</small>
+                                </td>
+                                <td>
+                                    {{ item.created_at|date:"Y-m-d H:i" }}
+                                    {% if item.sent_at %}<small>sent {{ item.sent_at|date:"Y-m-d H:i" }}</small>{% endif %}
+                                </td>
+                                <td>
+                                    <a href="{{ item.review_url }}" class="qadmin-action">Review</a>
+                                    <a href="{{ item.preview_url }}" class="qadmin-action qadmin-action-secondary">Preview</a>
+                                </td>
+                            </tr>
+                        {% empty %}
+                            <tr><td colspan="6" class="qadmin-empty-cell">موردی در این بخش نیست.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    {% endfor %}
+</div>
+{% endblock %}

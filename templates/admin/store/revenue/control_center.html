@@ -34,6 +34,7 @@
         </div>
         <div class="qadmin-hero-actions">
             <a href="{% url 'admin_store_owner_dashboard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-secondary">داشبورد</a>
+            <a href="{% url 'admin_store_reports_center' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}#revenue" class="qadmin-action qadmin-action-info">گزارش Revenue</a>
             <a href="{{ logs_url }}" class="qadmin-action qadmin-action-info">RevenueOfferLog</a>
             <a href="{{ store_admin_url }}" class="qadmin-action">Advanced settings</a>
         </div>
@@ -298,7 +299,7 @@
 
             <section class="qadmin-side-panel">
                 <h2>Safe actions</h2>
-                {% if selected_store %}
+                {% if selected_store and can_manage_revenue %}
                     <form method="post" class="qadmin-action-form">
                         {% csrf_token %}
                         <input type="hidden" name="store" value="{{ selected_store.pk }}">
@@ -311,6 +312,8 @@
                         <input type="hidden" name="action" value="enable_engine_dry_run">
                         <button type="submit" class="qadmin-button">Enable engine in dry-run</button>
                     </form>
+                {% elif selected_store %}
+                    <p class="qadmin-empty">نقش شما اجازه تغییر safe mode درآمد را ندارد.</p>
                 {% else %}
                     <p class="qadmin-empty">Store انتخاب نشده است.</p>
                 {% endif %}
@@ -319,30 +322,37 @@
             <section class="qadmin-side-panel">
                 <h2>Danger zone</h2>
                 {% if selected_store %}
-                    <form method="post" class="qadmin-action-form qadmin-danger-form">
-                        {% csrf_token %}
-                        <input type="hidden" name="store" value="{{ selected_store.pk }}">
-                        <input type="hidden" name="action" value="enable_real_send">
-                        <label for="real-send-confirm">ENABLE_REAL_REVENUE_SEND</label>
-                        <input id="real-send-confirm" type="text" name="confirmation" autocomplete="off">
-                        <button type="submit" class="qadmin-button qadmin-button-danger">Enable real-send mode</button>
-                    </form>
-                    <form method="post" class="qadmin-action-form qadmin-danger-form">
-                        {% csrf_token %}
-                        <input type="hidden" name="store" value="{{ selected_store.pk }}">
-                        <input type="hidden" name="action" value="disable_revenue">
-                        <label for="disable-confirm">DISABLE_REVENUE_ENGINE</label>
-                        <input id="disable-confirm" type="text" name="confirmation" autocomplete="off">
-                        <button type="submit" class="qadmin-button qadmin-button-danger">Disable Revenue Engine</button>
-                    </form>
-                    <form method="post" class="qadmin-action-form">
-                        {% csrf_token %}
-                        <input type="hidden" name="store" value="{{ selected_store.pk }}">
-                        <input type="hidden" name="action" value="reset_safe_defaults">
-                        <label for="reset-confirm">RESET_REVENUE_SAFE_DEFAULTS</label>
-                        <input id="reset-confirm" type="text" name="confirmation" autocomplete="off">
-                        <button type="submit" class="qadmin-button qadmin-button-secondary">Reset to safe defaults</button>
-                    </form>
+                    {% if can_enable_real_send %}
+                        <form method="post" class="qadmin-action-form qadmin-danger-form">
+                            {% csrf_token %}
+                            <input type="hidden" name="store" value="{{ selected_store.pk }}">
+                            <input type="hidden" name="action" value="enable_real_send">
+                            <label for="real-send-confirm">ENABLE_REAL_REVENUE_SEND</label>
+                            <input id="real-send-confirm" type="text" name="confirmation" autocomplete="off">
+                            <button type="submit" class="qadmin-button qadmin-button-danger">Enable real-send mode</button>
+                        </form>
+                    {% endif %}
+                    {% if can_manage_revenue %}
+                        <form method="post" class="qadmin-action-form qadmin-danger-form">
+                            {% csrf_token %}
+                            <input type="hidden" name="store" value="{{ selected_store.pk }}">
+                            <input type="hidden" name="action" value="disable_revenue">
+                            <label for="disable-confirm">DISABLE_REVENUE_ENGINE</label>
+                            <input id="disable-confirm" type="text" name="confirmation" autocomplete="off">
+                            <button type="submit" class="qadmin-button qadmin-button-danger">Disable Revenue Engine</button>
+                        </form>
+                        <form method="post" class="qadmin-action-form">
+                            {% csrf_token %}
+                            <input type="hidden" name="store" value="{{ selected_store.pk }}">
+                            <input type="hidden" name="action" value="reset_safe_defaults">
+                            <label for="reset-confirm">RESET_REVENUE_SAFE_DEFAULTS</label>
+                            <input id="reset-confirm" type="text" name="confirmation" autocomplete="off">
+                            <button type="submit" class="qadmin-button qadmin-button-secondary">Reset to safe defaults</button>
+                        </form>
+                    {% endif %}
+                    {% if not can_enable_real_send and not can_manage_revenue %}
+                        <p class="qadmin-empty">نقش شما اجازه action در Revenue Control را ندارد.</p>
+                    {% endif %}
                 {% else %}
                     <p class="qadmin-empty">Store انتخاب نشده است.</p>
                 {% endif %}

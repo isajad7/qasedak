@@ -74,6 +74,43 @@
     </section>
 
     <section class="qadmin-side-panel">
+        <h2>وضعیت فعال‌سازی</h2>
+        <p class="qadmin-empty">Setup status: {{ setup_status }}</p>
+        <div class="qadmin-action-list">
+            {% for item in readiness_checklist %}
+                <article class="qadmin-action-item qadmin-action-item-{% if item.passed %}success{% else %}warning{% endif %}">
+                    <span class="qadmin-badge qadmin-badge-{% if item.passed %}success{% else %}warning{% endif %}">
+                        {% if item.passed %}آماده{% else %}نیازمند تکمیل{% endif %}
+                    </span>
+                    <h3>{{ item.label }}</h3>
+                    {% if not item.passed %}<p>{{ item.message }}</p>{% endif %}
+                </article>
+            {% endfor %}
+        </div>
+        <form method="post" class="qadmin-form-panel">
+            {% csrf_token %}
+            <input type="hidden" name="{{ wizard_action_field }}" value="{{ activation_action }}">
+            <div class="qadmin-form-row">
+                <label for="activation_confirmation">عبارت فعال‌سازی</label>
+                <input
+                    id="activation_confirmation"
+                    name="activation_confirmation"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="{{ activation_confirmation }}"
+                    {% if ready or not can_activate %}disabled{% endif %}
+                >
+                <p class="qadmin-help">{{ activation_confirmation }}</p>
+            </div>
+            <div class="qadmin-form-actions">
+                <button type="submit" class="qadmin-button" {% if ready or not can_activate %}disabled{% endif %}>
+                    {% if ready %}فروشگاه فعال است{% else %}فعال‌سازی فروشگاه{% endif %}
+                </button>
+            </div>
+        </form>
+    </section>
+
+    <section class="qadmin-side-panel">
         <h2>موارد باقی‌مانده</h2>
         {% if remaining_cards %}
             <div class="qadmin-action-list">

@@ -8,6 +8,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from store.models import BotUser, Customer, Order, RevenueOfferLog, Store, VPNClient
+from store.setup_readiness import store_is_sellable
 
 
 SAFE_METADATA_MAX_LENGTH = 240
@@ -219,6 +220,8 @@ def can_send_revenue_offer(
         return RevenueGuardDecision(False, RevenueOfferLog.Status.SUPPRESSED, "revenue_engine_disabled")
     if not is_engine_enabled(engine_type, settings):
         return RevenueGuardDecision(False, RevenueOfferLog.Status.SUPPRESSED, "engine_disabled")
+    if settings and not store_is_sellable(settings):
+        return RevenueGuardDecision(False, RevenueOfferLog.Status.SUPPRESSED, "setup_required")
     if not target:
         return RevenueGuardDecision(False, RevenueOfferLog.Status.SKIPPED, "no_personal_telegram_target")
     if is_quiet_hours_now(settings, now=now):

@@ -12,6 +12,7 @@ from django.utils import timezone
 
 from .bot_targets import get_customer_telegram_targets
 from .configuration_services import get_telegram_bot_username_source
+from .db_locking import select_for_update_self
 from .models import BotUser, Customer, WebTelegramLinkToken
 
 logger = logging.getLogger(__name__)
@@ -178,15 +179,14 @@ def link_bot_user_to_customer(raw_token, bot_user, telegram_user_id=None):
     token_hash = hash_web_telegram_link_token(raw_token)
     with transaction.atomic():
         token = (
-            WebTelegramLinkToken.objects.select_for_update()
-            .select_related("customer", "bot_user")
+            select_for_update_self(WebTelegramLinkToken.objects.select_related("customer", "bot_user"))
             .filter(token_hash=token_hash)
             .first()
         )
         if not token:
             return TelegramLinkResult(False, "invalid_token", WEB_TELEGRAM_INVALID_MESSAGE, token=token)
 
-        bot_user = BotUser.objects.select_for_update().select_related("customer").get(pk=bot_user.pk)
+        bot_user = select_for_update_self(BotUser.objects.select_related("customer")).get(pk=bot_user.pk)
         if token.status == WebTelegramLinkToken.Status.USED:
             if token.bot_user_id == bot_user.pk and bot_user.customer_id == token.customer_id:
                 return TelegramLinkResult(True, "already_linked", WEB_TELEGRAM_ALREADY_LINKED_MESSAGE, token.customer, token)

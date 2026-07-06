@@ -4,6 +4,8 @@ Date: 2026-06-20
 
 Scope: audit and installer design only. No installer was executed, no production runtime file was edited, and no migration was created.
 
+Historical note: this audit captured the pre-PostgreSQL state. PostgreSQL settings, installer, backup, doctor, and rehearsal docs are now tracked by `docs/productization/POSTGRES_MIGRATION.md` and the current installer/configuration docs.
+
 ## 1. Current Runtime Architecture
 
 ### Django app

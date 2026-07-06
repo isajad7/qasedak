@@ -1,0 +1,164 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{{ urls.workbench }}">کمپین‌ها و پیام‌رسانی</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-campaigns qadmin-campaign-review" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Campaign Review</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ urls.workbench }}" class="qadmin-action qadmin-action-secondary">Workbench</a>
+            {% if actions.can_edit %}<a href="{{ urls.edit }}" class="qadmin-action">Edit draft</a>{% endif %}
+            <a href="{{ urls.preview }}" class="qadmin-action qadmin-action-info">Preview</a>
+            <a href="{{ urls.export }}" class="qadmin-action qadmin-action-secondary">Safe CSV</a>
+            <a href="{{ urls.admin_change }}" class="qadmin-action qadmin-action-secondary">Advanced admin</a>
+        </div>
+    </section>
+
+    <section class="qadmin-review-layout">
+        <div class="qadmin-review-main">
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>Campaign Summary</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ row.tone }}">{{ row.status }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>Title</dt><dd>{{ row.title }}</dd></div>
+                    <div><dt>Audience</dt><dd>{{ row.audience }}</dd></div>
+                    <div><dt>Channel</dt><dd>{{ row.channel }}</dd></div>
+                    <div><dt>Created by</dt><dd>{% if created_by %}User #{{ created_by }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Created at</dt><dd>{{ campaign.created_at|date:"Y-m-d H:i" }}</dd></div>
+                    <div><dt>Queued at</dt><dd>{% if queued_at %}{{ queued_at }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Sent at</dt><dd>{% if campaign.sent_at %}{{ campaign.sent_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Cancelled at</dt><dd>{% if cancelled_at %}{{ cancelled_at }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>Scheduled at</dt><dd>{% if campaign.scheduled_at %}{{ campaign.scheduled_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                </dl>
+                {% if admin_note %}<p class="qadmin-help">Note: {{ admin_note }}</p>{% endif %}
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>Delivery Metrics</h2>
+                    <span class="qadmin-badge qadmin-badge-info">{% if metrics.success_rate is not None %}{{ metrics.success_rate|floatformat:1 }}٪{% else %}-{% endif %}</span>
+                </header>
+                <div class="qadmin-report-mini-grid">
+                    <div><strong>{{ metrics.total }}</strong><span>total</span></div>
+                    <div><strong>{{ metrics.pending }}</strong><span>pending</span></div>
+                    <div><strong>{{ metrics.sent }}</strong><span>sent</span></div>
+                    <div><strong>{{ metrics.failed }}</strong><span>failed</span></div>
+                    <div><strong>{{ metrics.blocked }}</strong><span>blocked</span></div>
+                    <div><strong>{{ metrics.skipped }}</strong><span>skipped</span></div>
+                    <div><strong>{{ metrics.retryable_failed }}</strong><span>retryable failed</span></div>
+                </div>
+                <div class="qadmin-delivery-progress">
+                    <span class="sent" style="width: {% widthratio metrics.sent metrics.total 100 %}%"></span>
+                    <span class="failed" style="width: {% widthratio metrics.failed metrics.total 100 %}%"></span>
+                    <span class="skipped" style="width: {% widthratio metrics.skipped metrics.total 100 %}%"></span>
+                </div>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header><h2>Failure Breakdown</h2></header>
+                <div class="qadmin-report-mini-grid">
+                    {% for item in failure_breakdown %}
+                        <div><strong>{{ item.count }}</strong><span>{{ item.label }}</span></div>
+                    {% endfor %}
+                </div>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>Recent Recipients</h2>
+                    <span class="qadmin-badge qadmin-badge-secondary">{{ recent_recipients|length }}</span>
+                </header>
+                <div class="qadmin-order-table-wrap">
+                    <table class="qadmin-order-table qadmin-recipient-table">
+                        <thead>
+                            <tr>
+                                <th>recipient</th>
+                                <th>customer pk</th>
+                                <th>BotUser pk</th>
+                                <th>status</th>
+                                <th>safe error</th>
+                                <th>sent_at</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in recent_recipients %}
+                                <tr>
+                                    <td>#{{ item.recipient.pk }}<small>{{ item.identity }}</small></td>
+                                    <td>{{ item.customer_pk|default:"-" }}</td>
+                                    <td>{{ item.bot_user_pk|default:"-" }}</td>
+                                    <td><span class="qadmin-badge qadmin-badge-{{ item.tone }}">{{ item.status }}</span></td>
+                                    <td>{{ item.safe_error }}</td>
+                                    <td>{% if item.sent_at %}{{ item.sent_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</td>
+                                </tr>
+                            {% empty %}
+                                <tr><td colspan="6" class="qadmin-empty-cell">recipientی هنوز materialize نشده است.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </article>
+        </div>
+
+        <aside class="qadmin-action-box">
+            <h2>Actions</h2>
+            {% if actions.can_queue %}
+                <a href="{{ urls.confirm }}" class="qadmin-action qadmin-action-danger">Queue / Send confirmation</a>
+            {% endif %}
+            {% if actions.can_cancel %}
+                <form method="post" class="qadmin-action-form qadmin-danger-form" data-confirm-phrase="{{ confirmations.cancel }}">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="cancel">
+                    <label>Cancel phrase</label>
+                    <code class="qadmin-command">{{ confirmations.cancel }}</code>
+                    <input type="text" name="confirmation" autocomplete="off" required>
+                    <button type="submit" class="qadmin-button qadmin-button-danger">Cancel campaign</button>
+                </form>
+            {% else %}
+                <div class="qadmin-disabled-note"><strong>Cancel</strong><p>برای status فعلی فعال نیست.</p></div>
+            {% endif %}
+
+            {% if actions.can_retry %}
+                <form method="post" class="qadmin-action-form" data-confirm-phrase="{{ confirmations.retry }}">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="retry">
+                    <label>Retry phrase</label>
+                    <code class="qadmin-command">{{ confirmations.retry }}</code>
+                    <input type="text" name="confirmation" autocomplete="off" required>
+                    <button type="submit" class="qadmin-button qadmin-button-secondary">Retry retryable failed</button>
+                </form>
+            {% else %}
+                <div class="qadmin-disabled-note"><strong>Retry failed</strong><p>failed retryable موجود نیست یا خطاها non-retryable هستند.</p></div>
+            {% endif %}
+
+            <div class="qadmin-disabled-note">
+                <strong>Pause / Resume</strong>
+                <p>مدل فعلی status paused ندارد؛ این action در این فاز فقط گزارش می‌شود و فعال نیست.</p>
+            </div>
+
+            <code class="qadmin-command">python manage.py process_broadcast_queue --campaign-id {{ campaign.pk }} --batch-size 50</code>
+        </aside>
+    </section>
+</div>
+<script src="{% static 'admin/qasedak_campaigns.js' %}"></script>
+{% endblock %}

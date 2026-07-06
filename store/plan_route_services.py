@@ -3,7 +3,7 @@ from copy import copy
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
 
-from .models import Inbound, Operator, Plan, PlanInboundRoute
+from .models import Inbound, Operator, Panel, Plan, PlanInboundRoute
 
 
 BULK_ROUTE_STRATEGY_SKIP_EXISTING = "skip_existing"
@@ -260,6 +260,16 @@ def sales_inbound_issues(inbound, *, store=None):
         errors.append("Inbound panel is inactive.")
     elif store and panel.store_id and panel.store_id != store.pk:
         errors.append("Inbound belongs to a different store.")
+    elif getattr(panel, "capability_profile", "") == Panel.CapabilityProfile.UNKNOWN_SAFE:
+        errors.append("X-UI compatibility is unknown; run compatibility audit before selling on this inbound.")
+    elif getattr(panel, "capability_profile", "") in {
+        Panel.CapabilityProfile.MODERN_SINGLE_NODE,
+        Panel.CapabilityProfile.MODERN_MULTI_NODE,
+    }:
+        warnings.append("Modern 3X-UI route uses deferred paid provisioning; no disabled client is created at checkout.")
+
+    if getattr(inbound, "xui_source", "") == Inbound.XUISource.SYNCHRONIZED_NODE and not (inbound.xui_node_id or "").strip():
+        errors.append("Synchronized node inbound is missing node identity.")
 
     if not getattr(inbound, "health_monitor_enabled", True):
         warnings.append("Selected inbound is excluded from the health monitor.")

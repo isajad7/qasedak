@@ -1,12 +1,12 @@
 # Productization P2 - Bootstrap Install Command
 
-P2 adds a Django management command that creates the initial database-backed install objects from a private JSON config:
+The bootstrap command creates the initial database-backed install objects from a private JSON config:
 
 ```bash
 python manage.py bootstrap_install --config install.config.json
 ```
 
-This is not a shell installer. It does not configure systemd, nginx, TLS, DNS, cron, backups, virtualenvs, `.env`, `data/`, `media/`, logs, or the SQLite file path. P3 can wrap this command from an interactive bare-metal installer.
+This is not a shell installer. It does not configure systemd, nginx, TLS, DNS, cron, backups, virtualenvs, `.env`, `data/`, `media/`, logs, or database servers. The shell installer owns `.env`, SQLite/PostgreSQL runtime setup, and package installation.
 
 ## Example Config
 
@@ -16,7 +16,7 @@ Start from:
 docs/productization/install.config.example.json
 ```
 
-Copy it outside version control before adding real secrets. The example contains placeholders only. Prefer env-backed admin and X-UI passwords:
+Copy it outside version control before adding real secrets. The example contains placeholders only. Prefer env-backed admin passwords, Telegram tokens, and X-UI passwords:
 
 ```json
 {
@@ -26,9 +26,14 @@ Copy it outside version control before adding real secrets. The example contains
   },
   "xui": {
     "password_env": "VPN_STORE_XUI_PASSWORD"
+  },
+  "telegram": {
+    "bot_token_env": "VPN_STORE_TELEGRAM_BOT_TOKEN"
   }
 }
 ```
+
+For PostgreSQL configs, use `database.postgres.password_env`; do not put the database password in JSON.
 
 `admin.password_mode=generate` is intentionally rejected in P2. P3 should own one-time password generation/output.
 

@@ -16,9 +16,17 @@ from .admin_forms import (
 from .admin_setup import active_panels, active_telegram_configs, build_setup_cards, route_queryset_for_store
 from .bot_proxy import sanitized_telegram_proxy_url, telegram_proxy_url
 from .models import BotConfiguration, Inbound, Panel, Plan, PlanInboundRoute, Store
+from .setup_readiness import build_store_readiness_checklist, setup_checklist_passes, sync_store_setup_status
 
 
 SKIPPED_SESSION_KEY = "qasedak_setup_wizard_skipped_steps"
+WIZARD_ACTION_FIELD = "wizard_action"
+WIZARD_SKIP_ACTION = "skip"
+WIZARD_SKIP_LABEL = "بعداً انجام می‌دهم"
+WIZARD_TEST_TELEGRAM_ACTION = "test_telegram"
+WIZARD_TEST_XUI_ACTION = "test_xui"
+WIZARD_ACTIVATE_ACTION = "activate_store"
+WIZARD_ACTIVATION_CONFIRMATION = "ACTIVATE_STORE"
 
 
 @dataclass(frozen=True)
@@ -100,6 +108,7 @@ WIZARD_STEPS = (
 
 WIZARD_STEP_BY_SLUG = {step.slug: step for step in WIZARD_STEPS}
 WIZARD_STEP_ORDER = [step.slug for step in WIZARD_STEPS]
+OPTIONAL_WIZARD_STEP_SLUGS = {step.slug for step in WIZARD_STEPS if step.slug not in {"store", "review"}}
 
 
 def wizard_index_url(store=None):
@@ -139,6 +148,28 @@ def previous_step_slug(slug):
 
 def get_skipped_steps(request):
     return set(request.session.get(SKIPPED_SESSION_KEY, []))
+
+
+def is_step_skippable(slug):
+    return slug in OPTIONAL_WIZARD_STEP_SLUGS
+
+
+def is_skip_request(post_data):
+    return post_data.get(WIZARD_ACTION_FIELD) == WIZARD_SKIP_ACTION or "_skip" in post_data
+
+
+def step_test_action(slug):
+    if slug == "telegram":
+        return {
+            "value": WIZARD_TEST_TELEGRAM_ACTION,
+            "label": "بررسی اتصال ربات",
+        }
+    if slug == "panel":
+        return {
+            "value": WIZARD_TEST_XUI_ACTION,
+            "label": "تست خواندن پنل",
+        }
+    return None
 
 
 def mark_step_skipped(request, slug):
@@ -182,8 +213,8 @@ def status_for_step(step, store, skipped_steps):
     card = setup_status_by_key(store).get(step.setup_card_key)
     status = getattr(card, "status", "missing")
     label = getattr(card, "status_label", "تکمیل نشده")
-    if step.slug in skipped_steps and status != "done":
-        return "skipped", "بعداً انجام می‌دهم"
+    if step.slug in skipped_steps and is_step_skippable(step.slug):
+        return "skipped", WIZARD_SKIP_LABEL
     if status == "safe":
         return "done", "ایمن / اختیاری"
     if status == "error":
@@ -302,6 +333,7 @@ def get_step_page_context(request, slug, selected_store_id=None, form=None):
     steps = step_contexts(store, skipped)
     previous_slug = previous_step_slug(slug)
     next_slug = next_step_slug(slug)
+    test_action = step_test_action(slug)
     return {
         "stores": stores,
         "selected_store": store,
@@ -313,16 +345,27 @@ def get_step_page_context(request, slug, selected_store_id=None, form=None):
         "form": form if form is not None else get_step_form(slug, request=request, store=store),
         "previous_url": wizard_step_url(previous_slug, store) if previous_slug else wizard_index_url(store),
         "next_url": wizard_step_url(next_slug, store) if next_slug else reverse("admin_store_owner_dashboard"),
-        "can_skip": slug != "store",
+        "can_skip": is_step_skippable(slug),
+        "wizard_action_field": WIZARD_ACTION_FIELD,
+        "wizard_skip_action": WIZARD_SKIP_ACTION,
+        "wizard_skip_label": WIZARD_SKIP_LABEL,
+        "test_action": test_action["value"] if test_action else "",
+        "test_action_label": test_action["label"] if test_action else "",
     }
 
 
 def get_review_context(request, selected_store_id=None):
     stores, store = selected_store_from_id(selected_store_id)
     skipped = get_skipped_steps(request)
+    if store:
+        sync_store_setup_status(store, allow_ready=False)
+        store.refresh_from_db(fields=["setup_status"])
     steps = step_contexts(store, skipped)
     cards = build_setup_cards(store)
     remaining_cards = [card for card in cards if card.status in {"error", "missing", "warning"}]
+    readiness_checklist = build_store_readiness_checklist(store)
+    activation_blockers = [item for item in readiness_checklist if not item.passed]
+    can_activate = bool(store and setup_checklist_passes(store))
     revenue_status = "dry-run امن" if store and store.revenue_engine_dry_run else "ارسال واقعی یا غیرفعال"
     return {
         "stores": stores,
@@ -332,7 +375,14 @@ def get_review_context(request, selected_store_id=None):
         "current_step": WIZARD_STEP_BY_SLUG["review"],
         "setup_cards": cards,
         "remaining_cards": remaining_cards,
-        "ready": not remaining_cards,
+        "readiness_checklist": readiness_checklist,
+        "activation_blockers": activation_blockers,
+        "can_activate": can_activate,
+        "activation_action": WIZARD_ACTIVATE_ACTION,
+        "activation_confirmation": WIZARD_ACTIVATION_CONFIRMATION,
+        "wizard_action_field": WIZARD_ACTION_FIELD,
+        "setup_status": getattr(store, "setup_status", ""),
+        "ready": bool(store and store.setup_status == Store.SetupStatus.READY),
         "revenue_status": revenue_status,
         "revenue_engine_enabled": bool(store and store.revenue_engine_enabled),
         "revenue_engine_dry_run": bool(store and store.revenue_engine_dry_run),

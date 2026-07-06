@@ -1,0 +1,79 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{{ workbench_url }}">کمپین‌ها و پیام‌رسانی</a>
+    &rsaquo; <a href="{{ review_url }}">Campaign Review</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-campaigns qadmin-campaign-preview-page" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Campaign Wizard</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ edit_url }}" class="qadmin-action qadmin-action-secondary">Message</a>
+            <a href="{{ audience_url }}" class="qadmin-action qadmin-action-secondary">Audience</a>
+            <a href="{{ confirm_url }}" class="qadmin-action {% if preview.targetable %}qadmin-action-danger{% else %}qadmin-action-secondary{% endif %}">Confirm</a>
+        </div>
+    </section>
+
+    <section class="qadmin-wizard-layout">
+        <nav class="qadmin-wizard-steps" aria-label="Campaign steps">
+            <a href="{{ edit_url }}" class="qadmin-wizard-step"><span>1. Message</span></a>
+            <a href="{{ audience_url }}" class="qadmin-wizard-step"><span>2. Audience</span></a>
+            <span class="qadmin-wizard-step is-current"><span>3. Preview</span><strong>اکنون</strong></span>
+            <a href="{{ confirm_url }}" class="qadmin-wizard-step"><span>4. Confirm</span></a>
+        </nav>
+
+        <section class="qadmin-campaign-preview-grid">
+            <article class="qadmin-message-preview">
+                <header>
+                    <strong>{{ campaign.title }}</strong>
+                    <span>{{ preview.channel_label }}</span>
+                </header>
+                <div class="qadmin-telegram-bubble">{{ message_preview|linebreaksbr }}</div>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>خلاصه ارسال</h2>
+                    <span class="qadmin-badge qadmin-badge-{% if preview.targetable %}success{% else %}danger{% endif %}">{{ preview.targetable }} targetable</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>Audience</dt><dd>{{ preview.audience_label }}</dd></div>
+                    <div><dt>Estimated recipients</dt><dd>{{ preview.estimated_recipients }}</dd></div>
+                    <div><dt>Targetable</dt><dd>{{ preview.targetable }}</dd></div>
+                    <div><dt>Missing target</dt><dd>{{ preview.missing_target }}</dd></div>
+                    <div><dt>Duplicates removed</dt><dd>{{ preview.duplicates_removed }}</dd></div>
+                    <div><dt>Scheduled</dt><dd>{% if campaign.scheduled_at %}{{ campaign.scheduled_at|date:"Y-m-d H:i" }}{% else %}Immediate queue{% endif %}</dd></div>
+                    <div><dt>BotConfiguration</dt><dd>{{ preview.bot_config_label }}</dd></div>
+                </dl>
+                {% if preview.warnings %}
+                    <div class="qadmin-danger-box">
+                        {% for warning in preview.warnings %}<p>{{ warning }}</p>{% endfor %}
+                    </div>
+                {% endif %}
+                <div class="qadmin-form-actions">
+                    <a href="{{ confirm_url }}" class="qadmin-action {% if preview.targetable %}qadmin-action-danger{% else %}qadmin-action-secondary{% endif %}">رفتن به Confirm</a>
+                    <a href="{{ audience_url }}" class="qadmin-action qadmin-action-secondary">ویرایش Audience</a>
+                </div>
+            </article>
+        </section>
+    </section>
+</div>
+{% endblock %}

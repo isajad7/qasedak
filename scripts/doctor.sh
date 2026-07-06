@@ -182,6 +182,35 @@ for line in lines:
 PY
 }
 
+env_or_file() {
+  local key="$1"
+  local env_path="$2"
+  local value="${!key:-}"
+  if [[ -z "$value" ]]; then
+    value="$(env_value "$env_path" "$key")"
+  fi
+  printf '%s' "$value"
+}
+
+database_engine() {
+  local env_path="$INSTALL_DIR/.env"
+  local engine
+  engine="$(env_or_file DATABASE_ENGINE "$env_path")"
+  engine="${engine:-sqlite}"
+  engine="${engine,,}"
+  case "$engine" in
+    sqlite|sqlite3)
+      printf 'sqlite'
+      ;;
+    postgres|postgresql)
+      printf 'postgres'
+      ;;
+    *)
+      printf 'invalid:%s' "$engine"
+      ;;
+  esac
+}
+
 absolute_path() {
   local path="$1"
   local base="$2"
@@ -194,10 +223,8 @@ absolute_path() {
 
 resolve_db_path() {
   local env_path="$INSTALL_DIR/.env"
-  local db_path="${SQLITE_DATABASE_PATH:-}"
-  if [[ -z "$db_path" ]]; then
-    db_path="$(env_value "$env_path" SQLITE_DATABASE_PATH)"
-  fi
+  local db_path
+  db_path="$(env_or_file SQLITE_DATABASE_PATH "$env_path")"
   db_path="${db_path:-$INSTALL_DIR/data/db.sqlite3}"
   absolute_path "$db_path" "$INSTALL_DIR"
 }
@@ -253,12 +280,20 @@ check_core_paths() {
     record_fail "manage.py" "missing: $INSTALL_DIR/manage.py"
   fi
 
-  local db_path
-  db_path="$(resolve_db_path)"
-  if [[ -f "$db_path" ]]; then
-    record_pass "database" "exists: $db_path"
+  local engine
+  engine="$(database_engine)"
+  if [[ "$engine" == invalid:* ]]; then
+    record_fail "database-engine" "unsupported DATABASE_ENGINE: ${engine#invalid:}"
+  elif [[ "$engine" == "sqlite" ]]; then
+    local db_path
+    db_path="$(resolve_db_path)"
+    if [[ -f "$db_path" ]]; then
+      record_pass "database" "SQLite exists: $db_path"
+    else
+      record_fail "database" "SQLite missing: $db_path"
+    fi
   else
-    record_fail "database" "missing: $db_path"
+    record_pass "database-engine" "PostgreSQL selected"
   fi
 
   local dir=""
@@ -328,6 +363,60 @@ check_disk() {
   fi
 }
 
+check_database_backend() {
+  local engine
+  engine="$(database_engine)"
+  if [[ "$engine" == invalid:* ]]; then
+    return 0
+  fi
+  if [[ "$engine" == "sqlite" ]]; then
+    if command -v sqlite3 >/dev/null 2>&1; then
+      record_pass "sqlite3" "available"
+    else
+      record_warn "sqlite3" "not found; backups can fall back to file copy"
+    fi
+    return 0
+  fi
+
+  local env_path="$INSTALL_DIR/.env"
+  local db user password host port sqlite_path
+  db="$(env_or_file POSTGRES_DB "$env_path")"
+  user="$(env_or_file POSTGRES_USER "$env_path")"
+  password="$(env_or_file POSTGRES_PASSWORD "$env_path")"
+  host="$(env_or_file POSTGRES_HOST "$env_path")"
+  port="$(env_or_file POSTGRES_PORT "$env_path")"
+  sqlite_path="$(env_or_file SQLITE_DATABASE_PATH "$env_path")"
+
+  [[ -n "$db" ]] && record_pass "postgres-env:POSTGRES_DB" "configured" || record_fail "postgres-env:POSTGRES_DB" "missing"
+  [[ -n "$user" ]] && record_pass "postgres-env:POSTGRES_USER" "configured" || record_fail "postgres-env:POSTGRES_USER" "missing"
+  [[ -n "$password" ]] && record_pass "postgres-env:POSTGRES_PASSWORD" "configured" || record_fail "postgres-env:POSTGRES_PASSWORD" "missing"
+  [[ -n "$host" ]] && record_pass "postgres-env:POSTGRES_HOST" "configured" || record_fail "postgres-env:POSTGRES_HOST" "missing"
+  [[ -n "$port" ]] && record_pass "postgres-env:POSTGRES_PORT" "configured" || record_fail "postgres-env:POSTGRES_PORT" "missing"
+  if [[ -n "$sqlite_path" ]]; then
+    record_warn "sqlite-path-unused" "SQLITE_DATABASE_PATH is set but DATABASE_ENGINE=postgres"
+  fi
+
+  for tool in pg_isready pg_dump pg_restore psql; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      record_pass "postgres-tool:$tool" "available"
+    else
+      record_fail "postgres-tool:$tool" "missing"
+    fi
+  done
+
+  if (( DRY_RUN )); then
+    record_info "postgres-ready" "would run pg_isready against $host:$port/$db"
+    return 0
+  fi
+  if command -v pg_isready >/dev/null 2>&1 && [[ -n "$db" && -n "$user" && -n "$host" && -n "$port" ]]; then
+    if PGPASSWORD="$password" pg_isready -h "$host" -p "$port" -d "$db" -U "$user" >/dev/null 2>&1; then
+      record_pass "postgres-ready" "pg_isready passed"
+    else
+      record_fail "postgres-ready" "pg_isready failed"
+    fi
+  fi
+}
+
 run_django_command() {
   local check_name="$1"
   shift
@@ -357,6 +446,7 @@ run_django_command() {
 check_django() {
   source_env_for_django || record_fail "env" "could not source $INSTALL_DIR/.env"
   run_django_command "django-check" check
+  run_django_command "django-db-connection" shell -c "from django.db import connection; connection.ensure_connection(); print(connection.vendor)"
 
   local integration_args=(check_integrations --no-fail)
   if (( LIVE_BOT )); then
@@ -519,6 +609,7 @@ main() {
   check_core_paths
   check_permissions
   check_disk
+  check_database_backend
   check_django
   check_systemd
   check_nginx

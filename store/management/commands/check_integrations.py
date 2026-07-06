@@ -28,10 +28,12 @@ from store.models import (
     PanelUsageSnapshot,
     Plan,
     PlanInboundRoute,
+    Order,
     RevenueOfferLog,
     Store,
 )
 from store.renewal_reminder_services import get_active_clients_for_reminders, normalize_reminder_days
+from store.xui_compat import discover_xui_capabilities
 
 
 SAFE_PLACEHOLDER_CARD_NUMBER = "0000000000000000"
@@ -91,6 +93,7 @@ class Command(BaseCommand):
         self.check_panels()
         self.check_inbounds()
         self.check_plan_inbound_routes()
+        self.check_order_provisioning()
         self.check_panel_monitoring()
         self.check_daily_admin_reports()
         self.check_revenue_engine()
@@ -542,6 +545,18 @@ class Command(BaseCommand):
                 self.error(subject, "Panel URL is missing or invalid.")
             if (panel.username or "").strip() and (panel.password or "").strip():
                 self.ok(subject, "Panel username/password are configured.")
+                profile = discover_xui_capabilities(panel, live=False)
+                profile_label = profile.profile or "unknown"
+                version_label = profile.version or "-"
+                if profile_label == Panel.CapabilityProfile.UNKNOWN_SAFE:
+                    self.warning(subject, "X-UI compatibility profile is unknown_safe; destructive operations are blocked.")
+                elif profile_label in {
+                    Panel.CapabilityProfile.MODERN_SINGLE_NODE,
+                    Panel.CapabilityProfile.MODERN_MULTI_NODE,
+                }:
+                    self.ok(subject, "Modern 3X-UI paid flow uses deferred create-enabled provisioning.")
+                else:
+                    self.ok(subject, f"X-UI compatibility profile={profile_label} version={version_label}.")
                 if self.live_xui:
                     self.check_live_panel(panel, subject)
             else:
@@ -558,6 +573,19 @@ class Command(BaseCommand):
 
         if session:
             self.ok(subject, "X-UI login succeeded.")
+            try:
+                profile = discover_xui_capabilities(panel, live=True, write=False, use_cache=False)
+            except Exception as exc:
+                self.warning(subject, f"X-UI compatibility live audit failed: {self.sanitize_panel_error(exc, panel)}")
+            else:
+                self.ok(
+                    subject,
+                    (
+                        f"X-UI live compatibility profile={profile.profile} "
+                        f"version={profile.version or '-'} nodes={profile.metadata.get('node_count', 0)} "
+                        f"hosts={profile.metadata.get('host_count', 0)}."
+                    ),
+                )
         else:
             self.error(subject, "X-UI login failed.")
 
@@ -578,7 +606,7 @@ class Command(BaseCommand):
         try:
             from store.xui_api import XUIService
 
-            XUIService(panel).get_inbound(inbound.inbound_id, use_cache=False)
+            XUIService(panel).get_inbound(inbound, use_cache=False)
         except Exception as exc:
             return False, self.sanitize_panel_error(exc, panel)
         return True, ""
@@ -628,6 +656,10 @@ class Command(BaseCommand):
                 self.warning(subject, "Inbound is available for new orders but excluded from panel health monitor.")
             else:
                 self.ok(subject, "Legacy inbound is excluded from panel health monitor.")
+            if getattr(inbound, "xui_node_id", ""):
+                self.ok(subject, f"Node scope is configured node_id={inbound.xui_node_id}.")
+            elif getattr(inbound, "xui_source", "") == Inbound.XUISource.SYNCHRONIZED_NODE:
+                self.error(subject, "Inbound is synchronized from a node but node identity is missing.")
             if not has_capacity:
                 self.warning(subject, "Inbound capacity is full.")
             if self.live_xui and panel_is_usable:
@@ -683,6 +715,15 @@ class Command(BaseCommand):
             return False, "Route inbound is missing panel."
         if not panel.is_active:
             return False, "Route panel is inactive."
+        if getattr(panel, "capability_profile", "") == Panel.CapabilityProfile.UNKNOWN_SAFE:
+            return False, "Route panel X-UI compatibility is unknown_safe."
+        if getattr(inbound, "xui_source", "") == Inbound.XUISource.SYNCHRONIZED_NODE and not (inbound.xui_node_id or "").strip():
+            return False, "Route inbound is synchronized from a node but has no node identity."
+        if getattr(panel, "capability_profile", "") in {
+            Panel.CapabilityProfile.MODERN_SINGLE_NODE,
+            Panel.CapabilityProfile.MODERN_MULTI_NODE,
+        }:
+            return True, "Route panel uses modern 3X-UI deferred paid provisioning."
         if panel.store_id and panel.store_id != store.pk:
             return False, "Route inbound belongs to a different store."
         if route.store_id and route.store_id != store.pk:
@@ -831,6 +872,28 @@ class Command(BaseCommand):
                     f"invalid_routes={len(invalid_routes)}"
                 ),
             )
+
+    def check_order_provisioning(self):
+        commands = get_commands()
+        if "reconcile_order_provisioning" in commands:
+            self.ok("Order provisioning", "reconcile_order_provisioning command is available.")
+        else:
+            self.error("Order provisioning", "reconcile_order_provisioning command is missing.")
+
+        failed = Order.objects.filter(provisioning_status=Order.ProvisioningStatus.FAILED).count()
+        if failed:
+            self.warning("Order provisioning", f"{failed} order(s) have failed provisioning and need reconciliation/retry.")
+        else:
+            self.ok("Order provisioning", "No failed provisioning orders found.")
+
+        stale_cutoff = timezone.now() - timedelta(hours=2)
+        stale_pending = Order.objects.filter(
+            provisioning_status__in=[Order.ProvisioningStatus.PENDING, Order.ProvisioningStatus.PROVISIONING],
+            status__in=[Order.Status.CONFIRMED, Order.Status.PENDING_VERIFICATION],
+            created_at__lt=stale_cutoff,
+        ).count()
+        if stale_pending:
+            self.warning("Order provisioning", f"{stale_pending} paid/confirmed order(s) are still awaiting provisioning.")
 
     def check_panel_monitoring(self):
         commands = get_commands()

@@ -17,6 +17,11 @@
         <a href="{{ legacy_apply_url }}" class="button">{% translate "Apply Import" %}</a>
       </li>
     {% endif %}
+    {% if original.status == "applied" %}
+      <li>
+        <a href="{{ legacy_campaign_url }}" class="button">{% translate "Create legacy audience campaign" %}</a>
+      </li>
+    {% endif %}
     <li>
       <a href="{{ legacy_export_csv_url }}" class="button">{% translate "Export CSV" %}</a>
     </li>
@@ -40,6 +45,11 @@
       </table>
     </div>
     {% if original.status == "applied" %}
+      <div class="module">
+        <h2>{% translate "Broadcast campaign for legacy audience" %}</h2>
+        <p>{% translate "Create a campaign draft for the legacy WizWiz audience. This does not send a message automatically." %}</p>
+        <p><a href="{{ legacy_campaign_url }}" class="button">{% translate "Create campaign draft" %}</a></p>
+      </div>
       <div class="module">
         <h2>{% translate "Send message to users imported in this job" %}</h2>
         <form method="post" action="{{ legacy_message_url }}" novalidate>

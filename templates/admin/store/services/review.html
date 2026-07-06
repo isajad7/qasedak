@@ -20,7 +20,7 @@
 <div class="qadmin-setup qadmin-service-review" dir="rtl">
     <section class="qadmin-hero qadmin-service-hero">
         <div>
-            <p class="qadmin-eyebrow">VPN Client Review</p>
+            <p class="qadmin-eyebrow">بررسی سرویس VPN</p>
             <h1>{{ title }}</h1>
             <p>{{ subtitle }}</p>
         </div>
@@ -41,14 +41,14 @@
                 <dl class="qadmin-review-grid">
                     <div><dt>مشتری</dt><dd>{% if customer_summary.review_url %}<a href="{{ customer_summary.review_url }}">{{ customer_summary.name }}</a>{% else %}{{ customer_summary.name }}{% endif %}</dd></div>
                     <div><dt>تلفن</dt><dd>{% if customer_summary.phone_masked %}{{ customer_summary.phone_masked }}{% else %}-{% endif %}</dd></div>
-                    <div><dt>Username</dt><dd>{% if customer_summary.username_masked %}{{ customer_summary.username_masked }}{% else %}-{% endif %}</dd></div>
-                    <div><dt>Telegram target</dt><dd>{{ customer_summary.telegram_target_count }} مقصد فعال</dd></div>
+                    <div><dt>نام کاربری</dt><dd>{% if customer_summary.username_masked %}{{ customer_summary.username_masked }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>مقصد تلگرام</dt><dd>{{ customer_summary.telegram_target_count }} مقصد فعال</dd></div>
                     <div><dt>آخرین سفارش</dt><dd>{% if customer_summary.last_order %}<a href="{{ customer_summary.last_order_url }}">{{ customer_summary.last_order.order_tracking_code }}</a>{% else %}-{% endif %}</dd></div>
-                    <div><dt>Customer admin</dt><dd>{% if customer_summary.change_url %}<a href="{{ customer_summary.change_url }}">باز کردن</a>{% else %}-{% endif %}</dd></div>
+                    <div><dt>ادمین مشتری</dt><dd>{% if customer_summary.change_url %}<a href="{{ customer_summary.change_url }}">باز کردن</a>{% else %}-{% endif %}</dd></div>
                 </dl>
                 <div class="qadmin-actions">
                     {% if customer_summary.message_url %}<a href="{{ customer_summary.message_url }}" class="qadmin-action qadmin-action-warning">پیام به مشتری</a>{% endif %}
-                    {% if customer_summary.support_history_url %}<a href="{{ customer_summary.support_history_url }}" class="qadmin-action qadmin-action-secondary">Support history</a>{% endif %}
+                    {% if customer_summary.support_history_url %}<a href="{{ customer_summary.support_history_url }}" class="qadmin-action qadmin-action-secondary">سوابق پشتیبانی</a>{% endif %}
                 </div>
             </article>
 
@@ -58,16 +58,33 @@
                     <span class="qadmin-badge qadmin-badge-{{ service_summary.status_tone }}">{{ service_summary.status_label }}</span>
                 </header>
                 <dl class="qadmin-review-grid">
-                    <div><dt>Plan / Order</dt><dd>{{ service_summary.plan }}{% if service_summary.order %}<small><a href="{{ service_summary.order_url }}">{{ service_summary.order.order_tracking_code }}</a></small>{% endif %}</dd></div>
-                    <div><dt>Panel</dt><dd>{{ service_summary.panel }}</dd></div>
-                    <div><dt>Inbound</dt><dd>{{ service_summary.inbound }}</dd></div>
-                    <div><dt>Protocol</dt><dd>{{ service_summary.protocol }}</dd></div>
-                    <div><dt>Created</dt><dd>{{ service_summary.created_at|date:"Y-m-d H:i" }}</dd></div>
-                    <div><dt>Activated</dt><dd>{% if service_summary.activated_at %}{{ service_summary.activated_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
-                    <div><dt>Expires</dt><dd>{% if service_summary.expires_at %}{{ service_summary.expires_at|date:"Y-m-d H:i" }}{% else %}نامشخص{% endif %}<small>{{ service_summary.days_left_label }}</small></dd></div>
-                    <div><dt>Last sync</dt><dd>{% if service_summary.last_synced_at %}{{ service_summary.last_synced_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
-                    <div><dt>Last online</dt><dd>{% if service_summary.last_online_at %}{{ service_summary.last_online_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>پلن / سفارش</dt><dd>{{ service_summary.plan }}{% if service_summary.order %}<small><a href="{{ service_summary.order_url }}">{{ service_summary.order.order_tracking_code }}</a></small>{% endif %}</dd></div>
+                    <div><dt>پنل</dt><dd>{{ service_summary.panel }}</dd></div>
+                    <div><dt>اینباند</dt><dd>{{ service_summary.inbound }}</dd></div>
+                    <div><dt>پروتکل</dt><dd>{{ service_summary.protocol }}</dd></div>
+                    <div><dt>ساخته‌شده</dt><dd>{{ service_summary.created_at|date:"Y-m-d H:i" }}</dd></div>
+                    <div><dt>فعال‌شده</dt><dd>{% if service_summary.activated_at %}{{ service_summary.activated_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>انقضا</dt><dd>{% if service_summary.expires_at %}{{ service_summary.expires_at|date:"Y-m-d H:i" }}{% else %}نامشخص{% endif %}<small>{{ service_summary.days_left_label }}</small></dd></div>
+                    <div><dt>آخرین sync</dt><dd>{% if service_summary.last_synced_at %}{{ service_summary.last_synced_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>آخرین آنلاین</dt><dd>{% if service_summary.last_online_at %}{{ service_summary.last_online_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>scope امن</dt><dd>Panel {{ service_summary.safe_scope.panel_id|default:"-" }} / Inbound {{ service_summary.safe_scope.inbound_id|default:"-" }} / Node {{ service_summary.safe_scope.node_id|default:"local" }}</dd></div>
                 </dl>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <header>
+                    <h2>تطبیق با پنل</h2>
+                    <span class="qadmin-badge qadmin-badge-{{ reconciliation_summary.tone }}">{{ reconciliation_summary.label }}</span>
+                </header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>آخرین بررسی</dt><dd>{% if reconciliation_summary.checked_at %}{{ reconciliation_summary.checked_at|date:"Y-m-d H:i" }}{% else %}انجام نشده{% endif %}</dd></div>
+                    <div><dt>Batch</dt><dd>{% if reconciliation_summary.batch_id %}{{ reconciliation_summary.batch_id }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>اعتبار نتیجه</dt><dd>{% if reconciliation_summary.fresh and reconciliation_summary.scope_current %}معتبر و تازه{% elif reconciliation_summary.checked_at %}نیازمند بررسی مجدد{% else %}ثبت نشده{% endif %}</dd></div>
+                    <div><dt>آخرین خطا</dt><dd>{% if reconciliation_summary.error %}{{ reconciliation_summary.error }}{% else %}-{% endif %}</dd></div>
+                </dl>
+                {% if reconciliation_summary.warning %}
+                    <p class="qadmin-warning-text">{{ reconciliation_summary.warning }}</p>
+                {% endif %}
             </article>
 
             <article class="qadmin-review-panel">
@@ -78,10 +95,10 @@
                 <div class="qadmin-usage-wide">
                     <div class="qadmin-usage-bar"><span style="width: {{ service_summary.usage.percent }}%"></span></div>
                     <dl class="qadmin-review-grid">
-                        <div><dt>Total</dt><dd>{{ service_summary.usage.total_label }}</dd></div>
-                        <div><dt>Used</dt><dd>{{ service_summary.usage.used_label }}</dd></div>
-                        <div><dt>Remaining</dt><dd>{{ service_summary.usage.remaining_label }}</dd></div>
-                        <div><dt>Last snapshot</dt><dd>{% if service_summary.usage.snapshot %}{{ service_summary.usage.snapshot.recorded_at|date:"Y-m-d H:i" }}{% else %}ثبت نشده{% endif %}</dd></div>
+                        <div><dt>کل</dt><dd>{{ service_summary.usage.total_label }}</dd></div>
+                        <div><dt>مصرف‌شده</dt><dd>{{ service_summary.usage.used_label }}</dd></div>
+                        <div><dt>باقی‌مانده</dt><dd>{{ service_summary.usage.remaining_label }}</dd></div>
+                        <div><dt>آخرین snapshot</dt><dd>{% if service_summary.usage.snapshot %}{{ service_summary.usage.snapshot.recorded_at|date:"Y-m-d H:i" }}{% else %}ثبت نشده{% endif %}</dd></div>
                     </dl>
                 </div>
             </article>
@@ -89,12 +106,12 @@
             <article class="qadmin-review-panel">
                 <header>
                     <h2>تحویل کانفیگ</h2>
-                    <span class="qadmin-badge qadmin-badge-{% if delivery_summary.config_exists %}success{% else %}warning{% endif %}">{% if delivery_summary.config_exists %}Config exists{% else %}No config{% endif %}</span>
+                    <span class="qadmin-badge qadmin-badge-{% if delivery_summary.config_exists %}success{% else %}warning{% endif %}">{% if delivery_summary.config_exists %}کانفیگ موجود{% else %}کانفیگ ندارد{% endif %}</span>
                 </header>
                 <dl class="qadmin-review-grid">
-                    <div><dt>Subscription link</dt><dd>{{ delivery_summary.subscription_status }}</dd></div>
-                    <div><dt>Direct config</dt><dd>{{ delivery_summary.direct_status }}</dd></div>
-                    <div><dt>Telegram delivery</dt><dd>{{ delivery_summary.delivered_to_telegram }}</dd></div>
+                    <div><dt>لینک اشتراک</dt><dd>{{ delivery_summary.subscription_status }}</dd></div>
+                    <div><dt>کانفیگ مستقیم</dt><dd>{{ delivery_summary.direct_status }}</dd></div>
+                    <div><dt>تحویل تلگرام</dt><dd>{{ delivery_summary.delivered_to_telegram }}</dd></div>
                     <div><dt>آخرین خطا</dt><dd>{% if delivery_summary.last_error %}{{ delivery_summary.last_error }}{% else %}-{% endif %}</dd></div>
                 </dl>
             </article>
@@ -106,15 +123,32 @@
                 </header>
                 <dl class="qadmin-review-grid">
                     <div><dt>Route / Panel / Inbound</dt><dd>{{ health_summary.route_label }}</dd></div>
-                    <div><dt>Telegram target</dt><dd><span class="qadmin-badge qadmin-badge-{{ health_summary.telegram_tone }}">{{ health_summary.telegram_label }}</span></dd></div>
-                    <div><dt>Reminder status</dt><dd>{{ health_summary.reminder_label }}</dd></div>
-                    <div><dt>Reminder time</dt><dd>{% if health_summary.reminder_at %}{{ health_summary.reminder_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
+                    <div><dt>مقصد تلگرام</dt><dd><span class="qadmin-badge qadmin-badge-{{ health_summary.telegram_tone }}">{{ health_summary.telegram_label }}</span></dd></div>
+                    <div><dt>وضعیت یادآوری</dt><dd>{{ health_summary.reminder_label }}</dd></div>
+                    <div><dt>زمان یادآوری</dt><dd>{% if health_summary.reminder_at %}{{ health_summary.reminder_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
                 </dl>
             </article>
         </div>
 
         <aside class="qadmin-action-box">
-            <h2>Action</h2>
+            <h2>اقدام</h2>
+            {% if actions.can_reconcile %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <input type="hidden" name="confirm_reconcile" value="1">
+                    <button type="submit" name="action" value="reconcile_client" class="qadmin-button">بررسی همین سرویس با پنل</button>
+                </form>
+            {% endif %}
+
+            {% if actions.can_soft_delete_remote_missing %}
+                <form method="post" class="qadmin-action-form qadmin-danger-form">
+                    {% csrf_token %}
+                    <label class="qadmin-confirm-row"><input type="text" name="confirm_soft_delete" required placeholder="{{ reconciliation_summary.confirmation }}"> عبارت تایید را وارد کن.</label>
+                    <button type="submit" name="action" value="soft_delete_remote_missing" class="qadmin-button qadmin-button-danger">حذف نرم از قاصدک</button>
+                    <p>سرویس از لیست فعال خارج می‌شود، اما سفارش، مشتری و سوابق آن حفظ می‌شوند.</p>
+                </form>
+            {% endif %}
+
             {% if actions.can_resend_config %}
                 <form method="post" class="qadmin-action-form">
                     {% csrf_token %}
@@ -160,8 +194,8 @@
             {% endif %}
 
             <div class="qadmin-disabled-note">
-                <strong>Delete service</strong>
-                <p>حذف از admin review در P5 فعال نشده است؛ فقط actionهای امن موجود نمایش داده می‌شوند.</p>
+                <strong>حذف remote انجام نمی‌شود</strong>
+                <p>این صفحه هیچ X-UI client را حذف نمی‌کند؛ پاک‌سازی فقط حذف نرم محلی بعد از revalidation است.</p>
             </div>
         </aside>
     </section>

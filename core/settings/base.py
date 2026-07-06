@@ -6,6 +6,7 @@ Environment-specific settings live in development.py and production.py.
 
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.translation import gettext_lazy as _
@@ -35,6 +36,87 @@ def env_required(name):
     return value
 
 
+def env_int(name, default):
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ImproperlyConfigured(f"Set {name} to an integer value.") from exc
+
+
+def database_url_settings(database_url):
+    parsed = urlparse(database_url)
+    scheme = (parsed.scheme or "").strip().lower()
+
+    if scheme in {"postgres", "postgresql"}:
+        query = parse_qs(parsed.query)
+        sslmode = (query.get("sslmode") or [os.environ.get("POSTGRES_SSLMODE", "prefer")])[0]
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ImproperlyConfigured("DATABASE_URL contains an invalid port.") from exc
+
+        config = {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": unquote((parsed.path or "").lstrip("/")) or os.environ.get("POSTGRES_DB", "qasedak"),
+            "USER": unquote(parsed.username or os.environ.get("POSTGRES_USER", "qasedak")),
+            "PASSWORD": unquote(parsed.password or os.environ.get("POSTGRES_PASSWORD", "")),
+            "HOST": parsed.hostname or os.environ.get("POSTGRES_HOST", "127.0.0.1"),
+            "PORT": str(port or env_int("POSTGRES_PORT", 5432)),
+            "CONN_MAX_AGE": env_int("POSTGRES_CONN_MAX_AGE", 60),
+        }
+        if sslmode:
+            config["OPTIONS"] = {"sslmode": sslmode}
+        return config
+
+    if scheme in {"sqlite", "sqlite3"}:
+        path = unquote(parsed.path or "")
+        if parsed.netloc:
+            path = f"/{parsed.netloc}{path}"
+        return {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": path or os.environ.get("SQLITE_DATABASE_PATH", BASE_DIR / "db.sqlite3"),
+        }
+
+    raise ImproperlyConfigured(
+        "DATABASE_URL must use one of: postgres://, postgresql://, sqlite://, sqlite3://."
+    )
+
+
+def database_settings():
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if database_url:
+        return database_url_settings(database_url)
+
+    engine = os.environ.get("DATABASE_ENGINE", "sqlite").strip().lower()
+    if engine in {"sqlite", "sqlite3"}:
+        return {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": os.environ.get("SQLITE_DATABASE_PATH", BASE_DIR / "db.sqlite3"),
+        }
+
+    if engine in {"postgres", "postgresql"}:
+        sslmode = os.environ.get("POSTGRES_SSLMODE", "prefer").strip()
+        config = {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("POSTGRES_DB", "qasedak").strip() or "qasedak",
+            "USER": os.environ.get("POSTGRES_USER", "qasedak").strip() or "qasedak",
+            "PASSWORD": env_required("POSTGRES_PASSWORD"),
+            "HOST": os.environ.get("POSTGRES_HOST", "127.0.0.1").strip() or "127.0.0.1",
+            "PORT": str(env_int("POSTGRES_PORT", 5432)),
+            "CONN_MAX_AGE": env_int("POSTGRES_CONN_MAX_AGE", 60),
+        }
+        if sslmode:
+            config["OPTIONS"] = {"sslmode": sslmode}
+        return config
+
+    raise ImproperlyConfigured(
+        "DATABASE_ENGINE must be one of: sqlite, postgres, postgresql."
+    )
+
+
 SECRET_KEY = os.environ.get(
     "DJANGO_SECRET_KEY",
     "django-insecure-hrf$n9ubs9qr&u!+%gva^ku%fg@f=ds98u*47i=(b7vjp=rdm+",
@@ -60,6 +142,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.locale.LocaleMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -93,10 +176,7 @@ ASGI_APPLICATION = "core.asgi.application"
 
 
 DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": os.environ.get("SQLITE_DATABASE_PATH", BASE_DIR / "db.sqlite3"),
-    }
+    "default": database_settings(),
 }
 
 
@@ -142,6 +222,21 @@ STATIC_ROOT = BASE_DIR / "static_root"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
+QASEDAK_PRIVATE_BACKUP_ROOT = Path(
+    os.environ.get("QASEDAK_PRIVATE_BACKUP_ROOT", BASE_DIR / "backups" / "admin_center")
+)
+QASEDAK_TENANT_ROOT = Path(os.environ.get("QASEDAK_TENANT_ROOT", "/opt/qasedak-tenants"))
+QASEDAK_RESTORE_UPLOAD_ROOT = Path(
+    os.environ.get("QASEDAK_RESTORE_UPLOAD_ROOT", BASE_DIR / "backups" / "restore_uploads")
+)
+QASEDAK_BACKUP_MAX_UPLOAD_SIZE = int(
+    os.environ.get("QASEDAK_BACKUP_MAX_UPLOAD_SIZE", 512 * 1024 * 1024)
+)
+QASEDAK_BACKUP_MAX_EXTRACTED_SIZE = int(
+    os.environ.get("QASEDAK_BACKUP_MAX_EXTRACTED_SIZE", 2 * 1024 * 1024 * 1024)
+)
+QASEDAK_ADMIN_RESTORE_ENABLED = env_bool("QASEDAK_ADMIN_RESTORE_ENABLED", False)
+
 
 PAYMENT_RECEIPT_MAX_UPLOAD_SIZE = int(
     os.environ.get("PAYMENT_RECEIPT_MAX_UPLOAD_SIZE", 5 * 1024 * 1024)
@@ -183,6 +278,7 @@ JAZZMIN_SETTINGS = {
     "show_ui_builder": False,
     "use_google_fonts_cdn": False,
     "custom_css": "admin/css/jazzmin-custom.css",
+    "custom_js": "admin/qasedak_admin.js",
     "hide_apps": [
         "auth",
         "store",
@@ -212,6 +308,8 @@ JAZZMIN_SETTINGS = {
             {"model": "store.BotConfiguration"},
             {"model": "store.BotPendingAction"},
             {"model": "store.BotEventLog"},
+            {"model": "store.QasedakBackupJob"},
+            {"model": "store.QasedakRestoreJob"},
         ],
         "Payments": [
             {"model": "payments.IncomingPaymentSMS"},
@@ -241,6 +339,8 @@ JAZZMIN_SETTINGS = {
         "store.BotConfiguration",
         "store.BotPendingAction",
         "store.BotEventLog",
+        "store.QasedakBackupJob",
+        "store.QasedakRestoreJob",
         "payments.IncomingPaymentSMS",
     ],
     "icons": {
@@ -267,6 +367,8 @@ JAZZMIN_SETTINGS = {
         "store.BotConfiguration": "fas fa-cogs",
         "store.BotPendingAction": "fas fa-tasks",
         "store.BotEventLog": "fas fa-clipboard-list",
+        "store.QasedakBackupJob": "fas fa-database",
+        "store.QasedakRestoreJob": "fas fa-upload",
         "payments.IncomingPaymentSMS": "fas fa-sms",
     },
     "changeform_format": "horizontal_tabs",

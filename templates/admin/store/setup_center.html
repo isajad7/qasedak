@@ -33,6 +33,7 @@
             <div class="qadmin-actions">
                 <a href="{% url 'admin_store_catalog' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action">مدیریت محصولات</a>
                 <a href="{{ wizard_url }}" class="qadmin-action">شروع راه‌اندازی مرحله‌ای</a>
+                <a href="{% url 'admin_store_backup_center' %}" class="qadmin-action qadmin-action-info">پشتیبان‌گیری و انتقال سرور</a>
                 <a href="{% url 'admin_store_owner_dashboard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-secondary">داشبورد قاصدک</a>
             </div>
         </div>

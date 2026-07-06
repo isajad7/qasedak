@@ -1,12 +1,15 @@
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 
+from django.contrib.admin.models import LogEntry
 from django.db.models import Count, Q, Sum
 from django.urls import reverse
 from django.utils import timezone
 
 from payments.models import IncomingPaymentSMS
 
+from .admin_access import user_has_capability
 from .admin_catalog import catalog_url
 from .admin_setup import (
     active_panels,
@@ -23,7 +26,20 @@ from .admin_setup import (
     store_change_url,
 )
 from .admin_support_services import support_workbench_url
-from .models import BotConfiguration, Order, PanelHealthCheckLog, PanelHealthStatus, Plan, RevenueOfferLog, Store, SupportConversation, VPNClient
+from .jalali import format_jalali_datetime, format_jalali_date
+from .models import (
+    BotConfiguration,
+    BroadcastMessage,
+    BroadcastRecipient,
+    Order,
+    PanelHealthCheckLog,
+    PanelHealthStatus,
+    Plan,
+    RevenueOfferLog,
+    Store,
+    SupportConversation,
+    VPNClient,
+)
 
 
 PENDING_ORDER_STATUSES = (
@@ -33,6 +49,7 @@ PENDING_ORDER_STATUSES = (
 )
 REVENUE_ORDER_STATUSES = (Order.Status.COMPLETED,)
 PENDING_RECEIPT_STATUSES = (Order.Status.PENDING_VERIFICATION, Order.Status.CONFIRMED)
+SERVICE_REMOTE_FILTERS = {"remote-active", "remote-disabled", "remote-missing", "remote-problem", "not-checked"}
 
 
 @dataclass(frozen=True)
@@ -61,6 +78,30 @@ class ActionItem:
     tone: str
     url: str = ""
     command: str = ""
+
+
+SENSITIVE_ADMIN_HOME_PATTERNS = (
+    (re.compile(r"\b(?:vless|vmess|trojan|ss|ssr)://\S+", re.IGNORECASE), "[redacted-config]"),
+    (re.compile(r"\bhttps?://[^\s/@:]+:[^\s/@]+@[^\s]+", re.IGNORECASE), "[redacted-url]"),
+    (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{16,}\b"), "[redacted-token]"),
+    (
+        re.compile(
+            r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+        ),
+        "[redacted-id]",
+    ),
+    (re.compile(r"(?<![A-Za-z0-9._%+-])[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9._%+-])"), "[redacted-email]"),
+    (re.compile(r"(?<!\d)(?:\+?98|0)?9\d{9}(?!\d)"), "[redacted-phone]"),
+    (re.compile(r"(?<![A-Za-z0-9_-])(?:\d[ -]?){16,19}(?![A-Za-z0-9_-])"), "[redacted-card]"),
+)
+
+
+def access_allowed(user, capability):
+    if not capability:
+        return True
+    if user is None:
+        return True
+    return user_has_capability(user, capability)
 
 
 def admin_url(name, *args):
@@ -138,8 +179,23 @@ def service_workbench_url(section="", store=None):
     if store and getattr(store, "pk", None):
         params["store"] = store.pk
     if section:
-        params["section"] = section
+        if section in SERVICE_REMOTE_FILTERS:
+            params["remote_status"] = section
+        else:
+            params["section"] = section
     url = reverse("admin_store_service_workbench")
+    if params:
+        url = add_query(url, params)
+    if section and section not in SERVICE_REMOTE_FILTERS:
+        url = f"{url}#{section}"
+    return url
+
+
+def campaign_workbench_url(section="", store=None):
+    params = {}
+    if store and getattr(store, "pk", None):
+        params["store"] = store.pk
+    url = reverse("admin_store_campaign_workbench")
     if params:
         url = add_query(url, params)
     if section:
@@ -196,12 +252,56 @@ def get_support_metrics(store=None):
     }
 
 
+def get_campaign_metrics(store=None):
+    campaigns = for_store(BroadcastMessage.objects.all(), store)
+    recipients = BroadcastRecipient.objects.select_related("campaign")
+    if store and getattr(store, "pk", None):
+        recipients = recipients.filter(campaign__store=store)
+    queued = campaigns.filter(status=BroadcastMessage.Status.QUEUED).count()
+    sending = campaigns.filter(status=BroadcastMessage.Status.SENDING).count()
+    failed = campaigns.filter(Q(status=BroadcastMessage.Status.FAILED) | Q(failed_count__gt=0)).distinct().count()
+    sent_30d = campaigns.filter(status=BroadcastMessage.Status.SENT, sent_at__gte=timezone.now() - timedelta(days=30)).count()
+    failed_recipients = recipients.filter(status=BroadcastRecipient.Status.FAILED).count()
+    skipped_recipients = recipients.filter(status=BroadcastRecipient.Status.SKIPPED).count()
+    return {
+        "queued": queued,
+        "sending": sending,
+        "failed": failed,
+        "sent_30d": sent_30d,
+        "failed_recipients": failed_recipients,
+        "skipped_recipients": skipped_recipients,
+        "card": MetricCard(
+            key="campaigns",
+            title="کمپین‌ها و پیام‌رسانی",
+            value=format_count(queued + sending),
+            subtitle=f"{failed:,} کمپین failed/partial نیازمند بررسی",
+            tone="danger" if failed else ("warning" if queued or sending else "info"),
+            details=[
+                f"queued: {queued:,}",
+                f"sending: {sending:,}",
+                f"sent در ۳۰ روز: {sent_30d:,}",
+                f"recipient failed/skipped: {failed_recipients:,}/{skipped_recipients:,}",
+            ],
+            links=[
+                DashboardLink("میز کار کمپین‌ها", campaign_workbench_url(store=store), tone="primary"),
+                DashboardLink("ساخت کمپین", add_query(reverse("admin_store_campaign_new"), {"store": getattr(store, "pk", None)}), tone="info"),
+                DashboardLink("failed/partial", campaign_workbench_url("partial-failed", store), tone="warning"),
+            ],
+        ),
+    }
+
+
 def get_order_metrics(store=None):
     today_start, today_end = local_day_bounds()
     orders = for_store(Order.objects.all(), store)
     today_orders = orders.filter(created_at__gte=today_start, created_at__lt=today_end)
 
     pending_count = orders.filter(status__in=PENDING_ORDER_STATUSES).count()
+    pending_provisioning = orders.filter(
+        provisioning_status__in=[Order.ProvisioningStatus.PENDING, Order.ProvisioningStatus.PROVISIONING],
+        is_paid=True,
+    ).count()
+    failed_provisioning = orders.filter(provisioning_status=Order.ProvisioningStatus.FAILED).count()
     completed_today = today_orders.filter(status=Order.Status.COMPLETED, is_paid=True).count()
     rejected_today = today_orders.filter(status__in=[Order.Status.REJECTED, Order.Status.CANCELLED]).count()
 
@@ -214,15 +314,17 @@ def get_order_metrics(store=None):
             key="orders_today",
             title="سفارش‌های امروز",
             value=format_count(today_orders.count()),
-            subtitle=f"{pending_count:,} سفارش در انتظار پیگیری",
-            tone="warning" if pending_count else "success",
+            subtitle=f"{pending_count:,} سفارش در انتظار پیگیری · {failed_provisioning:,} provisioning failed",
+            tone="danger" if failed_provisioning else "warning" if pending_count or pending_provisioning else "success",
             details=[
                 f"تکمیل‌شده امروز: {completed_today:,}",
                 f"رد/لغو امروز: {rejected_today:,}",
+                f"Provisioning pending/failed: {pending_provisioning:,}/{failed_provisioning:,}",
             ],
             links=[
                 DashboardLink("میز کار سفارش‌ها", order_workbench_url("today", store)),
                 DashboardLink("سفارش‌های در انتظار", order_workbench_url("needs-review", store), tone="warning"),
+                DashboardLink("گزارش فروش", add_query(reverse("admin_store_reports_center"), {"store": getattr(store, "pk", None)}) + "#sales", tone="info"),
                 DashboardLink("همه سفارش‌ها", admin_url("store_order_changelist"), tone="secondary"),
             ],
         ),
@@ -292,7 +394,11 @@ def get_revenue_metrics(store=None):
                 "۷ روز اخیر: " + "، ".join(week["display"]),
                 f"تعداد سفارش تکمیل‌شده ۷ روز اخیر: {week['order_count']:,}",
             ],
-            links=[DashboardLink("سفارش‌های تکمیل‌شده", order_changelist({"status__exact": Order.Status.COMPLETED}))],
+            links=[
+                DashboardLink("سفارش‌های تکمیل‌شده", order_changelist({"status__exact": Order.Status.COMPLETED})),
+                DashboardLink("گزارش درآمد", add_query(reverse("admin_store_reports_center"), {"store": getattr(store, "pk", None)}) + "#sales", tone="info"),
+                DashboardLink("Revenue section", add_query(reverse("admin_store_reports_center"), {"store": getattr(store, "pk", None)}) + "#revenue", tone="secondary"),
+            ],
         ),
     }
 
@@ -301,10 +407,11 @@ def get_client_metrics(store=None):
     now = timezone.now()
     soon = now + timedelta(days=3)
     clients = for_store(VPNClient.objects.all(), store)
-    active = clients.filter(status=VPNClient.Status.ACTIVE)
+    active_clients = clients.exclude(status=VPNClient.Status.DELETED).filter(deleted_at__isnull=True)
+    active = active_clients.filter(status=VPNClient.Status.ACTIVE)
     expiring = active.filter(expires_at__gte=now, expires_at__lte=soon)
-    expired = clients.filter(Q(status=VPNClient.Status.EXPIRED) | Q(status=VPNClient.Status.ACTIVE, expires_at__lt=now))
-    needs_attention = clients.filter(
+    expired = active_clients.filter(Q(status=VPNClient.Status.EXPIRED) | Q(status=VPNClient.Status.ACTIVE, expires_at__lt=now))
+    needs_attention = active_clients.filter(
         Q(status__in=[VPNClient.Status.ERROR, VPNClient.Status.CREATED])
         | Q(inbound__isnull=True)
         | Q(inbound__panel__isnull=True)
@@ -313,7 +420,7 @@ def get_client_metrics(store=None):
         | Q(order__metadata__panel_provisioning_deferred=True)
     ).distinct()
     needs_telegram = (
-        clients.filter(order__customer__isnull=False)
+        active_clients.filter(order__customer__isnull=False)
         .annotate(
             telegram_target_count=Count(
                 "order__customer__bot_users",
@@ -338,6 +445,19 @@ def get_client_metrics(store=None):
     expired_count = expired.count()
     attention_count = needs_attention.count()
     needs_telegram_count = needs_telegram.count()
+    remote_missing_count = active_clients.filter(
+        status=VPNClient.Status.ACTIVE,
+        last_remote_check_status=VPNClient.RemoteCheckStatus.REMOTE_MISSING,
+    ).count()
+    remote_disabled_count = active_clients.filter(last_remote_check_status=VPNClient.RemoteCheckStatus.REMOTE_DISABLED).count()
+    reconciliation_failed_count = active_clients.filter(
+        last_remote_check_status__in=[
+            VPNClient.RemoteCheckStatus.PANEL_UNREACHABLE,
+            VPNClient.RemoteCheckStatus.INBOUND_MISSING,
+            VPNClient.RemoteCheckStatus.UNKNOWN,
+            VPNClient.RemoteCheckStatus.AMBIGUOUS,
+        ]
+    ).count()
     return {
         "active": active_count,
         "expiring_soon": expiring_count,
@@ -345,21 +465,27 @@ def get_client_metrics(store=None):
         "low_traffic": low_traffic,
         "needs_attention": attention_count,
         "needs_telegram": needs_telegram_count,
+        "remote_missing": remote_missing_count,
+        "remote_disabled": remote_disabled_count,
+        "reconciliation_failed": reconciliation_failed_count,
         "card": MetricCard(
             key="active_services",
             title="سرویس‌های فعال",
             value=format_count(active_count),
             subtitle=f"{expiring_count:,} سرویس تا ۳ روز آینده منقضی می‌شود",
-            tone="warning" if expiring_count or low_traffic or needs_telegram_count else "success",
+            tone="warning" if expiring_count or low_traffic or needs_telegram_count or remote_missing_count or remote_disabled_count or reconciliation_failed_count else "success",
             details=[
                 f"کم‌ترافیک: {low_traffic:,}",
                 f"منقضی/نیازمند رسیدگی: {expired_count:,}",
                 f"بدون مقصد تلگرام: {needs_telegram_count:,}",
                 f"خطادار/route ناقص: {attention_count:,}",
+                f"حذف‌شده از پنل: {remote_missing_count:,}",
+                f"غیرفعال در پنل: {remote_disabled_count:,}",
             ],
             links=[
                 DashboardLink("میز کار سرویس‌ها", service_workbench_url("active", store)),
                 DashboardLink("در حال انقضا", service_workbench_url("expiring", store), tone="warning"),
+                DashboardLink("حذف‌شده از پنل", service_workbench_url("remote-missing", store), tone="danger"),
                 DashboardLink("همه سرویس‌ها", admin_url("store_vpnclient_changelist"), tone="secondary"),
             ],
         ),
@@ -553,9 +679,38 @@ def get_setup_summary(store=None):
     }
 
 
-def get_action_items(store, setup_summary, order_metrics, payment_metrics, client_metrics, panel_summary, telegram_summary, support_metrics=None):
+def get_action_items(
+    store,
+    setup_summary,
+    order_metrics,
+    payment_metrics,
+    client_metrics,
+    panel_summary,
+    telegram_summary,
+    support_metrics=None,
+    campaign_metrics=None,
+    user=None,
+):
     items = []
-    if support_metrics and support_metrics.get("needs_reply"):
+    if access_allowed(user, "campaigns.view") and campaign_metrics and campaign_metrics.get("failed"):
+        items.append(
+            ActionItem(
+                "کمپین‌های failed/partial را بررسی کن",
+                f"{campaign_metrics['failed']:,} کمپین پیام‌رسانی failed یا partial دارد.",
+                "danger",
+                campaign_workbench_url("partial-failed", store),
+            )
+        )
+    if access_allowed(user, "campaigns.view") and campaign_metrics and (campaign_metrics.get("queued") or campaign_metrics.get("sending")):
+        items.append(
+            ActionItem(
+                "صف کمپین‌ها فعال است",
+                f"{campaign_metrics.get('queued', 0):,} queued و {campaign_metrics.get('sending', 0):,} sending.",
+                "warning",
+                campaign_workbench_url("queued", store),
+            )
+        )
+    if access_allowed(user, "support.view") and support_metrics and support_metrics.get("needs_reply"):
         items.append(
             ActionItem(
                 "پیام‌های پشتیبانی را پاسخ بده",
@@ -564,7 +719,7 @@ def get_action_items(store, setup_summary, order_metrics, payment_metrics, clien
                 support_workbench_url("needs-reply", store),
             )
         )
-    if payment_metrics["pending_receipts"]:
+    if access_allowed(user, "payments.review") and payment_metrics["pending_receipts"]:
         items.append(
             ActionItem(
                 "رسیدهای پرداخت را بررسی کن",
@@ -574,7 +729,7 @@ def get_action_items(store, setup_summary, order_metrics, payment_metrics, clien
             )
         )
     missing_routes = missing_route_labels(store) if store else []
-    if missing_routes:
+    if access_allowed(user, "catalog.view") and missing_routes:
         items.append(
             ActionItem(
                 "Route پلن‌ها ناقص است",
@@ -583,7 +738,7 @@ def get_action_items(store, setup_summary, order_metrics, payment_metrics, clien
                 catalog_url(store),
             )
         )
-    if not panel_summary["panel_count"]:
+    if access_allowed(user, "setup.manage") and not panel_summary["panel_count"]:
         items.append(
             ActionItem(
                 "پنل X-UI/Sanaei را اضافه کن",
@@ -592,7 +747,9 @@ def get_action_items(store, setup_summary, order_metrics, payment_metrics, clien
                 setup_wizard_step_url("panel", store),
             )
         )
-    if not telegram_summary["active"] or not telegram_summary["admin_ready"] or not telegram_summary["token_ready"]:
+    if access_allowed(user, "setup.manage") and (
+        not telegram_summary["active"] or not telegram_summary["admin_ready"] or not telegram_summary["token_ready"]
+    ):
         items.append(
             ActionItem(
                 "BotConfiguration تلگرام را کامل کن",
@@ -601,7 +758,7 @@ def get_action_items(store, setup_summary, order_metrics, payment_metrics, clien
                 setup_wizard_step_url("telegram", store),
             )
         )
-    if client_metrics["expiring_soon"]:
+    if access_allowed(user, "services.view") and client_metrics["expiring_soon"]:
         items.append(
             ActionItem(
                 "سرویس‌های در حال انقضا را پیگیری کن",
@@ -610,7 +767,34 @@ def get_action_items(store, setup_summary, order_metrics, payment_metrics, clien
                 service_workbench_url("expiring", store),
             )
         )
-    if client_metrics.get("needs_telegram") and len(items) < 5:
+    if access_allowed(user, "services.view") and client_metrics.get("remote_missing") and len(items) < 5:
+        items.append(
+            ActionItem(
+                "سرویس حذف‌شده از پنل ولی فعال محلی",
+                f"{client_metrics['remote_missing']:,} سرویس active در قاصدک روی پنل پیدا نشده است.",
+                "error",
+                service_workbench_url("remote-missing", store),
+            )
+        )
+    if access_allowed(user, "services.view") and client_metrics.get("remote_disabled") and len(items) < 5:
+        items.append(
+            ActionItem(
+                "سرویس‌های غیرفعال در پنل",
+                f"{client_metrics['remote_disabled']:,} سرویس در پنل غیرفعال گزارش شده است.",
+                "warning",
+                service_workbench_url("remote-disabled", store),
+            )
+        )
+    if access_allowed(user, "services.view") and client_metrics.get("reconciliation_failed") and len(items) < 5:
+        items.append(
+            ActionItem(
+                "بررسی پنل ناموفق یا مبهم است",
+                f"{client_metrics['reconciliation_failed']:,} سرویس نتیجه خطادار/نامشخص/مبهم دارد.",
+                "warning",
+                service_workbench_url("remote-problem", store),
+            )
+        )
+    if access_allowed(user, "services.view") and client_metrics.get("needs_telegram") and len(items) < 5:
         items.append(
             ActionItem(
                 "مشتری‌های بدون مقصد تلگرام",
@@ -619,7 +803,7 @@ def get_action_items(store, setup_summary, order_metrics, payment_metrics, clien
                 service_workbench_url("needs-telegram", store),
             )
         )
-    if client_metrics.get("needs_attention") and len(items) < 5:
+    if access_allowed(user, "services.view") and client_metrics.get("needs_attention") and len(items) < 5:
         items.append(
             ActionItem(
                 "سرویس‌های نیازمند بررسی",
@@ -628,7 +812,7 @@ def get_action_items(store, setup_summary, order_metrics, payment_metrics, clien
                 service_workbench_url("attention", store),
             )
         )
-    if setup_summary["blocking_cards"] and len(items) < 5:
+    if access_allowed(user, "setup.manage") and setup_summary["blocking_cards"] and len(items) < 5:
         first = setup_summary["blocking_cards"][0]
         items.append(
             ActionItem(
@@ -638,7 +822,7 @@ def get_action_items(store, setup_summary, order_metrics, payment_metrics, clien
                 setup_wizard_url_for_card_key(first.key, store),
             )
         )
-    if len(items) < 5:
+    if access_allowed(user, "setup.manage") and len(items) < 5:
         items.append(
             ActionItem(
                 "Doctor غیرزنده را در سرور اجرا کن",
@@ -650,23 +834,283 @@ def get_action_items(store, setup_summary, order_metrics, payment_metrics, clien
     return items[:5]
 
 
-def get_quick_actions(store=None):
-    return [
-        DashboardLink("میز کار سفارش‌ها", order_workbench_url(store=store)),
-        DashboardLink("میز کار سرویس‌ها", service_workbench_url(store=store)),
-        DashboardLink("میز کار پشتیبانی", support_workbench_url(store=store)),
-        DashboardLink("سفارش‌های در انتظار", order_workbench_url("needs-review", store), tone="warning"),
-        DashboardLink("بررسی رسیدها", order_workbench_url("needs-review", store), tone="warning"),
-        DashboardLink("Setup Wizard", setup_wizard_index_url(store)),
-        DashboardLink("Setup Center", add_query(reverse("admin_store_setup_center"), {"store": getattr(store, "pk", None)})),
-        DashboardLink("مدیریت محصولات", catalog_url(store)),
-        DashboardLink("مدیریت پلن‌ها", changelist_url("store_plan_changelist", store)),
-        DashboardLink("مدیریت routeها", changelist_url("store_planinboundroute_changelist", store)),
-        DashboardLink("BotConfiguration", changelist_url("store_botconfiguration_changelist", store)),
-        DashboardLink("Panel", changelist_url("store_panel_changelist", store)),
-        DashboardLink("RevenueOfferLog", changelist_url("store_revenueofferlog_changelist", store)),
-        DashboardLink("Doctor command", command="/opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --no-fail", tone="secondary"),
+def get_quick_actions(store=None, user=None):
+    actions = []
+
+    def add(capability, link):
+        if access_allowed(user, capability):
+            actions.append(link)
+
+    add("reports.view", DashboardLink("گزارش‌ها و تحلیل", add_query(reverse("admin_store_reports_center"), {"store": getattr(store, "pk", None)}), tone="info"))
+    add("campaigns.view", DashboardLink("کمپین‌ها و پیام‌رسانی", campaign_workbench_url(store=store), tone="info"))
+    add("campaigns.create", DashboardLink("ساخت کمپین", add_query(reverse("admin_store_campaign_new"), {"store": getattr(store, "pk", None)}), tone="primary"))
+    add("orders.view", DashboardLink("میز کار سفارش‌ها", order_workbench_url(store=store)))
+    add("services.view", DashboardLink("میز کار سرویس‌ها", service_workbench_url(store=store)))
+    add("support.view", DashboardLink("میز کار پشتیبانی", support_workbench_url(store=store)))
+    add("orders.view", DashboardLink("سفارش‌های در انتظار", order_workbench_url("needs-review", store), tone="warning"))
+    add("payments.review", DashboardLink("بررسی رسیدها", order_workbench_url("needs-review", store), tone="warning"))
+    add("setup.manage", DashboardLink("Setup Wizard", setup_wizard_index_url(store)))
+    add("setup.manage", DashboardLink("Setup Center", add_query(reverse("admin_store_setup_center"), {"store": getattr(store, "pk", None)})))
+    add("catalog.view", DashboardLink("مدیریت محصولات", catalog_url(store)))
+    add("catalog.manage", DashboardLink("مدیریت پلن‌ها", changelist_url("store_plan_changelist", store)))
+    add("catalog.manage", DashboardLink("مدیریت routeها", changelist_url("store_planinboundroute_changelist", store)))
+    add("setup.manage", DashboardLink("BotConfiguration", changelist_url("store_botconfiguration_changelist", store)))
+    add("panels.view", DashboardLink("Panel", changelist_url("store_panel_changelist", store)))
+    add("revenue.view", DashboardLink("RevenueOfferLog", changelist_url("store_revenueofferlog_changelist", store)))
+    add("staff.manage", DashboardLink("کارکنان و دسترسی‌ها", reverse("admin_store_staff_access"), tone="primary"))
+    add("setup.manage", DashboardLink("Doctor command", command="/opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --no-fail", tone="secondary"))
+    return actions
+
+
+def safe_admin_home_text(value, default="-"):
+    text = str(value or "").strip()
+    if not text:
+        return default
+    for pattern, replacement in SENSITIVE_ADMIN_HOME_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text[:140]
+
+
+def admin_home_url(url_name, store=None):
+    return add_query(reverse(url_name), {"store": getattr(store, "pk", None)})
+
+
+def build_admin_home_workspace_groups(owner_context, user=None):
+    store = owner_context.get("selected_store")
+    order_metrics = owner_context.get("order_metrics", {})
+    client_metrics = owner_context.get("client_metrics", {})
+    support_metrics = owner_context.get("support_metrics", {})
+    campaign_metrics = owner_context.get("campaign_metrics", {})
+    revenue_engine_summary = owner_context.get("revenue_engine_summary", {})
+    setup_summary = owner_context.get("setup_summary", {})
+    groups = [
+        {
+            "key": "daily",
+            "title": "عملیات روزانه",
+            "cards": [
+                {
+                    "key": "orders",
+                    "capability": "orders.view",
+                    "title": "میز کار سفارش‌ها",
+                    "description": "رسیدها، تایید پرداخت و وضعیت تحویل را از یک نمای عملیاتی پیگیری کن.",
+                    "url": order_workbench_url(store=store),
+                    "icon": "fas fa-shopping-bag",
+                    "tone": "blue",
+                    "badge": "در انتظار: {count:,}".format(count=order_metrics.get("pending", 0)),
+                },
+                {
+                    "key": "services",
+                    "capability": "services.view",
+                    "title": "میز کار سرویس‌ها",
+                    "description": "سرویس‌های فعال، در حال انقضا، کم‌ترافیک و نیازمند بررسی.",
+                    "url": service_workbench_url(store=store),
+                    "icon": "fas fa-shield-alt",
+                    "tone": "emerald",
+                    "badge": "فعال: {count:,}".format(count=client_metrics.get("active", 0)),
+                },
+                {
+                    "key": "support",
+                    "capability": "support.view",
+                    "title": "میز کار پشتیبانی",
+                    "description": "گفتگوهای باز و پیام‌های منتظر پاسخ را مرتب و سریع ببین.",
+                    "url": support_workbench_url(store=store),
+                    "icon": "fas fa-headset",
+                    "tone": "amber",
+                    "badge": "منتظر پاسخ: {count:,}".format(count=support_metrics.get("needs_reply", 0)),
+                },
+                {
+                    "key": "catalog",
+                    "capability": "catalog.view",
+                    "title": "محصولات و مسیر فروش",
+                    "description": "پلن‌ها، routeها، پنل و inboundهای قابل فروش را مدیریت کن.",
+                    "url": catalog_url(store),
+                    "icon": "fas fa-route",
+                    "tone": "cyan",
+                    "badge": "کاتالوگ",
+                },
+            ],
+        },
+        {
+            "key": "growth",
+            "title": "رشد و مدیریت",
+            "cards": [
+                {
+                    "key": "reports",
+                    "capability": "reports.view",
+                    "title": "گزارش‌ها و تحلیل کسب‌وکار",
+                    "description": "فروش، مشتری، سرویس، مصرف پنل و عملیات را از داده‌های DB ببین.",
+                    "url": admin_home_url("admin_store_reports_center", store),
+                    "icon": "fas fa-chart-line",
+                    "tone": "cyan",
+                    "badge": "تحلیل",
+                },
+                {
+                    "key": "campaigns",
+                    "capability": "campaigns.view",
+                    "title": "کمپین‌ها و پیام‌رسانی",
+                    "description": "ساخت، preview، queue و پایش Broadcast با confirmation صریح.",
+                    "url": campaign_workbench_url(store=store),
+                    "icon": "fas fa-bullhorn",
+                    "tone": "blue",
+                    "badge": "failed: {count:,}".format(count=campaign_metrics.get("failed", 0)),
+                },
+                {
+                    "key": "revenue",
+                    "capability": "revenue.view",
+                    "title": "کنترل درآمد هوشمند",
+                    "description": "dry-run، real-send، guardrailها و وضعیت Revenue Engine.",
+                    "url": admin_home_url("admin_store_revenue_control", store),
+                    "icon": "fas fa-bolt",
+                    "tone": "rose",
+                    "badge": revenue_engine_summary.get("card").value if revenue_engine_summary.get("card") else "",
+                },
+                {
+                    "key": "staff",
+                    "capability": "staff.manage",
+                    "title": "کارکنان و دسترسی‌ها",
+                    "description": "نقش‌های آماده، دسترسی‌ها، ساخت کارمند و audit تغییرات.",
+                    "url": reverse("admin_store_staff_access"),
+                    "icon": "fas fa-user-shield",
+                    "tone": "emerald",
+                    "badge": "P11",
+                },
+                {
+                    "key": "backups",
+                    "capability": "backup.view",
+                    "title": "پشتیبان‌گیری و انتقال سرور",
+                    "description": "Backup امن، Upload، Validate و تولید دستور Restore بدون اجرای مستقیم در request.",
+                    "url": reverse("admin_store_backup_center"),
+                    "icon": "fas fa-database",
+                    "tone": "amber",
+                    "badge": "PostgreSQL",
+                },
+            ],
+        },
+        {
+            "key": "setup",
+            "title": "راه‌اندازی و وضعیت نصب",
+            "cards": [
+                {
+                    "key": "setup_wizard",
+                    "capability": "setup.manage",
+                    "title": "راه‌اندازی مرحله‌ای",
+                    "description": "Store، تلگرام، پنل، پلن‌ها، پرداخت و routeها را قدم‌به‌قدم کامل کن.",
+                    "url": setup_wizard_index_url(store),
+                    "icon": "fas fa-tasks",
+                    "tone": "emerald",
+                    "badge": "Wizard",
+                },
+                {
+                    "key": "setup_center",
+                    "capability": "setup.manage",
+                    "title": "وضعیت نصب / Setup Center",
+                    "description": "وضعیت ذخیره‌شده نصب و هشدارهای بدون live check را ببین.",
+                    "url": admin_home_url("admin_store_setup_center", store),
+                    "icon": "fas fa-tools",
+                    "tone": "amber",
+                    "badge": setup_summary.get("card").value if setup_summary.get("card") else "",
+                },
+                {
+                    "key": "receipt_cards",
+                    "capability": "payments.review",
+                    "title": "گزارش دریافتی کارت‌ها",
+                    "description": "جمع رسیدهای ثبت‌شده را با فیلتر بازه زمانی بررسی کن.",
+                    "url": reverse("admin_card_receipts_report"),
+                    "icon": "fas fa-receipt",
+                    "tone": "blue",
+                    "badge": "پرداخت",
+                },
+            ],
+        },
     ]
+    for group in groups:
+        group["cards"] = [card for card in group["cards"] if access_allowed(user, card.get("capability"))]
+    return [group for group in groups if group["cards"]]
+
+
+def build_admin_home_kpis(owner_context, user=None):
+    cards = []
+    metric_map = {card.key: card for card in owner_context.get("metric_cards", [])}
+
+    def add(key, label, description, icon, tone, url):
+        card = metric_map.get(key)
+        if card:
+            cards.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "value": card.value,
+                    "description": description or card.subtitle,
+                    "icon": icon,
+                    "tone": tone,
+                    "url": url,
+                }
+            )
+
+    store = owner_context.get("selected_store")
+    add("orders_today", "سفارش‌های امروز", "وضعیت سفارش‌های امروز و موارد نیازمند پیگیری", "fas fa-calendar-day", "blue", order_workbench_url("today", store))
+    add("payments", "پرداخت/SMS تطبیق‌نیافته", "رسیدها و پیامک‌های پرداخت نیازمند بررسی", "fas fa-sms", "amber", order_workbench_url("needs-review", store))
+    add("active_services", "سرویس‌های فعال", "سرویس‌های فعال، در حال انقضا و نیازمند رسیدگی", "fas fa-shield-alt", "emerald", service_workbench_url("active", store))
+    add("revenue", "درآمد امروز", "درآمد paid/completed امروز از DB", "fas fa-chart-pie", "cyan", admin_home_url("admin_store_reports_center", store) + "#sales")
+    if len(cards) < 4:
+        add("support", "پشتیبانی", "گفتگوهای باز و منتظر پاسخ", "fas fa-comments", "amber", support_workbench_url(store=store))
+    return cards[:6]
+
+
+def build_admin_home_recent_actions(user, limit=8):
+    if not user or not getattr(user, "is_authenticated", False):
+        return []
+    entries = (
+        LogEntry.objects.filter(user=user)
+        .select_related("content_type", "user")
+        .order_by("-action_time")[:limit]
+    )
+    actions = []
+    for entry in entries:
+        if entry.is_addition():
+            label, tone, icon = "ایجاد", "emerald", "fas fa-plus"
+        elif entry.is_change():
+            label, tone, icon = "ویرایش", "blue", "fas fa-pen"
+        elif entry.is_deletion():
+            label, tone, icon = "حذف", "rose", "fas fa-trash"
+        else:
+            label, tone, icon = "فعالیت", "slate", "fas fa-clock"
+        actions.append(
+            {
+                "label": label,
+                "tone": tone,
+                "icon": icon,
+                "object": safe_admin_home_text(entry.object_repr),
+                "model": safe_admin_home_text(getattr(entry.content_type, "name", "")),
+                "actor": safe_admin_home_text(getattr(entry.user, "username", "")),
+                "time": format_jalali_datetime(entry.action_time),
+                "url": "" if entry.is_deletion() else (entry.get_admin_url() or ""),
+            }
+        )
+    return actions
+
+
+def get_admin_home_context(user=None, selected_store_id=None):
+    owner_context = get_owner_dashboard_context(user=user, selected_store_id=selected_store_id)
+    setup_card = owner_context["setup_summary"]["card"]
+    if owner_context["setup_summary"]["blocking_cards"]:
+        status_label, status_tone = "راه‌اندازی ناقص", "rose"
+    elif owner_context["action_items"]:
+        status_label, status_tone = "نیازمند اقدام", "amber"
+    else:
+        status_label, status_tone = "آماده", "emerald"
+    return {
+        **owner_context,
+        "admin_home_status": {
+            "label": status_label,
+            "tone": status_tone,
+            "description": setup_card.subtitle,
+        },
+        "admin_home_today": format_jalali_date(timezone.localdate()),
+        "admin_home_kpis": build_admin_home_kpis(owner_context, user=user),
+        "admin_home_workspace_groups": build_admin_home_workspace_groups(owner_context, user=user),
+        "admin_home_recent_actions": build_admin_home_recent_actions(user),
+    }
 
 
 def get_owner_dashboard_context(user=None, selected_store_id=None):
@@ -680,10 +1124,12 @@ def get_owner_dashboard_context(user=None, selected_store_id=None):
     telegram_summary = get_telegram_summary(selected_store)
     revenue_engine_summary = get_revenue_engine_summary(selected_store)
     support_metrics = get_support_metrics(selected_store)
+    campaign_metrics = get_campaign_metrics(selected_store)
 
     metric_cards = [
         setup_summary["card"],
         order_metrics["card"],
+        campaign_metrics["card"],
         support_metrics["card"],
         payment_metrics["card"],
         revenue_metrics["card"],
@@ -691,6 +1137,23 @@ def get_owner_dashboard_context(user=None, selected_store_id=None):
         panel_summary["card"],
         telegram_summary["card"],
         revenue_engine_summary["card"],
+    ]
+    card_capabilities = {
+        "setup_status": "setup.manage",
+        "orders_today": "orders.view",
+        "campaigns": "campaigns.view",
+        "support": "support.view",
+        "payments": "payments.review",
+        "revenue": "reports.view",
+        "active_services": "services.view",
+        "panel_health": "panels.view",
+        "telegram": "setup.manage",
+        "revenue_engine": "revenue.view",
+    }
+    metric_cards = [
+        card
+        for card in metric_cards
+        if access_allowed(user, card_capabilities.get(card.key))
     ]
     return {
         "stores": stores,
@@ -705,6 +1168,7 @@ def get_owner_dashboard_context(user=None, selected_store_id=None):
         "telegram_summary": telegram_summary,
         "revenue_engine_summary": revenue_engine_summary,
         "support_metrics": support_metrics,
+        "campaign_metrics": campaign_metrics,
         "action_items": get_action_items(
             selected_store,
             setup_summary,
@@ -714,7 +1178,9 @@ def get_owner_dashboard_context(user=None, selected_store_id=None):
             panel_summary,
             telegram_summary,
             support_metrics,
+            campaign_metrics,
+            user=user,
         ),
-        "quick_actions": get_quick_actions(selected_store),
+        "quick_actions": get_quick_actions(selected_store, user=user),
         "generated_at": timezone.now(),
     }

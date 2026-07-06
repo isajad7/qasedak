@@ -65,7 +65,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='order',
             name='order_tracking_code',
-            field=models.CharField(default=store.models.generate_order_tracking, max_length=10, unique=True, verbose_name='کد پیگیری سفارش'),
+            field=models.CharField(default=store.models.generate_order_tracking, max_length=36, unique=True, verbose_name='کد پیگیری سفارش'),
         ),
         migrations.AddField(
             model_name='order',

@@ -1,0 +1,71 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{{ workbench_url }}">کمپین‌ها و پیام‌رسانی</a>
+    &rsaquo; <a href="{{ review_url }}">Campaign Review</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup qadmin-campaigns qadmin-campaign-confirm-page" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Campaign Wizard</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a href="{{ preview_url }}" class="qadmin-action qadmin-action-secondary">Preview</a>
+            <a href="{{ review_url }}" class="qadmin-action qadmin-action-info">Review</a>
+        </div>
+    </section>
+
+    <section class="qadmin-wizard-layout">
+        <nav class="qadmin-wizard-steps" aria-label="Campaign steps">
+            <a href="{{ edit_url }}" class="qadmin-wizard-step"><span>1. Message</span></a>
+            <a href="{{ audience_url }}" class="qadmin-wizard-step"><span>2. Audience</span></a>
+            <a href="{{ preview_url }}" class="qadmin-wizard-step"><span>3. Preview</span></a>
+            <span class="qadmin-wizard-step is-current"><span>4. Confirm</span><strong>اکنون</strong></span>
+        </nav>
+
+        <section class="qadmin-danger-box qadmin-confirm-box">
+            <h2>تایید جدی queue</h2>
+            <p>این action پیام را در همین request ارسال نمی‌کند، اما recipientها را می‌سازد و کمپین را برای processor آماده می‌کند.</p>
+            <dl class="qadmin-review-grid">
+                <div><dt>Campaign</dt><dd>#{{ campaign.pk }} - {{ campaign.title }}</dd></div>
+                <div><dt>Status</dt><dd>{{ campaign.get_status_display }}</dd></div>
+                <div><dt>Audience</dt><dd>{{ preview.audience_label }}</dd></div>
+                <div><dt>Targetable</dt><dd>{{ preview.targetable }}</dd></div>
+                <div><dt>Missing target</dt><dd>{{ preview.missing_target }}</dd></div>
+                <div><dt>Duplicates removed</dt><dd>{{ preview.duplicates_removed }}</dd></div>
+                <div><dt>BotConfiguration</dt><dd>{{ preview.bot_config_label }}</dd></div>
+            </dl>
+            {% if preview.warnings %}
+                {% for warning in preview.warnings %}<p>{{ warning }}</p>{% endfor %}
+            {% endif %}
+
+            <form method="post" class="qadmin-action-form qadmin-danger-form" data-confirm-phrase="{{ confirmation_phrase }}">
+                {% csrf_token %}
+                <label for="campaign-confirmation">عبارت تایید</label>
+                <code class="qadmin-command">{{ confirmation_phrase }}</code>
+                <input id="campaign-confirmation" type="text" name="confirmation" autocomplete="off" required>
+                <button id="campaign-confirm-submit" type="submit" class="qadmin-button qadmin-button-danger" {% if not preview.targetable or campaign.status != "draft" %}disabled{% endif %}>
+                    Queue campaign
+                </button>
+            </form>
+        </section>
+    </section>
+</div>
+<script src="{% static 'admin/qasedak_campaigns.js' %}"></script>
+{% endblock %}

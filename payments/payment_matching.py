@@ -1,5 +1,6 @@
 from datetime import timedelta
 from html import escape
+import logging
 
 from django.db import transaction
 from django.utils import timezone
@@ -10,6 +11,7 @@ from store.models import BotEventLog, Order
 from .models import IncomingPaymentSMS
 
 
+logger = logging.getLogger(__name__)
 MATCH_WINDOW_BEFORE = timedelta(minutes=30)
 MATCH_WINDOW_AFTER = timedelta(minutes=15)
 PENDING_ORDER_STATUSES = (
@@ -136,6 +138,13 @@ def confirm_incoming_payment_sms(payment_sms, *, order=None, user=None):
         payment_sms.status = IncomingPaymentSMS.Status.CONFIRMED
         payment_sms.save(update_fields=["status"])
         payment_sms.matched_orders.add(order)
+
+    try:
+        from store.provisioning_services import approve_and_provision_order
+
+        approve_and_provision_order(order, actor=user, source="sms_auto_match", notify=True)
+    except Exception:
+        logger.exception("SMS payment provisioning hook failed order_id=%s sms_id=%s", order.pk, payment_sms.pk)
 
     return order
 

@@ -62,6 +62,7 @@ from .referral_services import (
     get_referral_summary,
     redeem_referral_rewards,
 )
+from .setup_readiness import SETUP_NOT_READY_MESSAGE, store_is_sellable
 from .telegram_link_services import (
     generate_web_telegram_link,
     get_customer_telegram_link_status,
@@ -378,6 +379,8 @@ def build_home_context(
         "referral_code": referral_code,
         "order_update_error": order_update_error,
         "order_update_saved": order_update_saved,
+        "setup_not_ready": bool(store and not store_is_sellable(store)),
+        "setup_not_ready_message": SETUP_NOT_READY_MESSAGE if store and not store_is_sellable(store) else "",
         "scroll_to": scroll_to,
     }
 
@@ -448,6 +451,25 @@ def home(request):
             scroll_to = "confirmation"
 
     if request.method == "POST":
+        if store and not store_is_sellable(store):
+            return render(
+                request,
+                "home.html",
+                build_home_context(
+                    store=store,
+                    plans=Plan.objects.none(),
+                    operators=operators,
+                    selected_operator=selected_operator,
+                    selected_plan_id=request.POST.get("plan_id", ""),
+                    checkout_error=SETUP_NOT_READY_MESSAGE,
+                    payment_time=current_payment_time_value(),
+                    discount_code=request.POST.get("discount_code", ""),
+                    quantity=request.POST.get("quantity", "1"),
+                    custom_volume_gb=request.POST.get("custom_volume_gb", "").strip(),
+                    referral_code=request.POST.get("referral_code", "") or referral_code,
+                    scroll_to="plans",
+                ),
+            )
         selected_operator_id = request.POST.get("operator_id", "")
         selected_operator = get_active_operator(store, selected_operator_id) if operator_based else None
         plans = get_store_plans(store, selected_operator if operator_based else None)
@@ -1037,7 +1059,10 @@ def renew_config(request, config_id):
         VPNClient.objects.select_related("plan", "store", "order", "order__store", "inbound", "inbound__panel"),
         public_id=config_id,
         order__customer=customer,
+        deleted_at__isnull=True,
     )
+    if vpn_client.status == VPNClient.Status.DELETED:
+        raise Http404("Config not found.")
     if Order.objects.filter(
         customer=customer,
         metadata__renewal_client_pk=vpn_client.pk,

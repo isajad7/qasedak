@@ -20,13 +20,26 @@
 <div class="qadmin-setup qadmin-service-workbench" dir="rtl">
     <section class="qadmin-hero qadmin-service-hero">
         <div>
-            <p class="qadmin-eyebrow">Service Workbench</p>
+            <p class="qadmin-eyebrow">میز کار سرویس‌ها</p>
             <h1>{{ title }}</h1>
             <p>{{ subtitle }}</p>
         </div>
         <div class="qadmin-hero-actions">
             <a href="{% url 'admin_store_owner_dashboard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-secondary">داشبورد</a>
+            <a href="{% url 'admin_store_reports_center' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}#services" class="qadmin-action qadmin-action-info">گزارش سرویس‌ها</a>
             <a href="{% url 'admin:store_vpnclient_changelist' %}" class="qadmin-action qadmin-action-info">لیست ادمین</a>
+            {% if can_modify_services %}
+                <form method="post" action="{{ reconcile_url }}" class="qadmin-inline-form">
+                    {% csrf_token %}
+                    <input type="hidden" name="confirm_reconcile" value="1">
+                    <button type="submit" class="qadmin-action">بررسی سرویس‌ها با پنل</button>
+                </form>
+                <form method="post" action="{{ bulk_cleanup_url }}" class="qadmin-inline-form">
+                    {% csrf_token %}
+                    <input type="hidden" name="confirm_bulk_soft_delete" value="{{ bulk_cleanup_confirmation }}">
+                    <button type="submit" class="qadmin-action qadmin-action-danger" {% if not bulk_cleanup_enabled %}disabled{% endif %}>پاک‌سازی سرویس‌های حذف‌شده</button>
+                </form>
+            {% endif %}
         </div>
     </section>
 
@@ -34,6 +47,10 @@
         <div>
             <strong>فروشگاه:</strong>
             {% if selected_store %}{{ selected_store.name }}{% else %}همه فروشگاه‌ها{% endif %}
+        </div>
+        <div>
+            <strong>آخرین بررسی پنل:</strong>
+            {% if reconciliation_summary.latest_check_at %}{{ reconciliation_summary.latest_check_at|date:"Y-m-d H:i" }}{% else %}هنوز انجام نشده{% endif %}
         </div>
         {% if stores|length > 1 %}
             <form method="get" class="qadmin-store-switcher">
@@ -65,6 +82,25 @@
         <div><strong>{{ summary_counts.attention }}</strong><span>نیازمند بررسی</span></div>
     </section>
 
+    <section class="qadmin-order-summary">
+        <div><strong>{{ reconciliation_summary.remote_active }}</strong><span>فعال در پنل</span></div>
+        <div><strong>{{ reconciliation_summary.remote_disabled }}</strong><span>غیرفعال در پنل</span></div>
+        <div><strong>{{ reconciliation_summary.remote_missing }}</strong><span>حذف‌شده از پنل</span></div>
+        <div><strong>{{ reconciliation_summary.unknown_or_error }}</strong><span>نامشخص / خطای پنل</span></div>
+        <div><strong>{{ reconciliation_summary.ambiguous }}</strong><span>scope مبهم</span></div>
+        <div><strong>{{ reconciliation_summary.checked }}</strong><span>بررسی‌شده</span></div>
+        <div><strong>{{ reconciliation_summary.not_checked }}</strong><span>بررسی‌نشده</span></div>
+    </section>
+
+    <section class="qadmin-service-tabs">
+        {% for filter in remote_filters %}
+            <a href="{{ filter.url }}" class="qadmin-order-tab {% if filter.active %}qadmin-status-primary{% else %}qadmin-status-secondary{% endif %}">
+                <span>{{ filter.label }}</span>
+                <strong>{{ filter.count }}</strong>
+            </a>
+        {% endfor %}
+    </section>
+
     {% for section in sections %}
         <section id="{{ section.key }}" class="qadmin-order-section qadmin-status-{{ section.tone }}">
             <header class="qadmin-order-section-header">
@@ -87,6 +123,7 @@
                             <th>مشتری</th>
                             <th>پلن / مسیر</th>
                             <th>وضعیت</th>
+                            <th>وضعیت در پنل</th>
                             <th>انقضا / مصرف</th>
                             <th>تحویل</th>
                             <th>اقدام</th>
@@ -112,6 +149,11 @@
                                     <small><span class="qadmin-badge qadmin-badge-{{ item.route_tone }}">{{ item.route_label }}</span></small>
                                 </td>
                                 <td>
+                                    <span class="qadmin-badge qadmin-badge-{{ item.remote_status_tone }}">{{ item.remote_status_label }}</span>
+                                    <small>{% if item.last_remote_check_at %}{{ item.last_remote_check_at|date:"Y-m-d H:i" }}{% else %}بدون بررسی{% endif %}</small>
+                                    {% if item.remote_check_error %}<small>{{ item.remote_check_error }}</small>{% endif %}
+                                </td>
+                                <td>
                                     {% if item.expires_at %}{{ item.expires_at|date:"Y-m-d H:i" }}{% else %}بدون تاریخ{% endif %}
                                     <small>{{ item.days_left_label }}</small>
                                     <div class="qadmin-usage-bar"><span style="width: {{ item.usage.percent }}%"></span></div>
@@ -122,10 +164,20 @@
                                     <small>اشتراک: {% if item.has_subscription_link %}مخفی/موجود{% else %}ندارد{% endif %}</small>
                                     <small>مستقیم: {% if item.has_direct_link %}مخفی/موجود{% else %}ندارد{% endif %}</small>
                                 </td>
-                                <td><a href="{{ item.review_url }}" class="qadmin-action">Review</a></td>
+                                <td>
+                                    <a href="{{ item.review_url }}" class="qadmin-action">بررسی</a>
+                                    {% if can_modify_services and item.remote_cleanup_eligible %}
+                                        <form method="post" action="{{ item.soft_delete_missing_url }}" class="qadmin-action-form qadmin-danger-form">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="confirm_soft_delete" value="{{ bulk_cleanup_confirmation }}">
+                                            <button type="submit" class="qadmin-button qadmin-button-danger">حذف نرم از قاصدک</button>
+                                            <small>سرویس از لیست فعال خارج می‌شود، اما سفارش، مشتری و سوابق آن حفظ می‌شوند.</small>
+                                        </form>
+                                    {% endif %}
+                                </td>
                             </tr>
                         {% empty %}
-                            <tr><td colspan="7" class="qadmin-empty-cell">موردی در این صف نیست.</td></tr>
+                            <tr><td colspan="8" class="qadmin-empty-cell">موردی در این صف نیست.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>

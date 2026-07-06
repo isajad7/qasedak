@@ -13,12 +13,13 @@ The installer asks for the needed basics:
 - server public IP
 - TLS when a domain is available
 - admin username/email/password
-- SQLite database path
+- database engine (`postgres` by default, `sqlite` optional)
+- PostgreSQL database/user details, or SQLite database path
 - systemd
 - nginx
 - non-live doctor check
 
-It also installs Python 3.12/venv if the server Python is older.
+It also installs Python 3.12/venv if the server Python is older. In PostgreSQL mode it installs `postgresql`, `postgresql-client`, and `libpq-dev`, generates a database password, stores it only in `.env`, creates the role/database idempotently, and redacts the password from the summary. SQLite remains supported for development, tests, small installs, and fallback.
 If an old/partial install exists, it warns before doing anything destructive.
 At the end, it prints the admin panel URL, username, and password.
 
@@ -28,19 +29,33 @@ Default install directory:
 /opt/qasedak
 ```
 
-After install, open Django Admin and start from the owner dashboard:
+After install, open Django Admin and start from the responsive Qasedak admin home dashboard:
+
+```text
+/admin/
+```
+
+The detailed owner dashboard is also available at:
 
 ```text
 /admin/store/dashboard/
 ```
 
-The dashboard shows the overall state and action items from DB/log data only. It does not replace `doctor.sh`.
+The dashboards show the overall state and action items from DB/log data only. They do not replace `doctor.sh`.
 
 Use the Setup Center to complete the installation:
 
 ```text
 /admin/store/setup/
 ```
+
+Before importing production data or moving servers, open the Backup & Restore Center:
+
+```text
+/admin/store/backups/
+```
+
+Create backups there, upload migration packages there, validate restore compatibility there, and run the generated restore command over SSH. Admin validation is safe; destructive restore apply is not performed inside a web request.
 
 For the shortest owner-facing setup path, use the guided wizard:
 
@@ -65,6 +80,8 @@ curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/instal
 ```bash
 curl -fsSL https://raw.githubusercontent.com/isajad7/qasedak/main/scripts/install_from_github.sh | sudo bash -s -- --config /root/install.config.json
 ```
+
+The public config example uses `database.engine=postgres` with `database.postgres.password_env` instead of a raw password. Put real secrets in the runtime environment or let the installer generate them into `.env`.
 
 ## Doctor
 

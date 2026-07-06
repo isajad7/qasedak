@@ -27,6 +27,7 @@ on_error() {
   if [[ -n "$CURRENT_BACKUP" ]]; then
     printf 'A pre-update backup is available at: %s\n' "$CURRENT_BACKUP" >&2
     printf 'Manual rollback guidance: docs/UPGRADE.md and docs/BACKUP.md\n' >&2
+    printf 'For PostgreSQL restores, use the custom-format dump with pg_restore after a fresh pre-restore backup.\n' >&2
   fi
 }
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
@@ -66,6 +67,7 @@ die() {
   if [[ -n "$CURRENT_BACKUP" ]]; then
     printf 'A pre-update backup is available at: %s\n' "$CURRENT_BACKUP" >&2
     printf 'Manual rollback guidance: docs/UPGRADE.md and docs/BACKUP.md\n' >&2
+    printf 'For PostgreSQL restores, use the custom-format dump with pg_restore after a fresh pre-restore backup.\n' >&2
   fi
   exit 1
 }
@@ -280,6 +282,7 @@ print_plan() {
   log "  source dir: $SOURCE_DIR"
   log "  backup dir: $BACKUP_DIR"
   log "  backup required: $([[ "$SKIP_BACKUP" == "1" ]] && printf 'skipped only after dangerous confirmation' || printf yes)"
+  log "  backup mode: engine-aware via backup.sh (SQLite .backup or PostgreSQL pg_dump -Fc)"
   log "  rsync excludes runtime, secrets, venvs, caches, backups, logs, and node_modules"
   log "  restart services: $([[ "$RESTART" == "1" ]] && printf yes || printf no)"
   log "  run tests: $([[ "$RUN_TESTS" == "1" ]] && printf yes || printf no)"

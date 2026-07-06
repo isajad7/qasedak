@@ -9,6 +9,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from .config_lookup import mask_identifier
+from .db_locking import select_for_update_self
 from .jalali import format_jalali_datetime, persian_digits
 from .models import Customer, FreeTrialRequest, Inbound, Order, Panel, VPNClient, VPNClientActionLog
 from .xui_api import (
@@ -261,8 +262,7 @@ def mark_local_vpn_client_deleted(
 ):
     with transaction.atomic():
         locked = (
-            VPNClient.objects.select_for_update()
-            .select_related("order", "order__customer", "inbound", "inbound__panel")
+            select_for_update_self(VPNClient.objects.select_related("order", "order__customer", "inbound", "inbound__panel"))
             .get(pk=vpn_client.pk)
         )
         old_direct_link = locked.direct_link or ""
@@ -378,7 +378,14 @@ def _lookup_panel_inbound(payload):
     panel = Panel.objects.filter(pk=payload.get("panel_id"), is_active=True).first()
     if not panel:
         raise VPNClientManagementError("پنل این کانفیگ در دسترس نیست.")
-    inbound = Inbound.objects.filter(panel=panel, inbound_id=payload.get("inbound_id")).first()
+    inbound_qs = Inbound.objects.filter(panel=panel, inbound_id=payload.get("inbound_id"))
+    node_id = str(payload.get("node_id") or payload.get("xui_node_id") or "").strip()
+    if node_id:
+        inbound_qs = inbound_qs.filter(xui_node_id=node_id)
+    inbound_matches = list(inbound_qs.order_by("pk")[:2])
+    if len(inbound_matches) > 1:
+        raise VPNClientManagementError("Inbound این کانفیگ بدون node scope دقیق مبهم است.")
+    inbound = inbound_matches[0] if inbound_matches else None
     if not inbound:
         raise VPNClientManagementError("Inbound این کانفیگ پیدا نشد.")
     identifier = str(payload.get("identifier") or "").strip()
@@ -784,7 +791,7 @@ def refresh_vpn_client_link_by_admin(admin_telegram_id, lookup_token_or_result):
         metadata={"source": "admin_lookup_refresh_link", "local_match_status": local_match.status},
     )
     try:
-        details = build_config_link_for_identifier(panel, inbound.inbound_id, identifier)
+        details = build_config_link_for_identifier(panel, inbound.inbound_id, identifier, inbound=inbound)
     except Exception as exc:
         _complete_action_log(log, status=VPNClientActionLog.Status.FAILED, error_message=str(exc))
         raise VPNClientManagementError("دریافت لینک به‌روز انجام نشد.") from exc

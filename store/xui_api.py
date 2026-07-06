@@ -9,6 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from urllib.parse import parse_qsl, quote, urlencode, urlparse
 
 import requests
@@ -17,6 +18,22 @@ from django.core.cache import cache
 from django.utils import timezone
 
 from .naming import build_client_display_name, build_xui_client_email
+from .xui_compat import (
+    PROFILE_MODERN_MULTI_NODE,
+    PROFILE_MODERN_SINGLE_NODE,
+    assert_precise_client_scope,
+    build_remote_client_key,
+    classify_xui_error,
+    detect_xui_version,
+    discover_xui_capabilities,
+    get_xui_adapter,
+    inbound_remote_key,
+    normalize_client,
+    normalize_inbound,
+    normalize_node,
+    normalize_usage,
+)
+from .xui_compat.errors import XUIAmbiguousScopeError, XUICompatibilityError, XUIUnknownSafeModeError
 
 logger = logging.getLogger(__name__)
 
@@ -528,6 +545,13 @@ def sanitize_xui_operational_text(value, *, panel=None, max_length=500):
         if secret:
             text = text.replace(secret, "<redacted>")
     text = re.sub(r"https?://[^\s<>()]+", "<url-redacted>", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:vless|vmess|trojan|ss|ssr)://[^\s<>()]+", "<config-link-redacted>", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+        lambda match: mask_xui_value(match.group(0)),
+        text,
+        flags=re.IGNORECASE,
+    )
     if len(text) > max_length:
         text = f"{text[:max_length - 1]}..."
     return text
@@ -623,6 +647,8 @@ def normalize_xui_usage_client(*, inbound, inbound_data, client, stats, online_c
     return {
         "inbound_id": getattr(inbound, "pk", None),
         "remote_inbound_id": getattr(inbound, "inbound_id", None),
+        "node_id": getattr(inbound, "xui_node_id", "") or "",
+        "remote_key": inbound_remote_key(inbound, panel=getattr(inbound, "panel", None)),
         "identifier_hash": identifier_hash,
         "identifier_masked": mask_xui_value(identifier),
         "email_masked": mask_xui_value(email),
@@ -640,6 +666,8 @@ def normalize_xui_usage_client(*, inbound, inbound_data, client, stats, online_c
             "has_usage_stats": stats_available,
             "last_online_at": last_online_at.isoformat() if last_online_at else "",
             "remote_inbound_id": getattr(inbound, "inbound_id", None),
+            "node_id": getattr(inbound, "xui_node_id", "") or "",
+            "remote_key": inbound_remote_key(inbound, panel=getattr(inbound, "panel", None)),
         },
     }
 
@@ -748,6 +776,235 @@ class XUIService:
             connect_timeout = min(5, self.timeout_seconds)
             self.login_timeout = (connect_timeout, self.timeout_seconds)
 
+    def _inbound_id(self, inbound_or_id):
+        return getattr(inbound_or_id, "inbound_id", inbound_or_id)
+
+    def _inbound_cache_key(self, inbound_or_id):
+        if hasattr(inbound_or_id, "inbound_id"):
+            scope = inbound_remote_key(inbound_or_id, panel=self.panel)
+            pk = getattr(inbound_or_id, "pk", "") or ""
+            return f"xui:inbound:{self.panel.pk}:{pk}:{scope}"
+        return f"xui:inbound:{self.panel.pk}:legacy:{inbound_or_id}"
+
+    def _assert_precise_scope(self, inbound, identifier="", *, operation="read", allow_multi_scope=False):
+        return assert_precise_client_scope(
+            self.panel,
+            inbound,
+            identifier,
+            operation=operation,
+            allow_multi_scope=allow_multi_scope,
+        )
+
+    def _compat_profile(self, *, live=False, write=False):
+        if live:
+            return discover_xui_capabilities(self.panel, live=True, service=self, write=write, use_cache=False)
+        return get_xui_adapter(self.panel).profile
+
+    def _uses_modern_client_api(self):
+        return self._compat_profile().profile in {PROFILE_MODERN_SINGLE_NODE, PROFILE_MODERN_MULTI_NODE}
+
+    def _endpoint_missing(self, exc):
+        text = str(exc or "").lower()
+        return "http 404" in text or "404" == text.strip() or "not found" in text or "no route" in text
+
+    def _ensure_success(self, response, default_message):
+        if not isinstance(response, dict):
+            raise XUIError(default_message)
+        if not response.get("success"):
+            raise XUIError(response.get("msg") or default_message)
+        return response
+
+    def _modern_client_attachments(self, email):
+        email = str(email or "").strip()
+        if not email:
+            return []
+        data = self.authenticated_json("GET", f"/panel/api/clients/get/{quote(email, safe='')}")
+        self._ensure_success(data, "Client attachment lookup failed.")
+        obj = data.get("obj") or {}
+        inbound_ids = obj.get("inboundIds") or obj.get("inbound_ids") or []
+        if not isinstance(inbound_ids, list):
+            return []
+        cleaned = []
+        for inbound_id in inbound_ids:
+            try:
+                cleaned.append(int(inbound_id))
+            except (TypeError, ValueError):
+                continue
+        return cleaned
+
+    def _assert_modern_email_single_attachment(self, inbound, email, *, operation, allow_multi_scope=False):
+        if allow_multi_scope:
+            return
+        inbound_ids = self._modern_client_attachments(email)
+        if inbound_ids and inbound_ids != [int(inbound.inbound_id)]:
+            raise XUIAmbiguousScopeError(
+                f"Modern 3X-UI {operation} is email-wide; client is attached to multiple inbounds."
+            )
+        if not inbound_ids:
+            raise XUIAmbiguousScopeError(
+                f"Modern 3X-UI {operation} scope could not be verified from client attachments."
+            )
+
+    def _post_legacy_client_create(self, inbound, client_data):
+        payload = {
+            "id": inbound.inbound_id,
+            "settings": json.dumps({"clients": [client_data]}),
+        }
+        response = self.request_json(
+            "POST",
+            "/panel/api/inbounds/addClient",
+            json=payload,
+            headers={"Accept": "application/json"},
+        )
+        return self._ensure_success(response, "Could not add client to panel.")
+
+    def _post_modern_client_create(self, inbound, client_data):
+        if client_data.get("enable") is False:
+            raise XUICompatibilityError(
+                "Official 3X-UI client API cannot safely create a disabled client; refusing create-inactive."
+            )
+        response = self.authenticated_json(
+            "POST",
+            "/panel/api/clients/add",
+            json={"client": client_data, "inboundIds": [int(inbound.inbound_id)]},
+            headers={"Accept": "application/json"},
+        )
+        return self._ensure_success(response, "Could not add client to panel.")
+
+    def _post_client_create(self, inbound, client_data):
+        if self._uses_modern_client_api():
+            return self._post_modern_client_create(inbound, client_data)
+        try:
+            return self._post_legacy_client_create(inbound, client_data)
+        except Exception as exc:
+            if not self._endpoint_missing(exc):
+                raise
+            profile = self._compat_profile(live=True, write=True)
+            if profile.profile in {PROFILE_MODERN_SINGLE_NODE, PROFILE_MODERN_MULTI_NODE}:
+                return self._post_modern_client_create(inbound, client_data)
+            raise
+
+    def _post_legacy_client_update(self, inbound, api_identifier, client_data):
+        response = self.authenticated_json(
+            "POST",
+            f"/panel/api/inbounds/updateClient/{quote(api_identifier, safe='')}",
+            data={
+                "id": inbound.inbound_id,
+                "settings": json.dumps({"clients": [client_data]}),
+            },
+        )
+        return self._ensure_success(response, "Panel rejected client update.")
+
+    def _post_modern_client_update(self, inbound, client_data, *, email=""):
+        email = str(email or client_data.get("email") or "").strip()
+        if not email:
+            raise XUIError("Client email is required for modern 3X-UI update.")
+        query = urlencode({"inboundIds": str(inbound.inbound_id)})
+        response = self.authenticated_json(
+            "POST",
+            f"/panel/api/clients/update/{quote(email, safe='')}?{query}",
+            json=client_data,
+            headers={"Accept": "application/json"},
+        )
+        return self._ensure_success(response, "Panel rejected client update.")
+
+    def _post_client_update(self, inbound, api_identifier, client_data, *, email=""):
+        if self._uses_modern_client_api():
+            return self._post_modern_client_update(inbound, client_data, email=email)
+        try:
+            return self._post_legacy_client_update(inbound, api_identifier, client_data)
+        except Exception as exc:
+            if not self._endpoint_missing(exc):
+                raise
+            profile = self._compat_profile(live=True, write=True)
+            if profile.profile in {PROFILE_MODERN_SINGLE_NODE, PROFILE_MODERN_MULTI_NODE}:
+                return self._post_modern_client_update(inbound, client_data, email=email)
+            raise
+
+    def _post_legacy_client_delete(self, inbound, api_identifier):
+        response = self.authenticated_json(
+            "POST",
+            f"/panel/api/inbounds/{inbound.inbound_id}/delClient/{quote(api_identifier, safe='')}",
+            headers={"Accept": "application/json"},
+        )
+        return response
+
+    def _post_modern_client_delete(self, inbound, email, *, keep_traffic=False, allow_multi_scope=False):
+        self._assert_modern_email_single_attachment(
+            inbound,
+            email,
+            operation="delete",
+            allow_multi_scope=allow_multi_scope,
+        )
+        query = urlencode({"keepTraffic": "1" if keep_traffic else "0"})
+        response = self.authenticated_json(
+            "POST",
+            f"/panel/api/clients/del/{quote(email, safe='')}?{query}",
+            headers={"Accept": "application/json"},
+        )
+        return response
+
+    def _post_client_delete(self, inbound, api_identifier, *, email="", allow_multi_scope=False):
+        email = str(email or "").strip()
+        if self._uses_modern_client_api():
+            if not email:
+                raise XUIError("Client email is required for modern 3X-UI delete.")
+            return self._post_modern_client_delete(inbound, email, allow_multi_scope=allow_multi_scope)
+        try:
+            return self._post_legacy_client_delete(inbound, api_identifier)
+        except Exception as exc:
+            if not self._endpoint_missing(exc):
+                raise
+            profile = self._compat_profile(live=True, write=True)
+            if profile.profile in {PROFILE_MODERN_SINGLE_NODE, PROFILE_MODERN_MULTI_NODE}:
+                if not email:
+                    raise XUIError("Client email is required for modern 3X-UI delete.") from exc
+                return self._post_modern_client_delete(inbound, email, allow_multi_scope=allow_multi_scope)
+            raise
+
+    def _post_client_reset_traffic(self, inbound, email, *, allow_multi_scope=False):
+        email = str(email or "").strip()
+        if not email:
+            raise XUIError("Client email is required for traffic reset.")
+        if self._uses_modern_client_api():
+            self._assert_modern_email_single_attachment(
+                inbound,
+                email,
+                operation="traffic reset",
+                allow_multi_scope=allow_multi_scope,
+            )
+            response = self.authenticated_json(
+                "POST",
+                f"/panel/api/clients/resetTraffic/{quote(email, safe='')}",
+                headers={"Accept": "application/json"},
+            )
+            return self._ensure_success(response, "Panel rejected traffic reset.")
+        try:
+            response = self.authenticated_json(
+                "POST",
+                f"/panel/api/inbounds/{inbound.inbound_id}/resetClientTraffic/{quote(email, safe='')}",
+                headers={"Accept": "application/json"},
+            )
+            return self._ensure_success(response, "Panel rejected traffic reset.")
+        except Exception as exc:
+            if not self._endpoint_missing(exc):
+                raise
+            profile = self._compat_profile(live=True, write=True)
+            if profile.profile in {PROFILE_MODERN_SINGLE_NODE, PROFILE_MODERN_MULTI_NODE}:
+                self._assert_modern_email_single_attachment(
+                    inbound,
+                    email,
+                    operation="traffic reset",
+                    allow_multi_scope=allow_multi_scope,
+                )
+                response = self.authenticated_json(
+                    "POST",
+                    f"/panel/api/clients/resetTraffic/{quote(email, safe='')}",
+                    headers={"Accept": "application/json"},
+                )
+                return self._ensure_success(response, "Panel rejected traffic reset.")
+            raise
+
     def login(self):
         if self._logged_in:
             return self.session
@@ -800,13 +1057,14 @@ class XUIService:
         return self.request_json(method, path, **kwargs)
 
     def get_inbound(self, inbound_id, *, use_cache=True):
-        cache_key = f"xui:inbound:{self.panel.pk}:{inbound_id}"
+        remote_inbound_id = self._inbound_id(inbound_id)
+        cache_key = self._inbound_cache_key(inbound_id)
         if use_cache:
             cached = cache.get(cache_key)
             if cached is not None:
                 return cached
 
-        data = self.authenticated_json("GET", f"/panel/api/inbounds/get/{inbound_id}")
+        data = self.authenticated_json("GET", f"/panel/api/inbounds/get/{remote_inbound_id}")
         if not data.get("success"):
             raise XUIError(data.get("msg") or "Inbound was not found on panel.")
         inbound_data = data.get("obj") or {}
@@ -836,15 +1094,16 @@ class XUIService:
 
         for inbound in inbounds:
             try:
-                inbound_data = self.get_inbound(inbound.inbound_id, use_cache=False)
+                inbound_data = self.get_inbound(inbound, use_cache=False)
                 successful_inbound_reads += 1
             except Exception as exc:
-                inbound_errors.append(f"{inbound.inbound_id}: {exc}")
+                safe_error = sanitize_xui_operational_text(exc, panel=self.panel)
+                inbound_errors.append(f"{inbound.inbound_id}: {safe_error}")
                 logger.warning(
                     "Could not read inbound during config lookup panel=%s inbound=%s error=%s",
                     self.panel.pk,
                     inbound.inbound_id,
-                    exc,
+                    safe_error,
                 )
                 continue
 
@@ -863,12 +1122,13 @@ class XUIService:
                 try:
                     traffic = self.get_client_traffic(email, use_cache=False)
                 except Exception as exc:
+                    safe_error = sanitize_xui_operational_text(exc, panel=self.panel)
                     logger.warning(
                         "Could not read client traffic during config lookup panel=%s inbound=%s email=%s error=%s",
                         self.panel.pk,
                         inbound.inbound_id,
                         mask_xui_value(email),
-                        exc,
+                        safe_error,
                     )
                 else:
                     if isinstance(traffic, dict):
@@ -934,6 +1194,9 @@ class XUIService:
                 "panel_name": self.panel.name,
                 "inbound": inbound,
                 "inbound_id": inbound.inbound_id,
+                "node_id": getattr(inbound, "xui_node_id", "") or "",
+                "node_name": getattr(inbound, "xui_node_name", "") or "",
+                "remote_key": inbound_remote_key(inbound, panel=self.panel),
                 "inbound_remark": inbound.remark or inbound_data.get("remark") or "",
                 "protocol": (inbound_data.get("protocol") or inbound.protocol or "").lower(),
                 "identifier": identifier,
@@ -994,19 +1257,57 @@ class XUIService:
             if cached is not None:
                 return cached
 
-        data = self.authenticated_json(
-            "GET",
-            f"/panel/api/inbounds/getClientTraffics/{quote(normalized_email)}",
+        paths = (
+            [f"/panel/api/clients/traffic/{quote(normalized_email, safe='')}"]
+            if self._uses_modern_client_api()
+            else [
+                f"/panel/api/inbounds/getClientTraffics/{quote(normalized_email, safe='')}",
+                f"/panel/api/clients/traffic/{quote(normalized_email, safe='')}",
+            ]
         )
-        if not data.get("success"):
-            raise XUIError(data.get("msg") or "Client traffic was not found.")
+        last_error = None
+        data = None
+        for path in paths:
+            try:
+                data = self.authenticated_json("GET", path)
+                break
+            except Exception as exc:
+                last_error = exc
+                if not self._endpoint_missing(exc):
+                    raise
+                profile = self._compat_profile(live=True, write=True)
+                if profile.profile in {PROFILE_MODERN_SINGLE_NODE, PROFILE_MODERN_MULTI_NODE}:
+                    continue
+                raise
+        if data is None:
+            raise XUIError("Client traffic was not found.") from last_error
+        self._ensure_success(data, "Client traffic was not found.")
         traffic = data.get("obj") or {}
         cache.set(cache_key, traffic, CLIENT_STATS_CACHE_SECONDS)
         return traffic
 
     def get_online_clients(self, *, suppress_errors=True):
+        paths = (
+            ["/panel/api/clients/onlines"]
+            if self._uses_modern_client_api()
+            else ["/panel/api/inbounds/onlines", "/panel/api/clients/onlines"]
+        )
+        data = None
+        last_error = None
         try:
-            data = self.authenticated_json("POST", "/panel/api/inbounds/onlines")
+            for path in paths:
+                try:
+                    data = self.authenticated_json("POST", path)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if not self._endpoint_missing(exc):
+                        raise
+                    profile = self._compat_profile(live=True, write=True)
+                    if profile.profile not in {PROFILE_MODERN_SINGLE_NODE, PROFILE_MODERN_MULTI_NODE}:
+                        raise
+            if data is None:
+                raise XUIError("Online-client endpoint was not available.") from last_error
         except Exception:
             if suppress_errors:
                 return set()
@@ -1029,10 +1330,17 @@ class XUIService:
         sub_port = sub_settings.get("subPort") or 2096
         return f"{parsed_url.scheme}://{hostname}:{sub_port}"
 
-    def build_direct_link(self, *, inbound, inbound_data, client_uuid, client_data, email):
+    def build_direct_link(self, *, inbound, inbound_data, client_uuid, client_data, email, hosts=None):
         resolve_inbound_panel(inbound, self.panel, require_active=False)
         protocol = (inbound_data.get("protocol") or inbound.protocol or "vless").lower()
+        share_strategy = str(inbound_data.get("shareAddrStrategy") or "").strip()
+        share_address = str(inbound_data.get("shareAddr") or "").strip()
+        listen_address = str(inbound_data.get("listen") or "").strip()
         address = inbound.server_ip or urlparse(self.panel.url).hostname or ""
+        if share_strategy == "custom" and share_address:
+            address = share_address
+        elif share_strategy == "listen" and listen_address and listen_address not in {"0.0.0.0", "::", "::0"}:
+            address = listen_address
         port = str(inbound_data.get("port") or inbound.port).strip()
         remark = email or client_data.get("remark") or client_data.get("email") or ""
 
@@ -1040,6 +1348,28 @@ class XUIService:
             stream_settings = json.loads(inbound_data.get("streamSettings") or "{}")
         except (TypeError, ValueError):
             stream_settings = {}
+
+        host = next(
+            (
+                item
+                for item in (hosts or [])
+                if isinstance(item, dict)
+                and not item.get("isDisabled")
+                and not item.get("isHidden")
+                and str(item.get("address") or "").strip()
+            ),
+            None,
+        )
+        if host:
+            address = str(host.get("address") or address).strip()
+            if host.get("port"):
+                port = str(host.get("port"))
+            if host.get("sni"):
+                stream_settings.setdefault("tlsSettings", {})["serverName"] = str(host.get("sni"))
+            if host.get("hostHeader"):
+                stream_settings.setdefault("wsSettings", {}).setdefault("headers", {})["Host"] = str(host.get("hostHeader"))
+            if host.get("path"):
+                stream_settings.setdefault("wsSettings", {})["path"] = str(host.get("path"))
 
         if protocol == "vmess":
             vmess_client = dict(client_data or {})
@@ -1066,22 +1396,39 @@ class XUIService:
             params = inbound.config_params or "type=tcp&security=none"
         return f"vless://{client_uuid}@{address}:{port}?{params}#{quote(email, safe='')}"
 
-    def build_config_link_for_identifier(self, inbound_id, identifier):
+    def get_hosts_for_inbound(self, inbound_id, *, suppress_errors=True):
+        try:
+            data = self.authenticated_json("GET", f"/panel/api/hosts/byInbound/{inbound_id}")
+        except Exception:
+            if suppress_errors:
+                return []
+            raise
+        obj = data.get("obj") if isinstance(data, dict) else []
+        return obj if isinstance(obj, list) else []
+
+    def build_config_link_for_identifier(self, inbound_id, identifier, *, inbound=None, node_id=""):
         from .models import Inbound
 
         identifier = str(identifier or "").strip()
         if not identifier:
             raise XUIError("Client identifier is required.")
 
-        inbound = Inbound.objects.filter(
-            panel=self.panel,
-            inbound_id=inbound_id,
-            is_active=True,
-        ).first()
+        if inbound is None:
+            queryset = Inbound.objects.filter(
+                panel=self.panel,
+                inbound_id=inbound_id,
+                is_active=True,
+            )
+            if node_id:
+                queryset = queryset.filter(xui_node_id=str(node_id))
+            matches = list(queryset.order_by("pk")[:2])
+            if len(matches) > 1:
+                raise XUIAmbiguousScopeError("Inbound lookup is ambiguous without node scope.")
+            inbound = matches[0] if matches else None
         if not inbound:
             raise XUIError("Active inbound was not found for config update.")
 
-        inbound_data = self.get_inbound(inbound.inbound_id, use_cache=False)
+        inbound_data = self.get_inbound(inbound, use_cache=False)
         target_client, target_stats, matched_field, _clients, _client_stats = find_xui_client_and_stats(
             inbound_data,
             identifier,
@@ -1101,12 +1448,14 @@ class XUIService:
         enabled_value = first_xui_value(target_client.get("enable"), target_stats.get("enable"))
         enabled = xui_bool(enabled_value) if enabled_value is not None else True
 
+        hosts = self.get_hosts_for_inbound(inbound.inbound_id)
         direct_link = self.build_direct_link(
             inbound=inbound,
             inbound_data=inbound_data,
             client_uuid=client_secret,
             client_data=target_client,
             email=remark or email,
+            hosts=hosts,
         )
         return {
             "updated_config_link": direct_link,
@@ -1117,6 +1466,8 @@ class XUIService:
             "panel": self.panel,
             "inbound": inbound,
             "inbound_id": inbound.inbound_id,
+            "node_id": getattr(inbound, "xui_node_id", "") or "",
+            "remote_key": inbound_remote_key(inbound, panel=self.panel),
             "matched_field": matched_field,
             "config_link_updated": True,
         }
@@ -1126,7 +1477,7 @@ class XUIService:
         identifier = str(identifier or "").strip()
         if not identifier:
             raise XUIError("Client identifier is required.")
-        inbound_data = self.get_inbound(inbound.inbound_id, use_cache=False)
+        inbound_data = self.get_inbound(inbound, use_cache=False)
         target_client, target_stats, matched_field, clients, client_stats = find_xui_client_and_stats(
             inbound_data,
             identifier,
@@ -1150,7 +1501,7 @@ class XUIService:
         return str(identifier or "").strip()
 
     def _clear_client_caches(self, inbound, client_data=None, email=""):
-        cache.delete(f"xui:inbound:{self.panel.pk}:{inbound.inbound_id}")
+        cache.delete(self._inbound_cache_key(inbound))
         for value in {email, (client_data or {}).get("email")}:
             value = str(value or "").strip()
             if value:
@@ -1167,17 +1518,18 @@ class XUIService:
                 headers={"Accept": "application/json"},
             )
         except Exception as exc:
+            safe_error = sanitize_xui_operational_text(exc, panel=self.panel)
             logger.info(
                 "Best-effort X-UI client traffic deletion skipped panel=%s inbound=%s email=%s error=%s",
                 self.panel.pk,
                 inbound.inbound_id,
                 mask_xui_value(email),
-                exc,
+                safe_error,
             )
             return False
         return bool(response.get("success"))
 
-    def delete_client_from_inbound(self, inbound, identifier):
+    def delete_client_from_inbound(self, inbound, identifier, *, allow_multi_scope=False):
         found = self._find_client_in_inbound(inbound, identifier)
         target_client = dict(found.get("client") or {})
         target_stats = dict(found.get("client_stats") or {})
@@ -1185,11 +1537,18 @@ class XUIService:
         api_identifier = self._client_api_identifier(target_client, identifier)
         if not api_identifier:
             raise XUIError("Client identifier was not available for deletion.")
+        self._assert_precise_scope(
+            inbound,
+            api_identifier,
+            operation="delete",
+            allow_multi_scope=allow_multi_scope,
+        )
 
-        response = self.authenticated_json(
-            "POST",
-            f"/panel/api/inbounds/{inbound.inbound_id}/delClient/{quote(api_identifier, safe='')}",
-            headers={"Accept": "application/json"},
+        response = self._post_client_delete(
+            inbound,
+            api_identifier,
+            email=email,
+            allow_multi_scope=allow_multi_scope,
         )
         if not response.get("success"):
             message = str(response.get("msg") or "")
@@ -1199,7 +1558,7 @@ class XUIService:
         stats_deleted = self._try_delete_client_stats(inbound, email)
         self._clear_client_caches(inbound, target_client, email=email)
 
-        inbound_data = self.get_inbound(inbound.inbound_id, use_cache=False)
+        inbound_data = self.get_inbound(inbound, use_cache=False)
         try:
             remaining_client, remaining_stats, _matched, _clients, _stats = find_xui_client_and_stats(
                 inbound_data,
@@ -1217,6 +1576,8 @@ class XUIService:
             "panel": self.panel,
             "inbound": inbound,
             "inbound_id": inbound.inbound_id,
+            "node_id": getattr(inbound, "xui_node_id", "") or "",
+            "remote_key": inbound_remote_key(inbound, panel=self.panel),
             "identifier": identifier,
             "email": email,
             "matched_field": found.get("matched_field") or "",
@@ -1238,7 +1599,16 @@ class XUIService:
             },
         }
 
-    def update_client_traffic_and_expiry(self, inbound, identifier, *, total_bytes=None, expiry_time=None, enable=None):
+    def update_client_traffic_and_expiry(
+        self,
+        inbound,
+        identifier,
+        *,
+        total_bytes=None,
+        expiry_time=None,
+        enable=None,
+        allow_multi_scope=False,
+    ):
         found = self._find_client_in_inbound(inbound, identifier)
         target_client = dict(found.get("client") or {})
         target_stats = dict(found.get("client_stats") or {})
@@ -1248,6 +1618,12 @@ class XUIService:
         api_identifier = self._client_api_identifier(target_client, identifier)
         if not api_identifier:
             raise XUIError("Client identifier was not available for update.")
+        self._assert_precise_scope(
+            inbound,
+            api_identifier,
+            operation="update",
+            allow_multi_scope=allow_multi_scope,
+        )
 
         old_total = xui_int(
             first_xui_value(
@@ -1271,16 +1647,8 @@ class XUIService:
         if enable is not None:
             target_client["enable"] = bool(enable)
 
-        response = self.authenticated_json(
-            "POST",
-            f"/panel/api/inbounds/updateClient/{quote(api_identifier, safe='')}",
-            data={
-                "id": inbound.inbound_id,
-                "settings": json.dumps({"clients": [target_client]}),
-            },
-        )
-        if not response.get("success"):
-            raise XUIError(response.get("msg") or "Panel rejected client update.")
+        email = str(target_client.get("email") or target_stats.get("email") or "").strip()
+        self._post_client_update(inbound, api_identifier, target_client, email=email)
 
         self._clear_client_caches(inbound, target_client)
         verified = self._find_client_in_inbound(inbound, identifier)
@@ -1319,6 +1687,8 @@ class XUIService:
             "panel": self.panel,
             "inbound": inbound,
             "inbound_id": inbound.inbound_id,
+            "node_id": getattr(inbound, "xui_node_id", "") or "",
+            "remote_key": inbound_remote_key(inbound, panel=self.panel),
             "identifier": identifier,
             "matched_field": verified.get("matched_field") or found.get("matched_field") or "",
             "old_total_bytes": old_total,
@@ -1338,7 +1708,7 @@ class XUIService:
             raise XUIError("VPN client is not linked to a panel inbound.")
         resolve_inbound_panel(vpn_client.inbound, self.panel, require_active=False)
 
-        inbound_data = self.get_inbound(vpn_client.inbound.inbound_id, use_cache=False)
+        inbound_data = self.get_inbound(vpn_client.inbound, use_cache=False)
         try:
             settings = json.loads(inbound_data.get("settings") or "{}")
         except (TypeError, ValueError) as exc:
@@ -1361,12 +1731,14 @@ class XUIService:
         client_uuid = str(target_client.get("id") or vpn_client.uuid or "")
         client_email = target_client.get("email") or email
         sub_id = target_client.get("subId") or target_client.get("sub_id") or vpn_client.sub_id
+        hosts = self.get_hosts_for_inbound(vpn_client.inbound.inbound_id)
         direct_link = self.build_direct_link(
             inbound=vpn_client.inbound,
             inbound_data=inbound_data,
             client_uuid=client_uuid,
             client_data=target_client,
             email=client_email,
+            hosts=hosts,
         )
         sub_link = f"{self.build_sub_base_url(inbound_data)}/sub/{sub_id}" if sub_id else vpn_client.sub_link
         return {
@@ -1380,6 +1752,7 @@ class XUIService:
 
     def create_inactive_client(self, *, email_prefix, total_gb, expire_days, inbound, limit_ip=2):
         resolve_inbound_panel(inbound, self.panel, require_active=True)
+        self._assert_precise_scope(inbound, operation="create")
         self.login()
         client_uuid = str(uuid.uuid4())
         sub_id = "".join(random.choices(string.ascii_letters + string.digits, k=16))
@@ -1394,31 +1767,23 @@ class XUIService:
             "totalGB": total_bytes,
             "expiryTime": 0,
             "enable": False,
-            "tgId": "",
+            "tgId": 0,
             "subId": sub_id,
         }
-        payload = {
-            "id": inbound.inbound_id,
-            "settings": json.dumps({"clients": [client_data]}),
-        }
-        response = self.request_json(
-            "POST",
-            "/panel/api/inbounds/addClient",
-            json=payload,
-            headers={"Accept": "application/json"},
-        )
-        if not response.get("success"):
-            raise XUIError(response.get("msg") or "Could not add client to panel.")
+        self._post_client_create(inbound, client_data)
 
-        inbound_data = self.get_inbound(inbound.inbound_id, use_cache=False)
+        inbound_data = self.get_inbound(inbound, use_cache=False)
+        hosts = self.get_hosts_for_inbound(inbound.inbound_id)
         direct_link = self.build_direct_link(
             inbound=inbound,
             inbound_data=inbound_data,
             client_uuid=client_uuid,
             client_data=client_data,
             email=email,
+            hosts=hosts,
         )
         sub_base_url = self.build_sub_base_url(inbound_data)
+        remote_client_key = build_remote_client_key(self.panel, inbound, client_uuid)
 
         return {
             "uuid": client_uuid,
@@ -1426,15 +1791,35 @@ class XUIService:
             "sub_id": sub_id,
             "sub_link": f"{sub_base_url}/sub/{sub_id}",
             "direct_link": direct_link,
+            "xui_node_id": getattr(inbound, "xui_node_id", "") or "",
+            "remote_client_key": remote_client_key,
+            "remote_scope": {
+                "panel_id": getattr(self.panel, "pk", None),
+                "inbound_id": inbound.inbound_id,
+                "node_id": getattr(inbound, "xui_node_id", "") or "",
+                "inbound_remote_key": inbound_remote_key(inbound, panel=self.panel),
+            },
             "raw": client_data,
         }
 
-    def create_enabled_client(self, *, email_prefix, total_gb, duration_hours, inbound, limit_ip=1):
+    def create_enabled_client(
+        self,
+        *,
+        email_prefix,
+        total_gb,
+        duration_hours,
+        inbound,
+        limit_ip=1,
+        client_uuid="",
+        sub_id="",
+        email="",
+    ):
         resolve_inbound_panel(inbound, self.panel, require_active=True)
+        self._assert_precise_scope(inbound, operation="create")
         self.login()
-        client_uuid = str(uuid.uuid4())
-        sub_id = "".join(random.choices(string.ascii_letters + string.digits, k=16))
-        email = build_xui_client_email(email_prefix, client_uuid)
+        client_uuid = str(client_uuid or uuid.uuid4())
+        sub_id = str(sub_id or "".join(random.choices(string.ascii_letters + string.digits, k=16)))
+        email = str(email or build_xui_client_email(email_prefix, client_uuid)).strip()
         total_bytes = bytes_from_gb(total_gb)
         expiry_time = int(time.time() * 1000) + (int(duration_hours) * 3_600_000)
 
@@ -1446,31 +1831,32 @@ class XUIService:
             "totalGB": total_bytes,
             "expiryTime": expiry_time,
             "enable": True,
-            "tgId": "",
+            "tgId": 0,
             "subId": sub_id,
         }
-        payload = {
-            "id": inbound.inbound_id,
-            "settings": json.dumps({"clients": [client_data]}),
-        }
-        response = self.request_json(
-            "POST",
-            "/panel/api/inbounds/addClient",
-            json=payload,
-            headers={"Accept": "application/json"},
-        )
-        if not response.get("success"):
-            raise XUIError(response.get("msg") or "Could not add client to panel.")
+        self._post_client_create(inbound, client_data)
 
-        inbound_data = self.get_inbound(inbound.inbound_id, use_cache=False)
+        inbound_data = self.get_inbound(inbound, use_cache=False)
+        target_client, target_stats, _matched, _clients, _stats = find_xui_client_and_stats(inbound_data, client_uuid)
+        if not target_client and not target_stats and email:
+            target_client, target_stats, _matched, _clients, _stats = find_xui_client_and_stats(inbound_data, email)
+        if not target_client and not target_stats:
+            raise XUIError("Client creation could not be verified on panel.")
+        enabled_value = first_xui_value((target_client or {}).get("enable"), (target_stats or {}).get("enable"))
+        if enabled_value is not None and not xui_bool(enabled_value):
+            raise XUIError("Client was created but is not enabled on panel.")
+        remote_client = {**client_data, **(target_client or {})}
+        hosts = self.get_hosts_for_inbound(inbound.inbound_id)
         direct_link = self.build_direct_link(
             inbound=inbound,
             inbound_data=inbound_data,
             client_uuid=client_uuid,
-            client_data=client_data,
+            client_data=remote_client,
             email=email,
+            hosts=hosts,
         )
         sub_base_url = self.build_sub_base_url(inbound_data)
+        remote_client_key = build_remote_client_key(self.panel, inbound, client_uuid)
 
         return {
             "uuid": client_uuid,
@@ -1479,12 +1865,21 @@ class XUIService:
             "sub_link": f"{sub_base_url}/sub/{sub_id}",
             "direct_link": direct_link,
             "expires_at": parse_xui_datetime(expiry_time),
-            "raw": client_data,
+            "xui_node_id": getattr(inbound, "xui_node_id", "") or "",
+            "remote_client_key": remote_client_key,
+            "remote_scope": {
+                "panel_id": getattr(self.panel, "pk", None),
+                "inbound_id": inbound.inbound_id,
+                "node_id": getattr(inbound, "xui_node_id", "") or "",
+                "inbound_remote_key": inbound_remote_key(inbound, panel=self.panel),
+            },
+            "raw": remote_client,
         }
 
     def update_client_enabled(self, order):
         resolve_inbound_panel(order.inbound, self.panel, require_active=True)
-        inbound_data = self.get_inbound(order.inbound.inbound_id, use_cache=False)
+        self._assert_precise_scope(order.inbound, getattr(order, "uuid", ""), operation="enable")
+        inbound_data = self.get_inbound(order.inbound, use_cache=False)
         try:
             settings = json.loads(inbound_data.get("settings") or "{}")
         except (TypeError, ValueError) as exc:
@@ -1502,21 +1897,14 @@ class XUIService:
         target_client["enable"] = True
         target_client["expiryTime"] = current_time + (order.plan.duration_days * 86_400_000)
 
-        response = self.authenticated_json(
-            "POST",
-            f"/panel/api/inbounds/updateClient/{order.uuid}",
-            data={
-                "id": order.inbound.inbound_id,
-                "settings": json.dumps({"clients": [target_client]}),
-            },
-        )
-        if not response.get("success"):
-            raise XUIError(response.get("msg") or "Panel rejected client activation.")
+        email = str(target_client.get("email") or getattr(order, "username", "") or "").strip()
+        self._post_client_update(order.inbound, str(order.uuid), target_client, email=email)
         return True
 
     def update_client_subscription(self, vpn_client, plan):
         resolve_inbound_panel(vpn_client.inbound, self.panel, require_active=True)
-        inbound_data = self.get_inbound(vpn_client.inbound.inbound_id, use_cache=False)
+        self._assert_precise_scope(vpn_client.inbound, getattr(vpn_client, "uuid", ""), operation="renew")
+        inbound_data = self.get_inbound(vpn_client.inbound, use_cache=False)
         try:
             settings = json.loads(inbound_data.get("settings") or "{}")
         except (TypeError, ValueError) as exc:
@@ -1543,37 +1931,25 @@ class XUIService:
         target_client["limitIp"] = plan.device_limit
         target_client["expiryTime"] = expiry_base + (plan.duration_days * 86_400_000)
 
-        response = self.authenticated_json(
-            "POST",
-            f"/panel/api/inbounds/updateClient/{vpn_client.uuid}",
-            data={
-                "id": vpn_client.inbound.inbound_id,
-                "settings": json.dumps({"clients": [target_client]}),
-            },
-        )
-        if not response.get("success"):
-            raise XUIError(response.get("msg") or "Panel rejected client renewal.")
-
         email = vpn_client.xui_email or vpn_client.username
-        reset_response = self.authenticated_json(
-            "POST",
-            f"/panel/api/inbounds/{vpn_client.inbound.inbound_id}/resetClientTraffic/{quote(email)}",
-            headers={"Accept": "application/json"},
-        )
-        if not reset_response.get("success"):
-            raise XUIError(reset_response.get("msg") or "Panel rejected traffic reset.")
+        self._post_client_update(vpn_client.inbound, str(vpn_client.uuid), target_client, email=email)
 
-        cache.delete(f"xui:inbound:{self.panel.pk}:{vpn_client.inbound.inbound_id}")
+        self._post_client_reset_traffic(vpn_client.inbound, email)
+
+        cache.delete(self._inbound_cache_key(vpn_client.inbound))
         cache.delete(f"xui:client-traffic:{self.panel.pk}:{email}")
         cache.delete(f"xui:client-stats:{vpn_client.pk}:{vpn_client.uuid}:{vpn_client.xui_email}")
         return {
             "expiry_at": parse_xui_datetime(target_client["expiryTime"]),
+            "node_id": getattr(vpn_client.inbound, "xui_node_id", "") or "",
+            "remote_key": inbound_remote_key(vpn_client.inbound, panel=self.panel),
             "raw": target_client,
         }
 
     def add_client_traffic(self, vpn_client, extra_gb, *, extra_days=0):
         resolve_inbound_panel(vpn_client.inbound, self.panel, require_active=True)
-        inbound_data = self.get_inbound(vpn_client.inbound.inbound_id, use_cache=False)
+        self._assert_precise_scope(vpn_client.inbound, getattr(vpn_client, "uuid", ""), operation="update")
+        inbound_data = self.get_inbound(vpn_client.inbound, use_cache=False)
         try:
             settings = json.loads(inbound_data.get("settings") or "{}")
         except (TypeError, ValueError) as exc:
@@ -1603,40 +1979,47 @@ class XUIService:
             expiry_base = max(current_time, current_expiry)
             target_client["expiryTime"] = expiry_base + (int(extra_days) * 86_400_000)
 
-        response = self.authenticated_json(
-            "POST",
-            f"/panel/api/inbounds/updateClient/{vpn_client.uuid}",
-            data={
-                "id": vpn_client.inbound.inbound_id,
-                "settings": json.dumps({"clients": [target_client]}),
-            },
-        )
-        if not response.get("success"):
-            raise XUIError(response.get("msg") or "Panel rejected client traffic update.")
+        self._post_client_update(vpn_client.inbound, str(vpn_client.uuid), target_client, email=email)
 
-        cache.delete(f"xui:inbound:{self.panel.pk}:{vpn_client.inbound.inbound_id}")
+        cache.delete(self._inbound_cache_key(vpn_client.inbound))
         cache.delete(f"xui:client-traffic:{self.panel.pk}:{email}")
         cache.delete(f"xui:client-stats:{vpn_client.pk}:{vpn_client.uuid}:{vpn_client.xui_email}")
         return {
             "total_traffic_bytes": new_total,
             "expiry_at": parse_xui_datetime(target_client.get("expiryTime")),
             "expiry_unlimited": expiry_unlimited,
+            "node_id": getattr(vpn_client.inbound, "xui_node_id", "") or "",
+            "remote_key": inbound_remote_key(vpn_client.inbound, panel=self.panel),
             "raw": target_client,
         }
 
     def delete_client(self, order):
         resolve_inbound_panel(order.inbound, self.panel, require_active=False)
-        response = self.authenticated_json(
-            "POST",
-            f"/panel/api/inbounds/{order.inbound.inbound_id}/delClient/{order.uuid}",
-            headers={"Accept": "application/json"},
-        )
+        self._assert_precise_scope(order.inbound, getattr(order, "uuid", ""), operation="delete")
+        api_identifier = str(getattr(order, "uuid", "") or "").strip()
+        email = getattr(order, "username", "") or ""
+        if hasattr(order, "xui_email"):
+            email = order.xui_email or email
+        if hasattr(order, "vpn_clients"):
+            try:
+                linked_client = order.vpn_clients.order_by("created_at", "pk").first()
+            except Exception:
+                linked_client = None
+            if linked_client:
+                email = linked_client.xui_email or linked_client.username or email
+        if self._uses_modern_client_api() or not email:
+            found = self._find_client_in_inbound(order.inbound, api_identifier)
+            target_client = found.get("client") or {}
+            target_stats = found.get("client_stats") or {}
+            email = str(target_client.get("email") or target_stats.get("email") or email or "").strip()
+            api_identifier = self._client_api_identifier(target_client, api_identifier)
+        response = self._post_client_delete(order.inbound, api_identifier, email=email)
         if not response.get("success"):
             message = str(response.get("msg") or "")
             if "not found" in message.lower() or "不存在" in message:
                 return True
             raise XUIError(message or "Panel rejected client deletion.")
-        cache.delete(f"xui:inbound:{self.panel.pk}:{order.inbound.inbound_id}")
+        cache.delete(self._inbound_cache_key(order.inbound))
         return True
 
     def get_client_stats(self, vpn_client, *, use_cache=True):
@@ -1650,7 +2033,7 @@ class XUIService:
         email = vpn_client.xui_email or vpn_client.username
         try:
             traffic = self.get_client_traffic(email, use_cache=use_cache)
-            clients = self.get_inbound_clients(vpn_client.inbound.inbound_id, use_cache=use_cache)
+            clients = self.get_inbound_clients(vpn_client.inbound, use_cache=use_cache)
             panel_client = next(
                 (
                     client
@@ -1695,7 +2078,10 @@ class XUIService:
                 history=get_usage_history(vpn_client),
             ).to_dict()
         except Exception as exc:
-            logger.warning("Could not fetch X-UI client stats: %s", exc)
+            logger.warning(
+                "Could not fetch X-UI client stats: %s",
+                sanitize_xui_operational_text(exc, panel=self.panel),
+            )
             stats = XUIClientStats(
                 uuid=str(vpn_client.uuid or ""),
                 email=email,
@@ -1710,7 +2096,7 @@ class XUIService:
                 is_enabled=vpn_client.status == vpn_client.Status.ACTIVE,
                 is_expired=vpn_client.is_expired,
                 panel_available=False,
-                error=str(exc),
+                error=sanitize_xui_operational_text(exc, panel=self.panel),
                 raw=vpn_client.xui_raw,
                 history=get_usage_history(vpn_client),
             ).to_dict()
@@ -1738,7 +2124,7 @@ def get_usage_history(vpn_client, limit=30):
 def get_inbound_client_stats(panel, inbound):
     service = XUIService(panel)
     service.login()
-    inbound_data = service.get_inbound(inbound.inbound_id, use_cache=False)
+    inbound_data = service.get_inbound(inbound, use_cache=False)
     client_stats = parse_xui_client_stats(inbound_data)
     settings_data = parse_xui_json_object(inbound_data.get("settings"))
     clients = settings_data.get("clients") or []
@@ -1760,7 +2146,7 @@ def get_panel_inbounds_with_stats(panel):
     service.login()
     rows = []
     for inbound in Inbound.objects.filter(panel=panel, is_active=True).order_by("inbound_id"):
-        inbound_data = service.get_inbound(inbound.inbound_id, use_cache=False)
+        inbound_data = service.get_inbound(inbound, use_cache=False)
         settings_data = parse_xui_json_object(inbound_data.get("settings"))
         clients = settings_data.get("clients") or []
         if not isinstance(clients, list):
@@ -1854,10 +2240,29 @@ def collect_panel_usage_stats(panel):
     total_download = 0
     total_used = 0
     seen_per_panel = set()
+    duplicate_usage_count = 0
+    duplicate_usage_keys = set()
+
+    def add_usage_row(normalized):
+        nonlocal total_upload, total_download, total_used, missing_stats, duplicate_usage_count
+        identifier_hash = normalized["identifier_hash"]
+        if identifier_hash in seen_per_panel:
+            duplicate_usage_count += 1
+            duplicate_usage_keys.add(identifier_hash)
+            return False
+        clients.append(normalized)
+        seen_per_panel.add(identifier_hash)
+        if normalized["stats_available"]:
+            total_upload += int(normalized["upload_bytes"] or 0)
+            total_download += int(normalized["download_bytes"] or 0)
+            total_used += int(normalized["used_bytes"] or 0)
+        else:
+            missing_stats += 1
+        return True
 
     for inbound in active_inbounds:
         try:
-            inbound_data = service.get_inbound(inbound.inbound_id, use_cache=False)
+            inbound_data = service.get_inbound(inbound, use_cache=False)
         except Exception as exc:
             inbound_errors.append(
                 {
@@ -1893,14 +2298,7 @@ def collect_panel_usage_stats(panel):
             if not normalized:
                 missing_stats += 1
                 continue
-            clients.append(normalized)
-            seen_per_panel.add(normalized["identifier_hash"])
-            if normalized["stats_available"]:
-                total_upload += int(normalized["upload_bytes"] or 0)
-                total_download += int(normalized["download_bytes"] or 0)
-                total_used += int(normalized["used_bytes"] or 0)
-            else:
-                missing_stats += 1
+            add_usage_row(normalized)
 
         for stats in client_stats:
             if not isinstance(stats, dict) or id(stats) in matched_stat_ids:
@@ -1916,16 +2314,7 @@ def collect_panel_usage_stats(panel):
             if not normalized:
                 missing_stats += 1
                 continue
-            if normalized["identifier_hash"] in seen_per_panel:
-                continue
-            clients.append(normalized)
-            seen_per_panel.add(normalized["identifier_hash"])
-            if normalized["stats_available"]:
-                total_upload += int(normalized["upload_bytes"] or 0)
-                total_download += int(normalized["download_bytes"] or 0)
-                total_used += int(normalized["used_bytes"] or 0)
-            else:
-                missing_stats += 1
+            add_usage_row(normalized)
 
     status = "ok"
     error_message = ""
@@ -1953,6 +2342,8 @@ def collect_panel_usage_stats(panel):
             "inbound_errors": inbound_errors[:20],
             "inbound_error_count": len(inbound_errors),
             "missing_client_stats_count": missing_stats,
+            "duplicate_usage_count": duplicate_usage_count,
+            "duplicate_usage_keys": sorted(duplicate_usage_keys)[:20],
             "online_api_available": online_available,
             "online_api_error": online_error,
         },
@@ -1963,17 +2354,31 @@ def find_client_by_identifier(panel, identifier):
     return XUIService(panel).find_client_by_identifier(identifier)
 
 
-def delete_client_from_inbound(panel, inbound, identifier):
-    return XUIService(panel).delete_client_from_inbound(inbound, identifier)
+def delete_client_from_inbound(panel, inbound, identifier, *, allow_multi_scope=False):
+    return XUIService(panel).delete_client_from_inbound(
+        inbound,
+        identifier,
+        allow_multi_scope=allow_multi_scope,
+    )
 
 
-def update_client_traffic_and_expiry(panel, inbound, identifier, total_bytes=None, expiry_time=None, enable=None):
+def update_client_traffic_and_expiry(
+    panel,
+    inbound,
+    identifier,
+    total_bytes=None,
+    expiry_time=None,
+    enable=None,
+    *,
+    allow_multi_scope=False,
+):
     return XUIService(panel).update_client_traffic_and_expiry(
         inbound,
         identifier,
         total_bytes=total_bytes,
         expiry_time=expiry_time,
         enable=enable,
+        allow_multi_scope=allow_multi_scope,
     )
 
 
@@ -1985,8 +2390,13 @@ def update_client_expiry(panel, inbound, identifier, expiry_time):
     return update_client_traffic_and_expiry(panel, inbound, identifier, expiry_time=expiry_time)
 
 
-def build_config_link_for_identifier(panel, inbound_id, identifier):
-    return XUIService(panel).build_config_link_for_identifier(inbound_id, identifier)
+def build_config_link_for_identifier(panel, inbound_id, identifier, *, inbound=None, node_id=""):
+    return XUIService(panel).build_config_link_for_identifier(
+        inbound_id,
+        identifier,
+        inbound=inbound,
+        node_id=node_id,
+    )
 
 
 def sync_vpn_client_stats(vpn_client, *, force=False, create_snapshot=True):
@@ -2067,7 +2477,10 @@ def refresh_vpn_client_links(vpn_client):
     try:
         details = XUIService(vpn_client.inbound.panel).get_client_config_details(vpn_client)
     except Exception as exc:
-        logger.warning("Could not refresh X-UI client links: %s", exc)
+        logger.warning(
+            "Could not refresh X-UI client links: %s",
+            sanitize_xui_operational_text(exc, panel=vpn_client.inbound.panel),
+        )
         return None
 
     changed_fields = []
@@ -2118,7 +2531,10 @@ def create_inactive_client_details(email_prefix, total_gb, expire_days, panel, i
             limit_ip=limit_ip,
         )
     except Exception as exc:
-        logger.warning("Could not create inactive X-UI client: %s", exc)
+        logger.warning(
+            "Could not create inactive X-UI client: %s",
+            sanitize_xui_operational_text(exc, panel=panel),
+        )
         return None
 
 
@@ -2133,7 +2549,42 @@ def create_trial_client_details(email_prefix, total_gb, duration_hours, panel, i
             limit_ip=limit_ip,
         )
     except Exception as exc:
-        logger.warning("Could not create free trial X-UI client: %s", exc)
+        logger.warning(
+            "Could not create free trial X-UI client: %s",
+            sanitize_xui_operational_text(exc, panel=panel),
+        )
+        return None
+
+
+def create_enabled_client_details(
+    email_prefix,
+    total_gb,
+    duration_days,
+    panel,
+    inbound,
+    limit_ip=2,
+    *,
+    client_uuid="",
+    sub_id="",
+    email="",
+):
+    try:
+        resolved_panel = resolve_inbound_panel(inbound, panel, require_active=True)
+        return XUIService(resolved_panel).create_enabled_client(
+            email_prefix=email_prefix,
+            total_gb=total_gb,
+            duration_hours=int(duration_days or 0) * 24,
+            inbound=inbound,
+            limit_ip=limit_ip,
+            client_uuid=client_uuid,
+            sub_id=sub_id,
+            email=email,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not create enabled X-UI client: %s",
+            sanitize_xui_operational_text(exc, panel=panel),
+        )
         return None
 
 
@@ -2142,7 +2593,10 @@ def renew_client(vpn_client, plan):
         panel = resolve_inbound_panel(vpn_client.inbound, require_active=True)
         return XUIService(panel).update_client_subscription(vpn_client, plan)
     except Exception as exc:
-        logger.warning("Could not renew X-UI client: %s", exc)
+        logger.warning(
+            "Could not renew X-UI client: %s",
+            sanitize_xui_operational_text(exc, panel=getattr(vpn_client.inbound, "panel", None)),
+        )
         return None
 
 
@@ -2151,7 +2605,10 @@ def add_client_traffic(vpn_client, extra_gb, *, extra_days=0):
         panel = resolve_inbound_panel(vpn_client.inbound, require_active=True)
         return XUIService(panel).add_client_traffic(vpn_client, extra_gb, extra_days=extra_days)
     except Exception as exc:
-        logger.warning("Could not add X-UI client referral traffic: %s", exc)
+        logger.warning(
+            "Could not add X-UI client referral traffic: %s",
+            sanitize_xui_operational_text(exc, panel=getattr(vpn_client.inbound, "panel", None)),
+        )
         return None
 
 
@@ -2215,14 +2672,15 @@ def sync_inbound_data(panel_url, username, password, inbound_id, *, proxy_url=No
             return True, result
         return False, "Inbound was not found."
     except Exception as exc:
-        return False, str(exc)
+        panel_like = SimpleNamespace(url=panel_url, username=username, password=password, proxy_url=proxy_url)
+        return False, sanitize_xui_operational_text(exc, panel=panel_like)
 
 
 def login_to_panel(panel):
     try:
         return XUIService(panel).login()
     except Exception as exc:
-        logger.warning("Could not login to X-UI panel: %s", exc)
+        logger.warning("Could not login to X-UI panel: %s", sanitize_xui_operational_text(exc, panel=panel))
         return None
 
 
@@ -2231,7 +2689,10 @@ def enable_client(order):
         panel = resolve_inbound_panel(order.inbound, require_active=True)
         return XUIService(panel).update_client_enabled(order)
     except Exception as exc:
-        logger.warning("Could not enable X-UI client: %s", exc)
+        logger.warning(
+            "Could not enable X-UI client: %s",
+            sanitize_xui_operational_text(exc, panel=getattr(order.inbound, "panel", None)),
+        )
         return False
 
 
@@ -2240,5 +2701,8 @@ def delete_client(order):
         panel = resolve_inbound_panel(order.inbound, require_active=False)
         return XUIService(panel).delete_client(order)
     except Exception as exc:
-        logger.warning("Could not delete X-UI client: %s", exc)
+        logger.warning(
+            "Could not delete X-UI client: %s",
+            sanitize_xui_operational_text(exc, panel=getattr(order.inbound, "panel", None)),
+        )
         return False

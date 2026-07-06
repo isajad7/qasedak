@@ -59,7 +59,22 @@
             <div class="qadmin-form-actions">
                 <a href="{{ previous_url }}" class="qadmin-action qadmin-action-secondary">قبلی</a>
                 {% if can_skip %}
-                    <button type="submit" name="_skip" value="1" class="qadmin-button qadmin-button-secondary">بعداً انجام می‌دهم</button>
+                    <button
+                        type="submit"
+                        name="{{ wizard_action_field }}"
+                        value="{{ wizard_skip_action }}"
+                        class="qadmin-button qadmin-button-secondary"
+                        data-testid="wizard-skip"
+                    >{{ wizard_skip_label }}</button>
+                {% endif %}
+                {% if test_action %}
+                    <button
+                        type="submit"
+                        name="{{ wizard_action_field }}"
+                        value="{{ test_action }}"
+                        class="qadmin-button qadmin-button-secondary"
+                        data-testid="wizard-test-action"
+                    >{{ test_action_label }}</button>
                 {% endif %}
                 <button type="submit" class="qadmin-button">ذخیره و ادامه</button>
                 <a href="{{ next_url }}" class="qadmin-action qadmin-action-info">بعدی بدون ذخیره</a>

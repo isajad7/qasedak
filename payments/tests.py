@@ -277,7 +277,8 @@ class PaymentMatchingTests(TestCase):
         ]
         self.assertEqual(len(match_messages), 1)
 
-    def test_manual_confirmation_confirms_sms_and_order(self):
+    @patch("store.provisioning_services.approve_and_provision_order")
+    def test_manual_confirmation_confirms_sms_and_order(self, approve_mock):
         order = self.create_order(created_at=self.sms_datetime)
         payment_sms = IncomingPaymentSMS.objects.create(
             raw_text=SAMPLE_SMS,
@@ -297,8 +298,10 @@ class PaymentMatchingTests(TestCase):
         self.assertEqual(order.status, Order.Status.CONFIRMED)
         self.assertTrue(order.is_paid)
         self.assertEqual(order.verification_status, Order.VerificationStatus.VERIFIED)
+        approve_mock.assert_called_once()
 
-    def test_manual_confirmation_preserves_completed_order_status(self):
+    @patch("store.provisioning_services.approve_and_provision_order")
+    def test_manual_confirmation_preserves_completed_order_status(self, approve_mock):
         verified_at = timezone.now() - timedelta(hours=1)
         order = self.create_order(created_at=self.sms_datetime, status=Order.Status.COMPLETED)
         Order.objects.filter(pk=order.pk).update(
@@ -325,6 +328,7 @@ class PaymentMatchingTests(TestCase):
         self.assertEqual(order.status, Order.Status.COMPLETED)
         self.assertEqual(order.verification_status, Order.VerificationStatus.VERIFIED)
         self.assertEqual(order.verified_at, verified_at)
+        approve_mock.assert_called_once()
 
     def test_confirmed_sms_is_not_reprocessed_or_renotified(self):
         BotConfiguration.objects.create(
