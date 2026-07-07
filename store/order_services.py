@@ -33,7 +33,7 @@ from .provisioning_services import (
     provisioning_scope,
     resolve_provisioning_strategy,
 )
-from .setup_readiness import SETUP_NOT_READY_MESSAGE, store_is_sellable
+from .setup_readiness import SETUP_NOT_READY_MESSAGE, setup_not_ready_details, store_is_sellable
 from .xui_api import create_inactive_client_details
 
 
@@ -151,6 +151,33 @@ def get_store_plans(store, *, public_only=True, operator=None):
     if operator:
         plans = plans.filter(operators=operator)
     return plans.distinct()
+
+
+def bot_plan_listing_debug_reasons(store, *, operator=None, public_only=True):
+    setup_details = setup_not_ready_details(store)
+    if setup_details["reasons"]:
+        return setup_details["reasons"]
+
+    plans = Plan.objects.filter(is_active=True)
+    if public_only:
+        plans = plans.filter(is_public=True, is_custom_volume=False)
+    if store:
+        plans = plans.filter(models.Q(store=store) | models.Q(store__isnull=True))
+
+    if not plans.exists():
+        return ["no_active_public_plans" if public_only else "no_active_plans"]
+
+    if operator:
+        if not get_active_operators(store).filter(pk=operator.pk).exists():
+            return ["operator_inactive_or_wrong_store"]
+        if not plans.filter(operators=operator).exists():
+            return ["no_public_plans_for_operator" if public_only else "no_plans_for_operator"]
+    elif sales_mode_requires_operator(store):
+        return ["operator_required"]
+
+    if not get_store_plans(store, public_only=public_only, operator=operator).exists():
+        return ["plan_filters_excluded_all_candidates"]
+    return []
 
 
 def operator_has_available_plans(store, operator):

@@ -36,6 +36,7 @@ ENABLE_NGINX=0
 ENABLE_TLS=0
 RUN_LIVE_CHECKS=0
 CLEAN_EXISTING=0
+CONFIGURE_POSTGRES_DOCKER_BRIDGE=0
 SERVICE_PREFIX="vpn-store"
 WEB_SERVICE_NAME="vpn-store-web"
 TELEGRAM_SERVICE_NAME="vpn-store-telegram"
@@ -75,6 +76,10 @@ Options:
   --db-engine NAME   Database engine for interactive installs: postgres or sqlite. Default: postgres.
   --config FILE      Use an existing install config JSON instead of interactive prompts.
   --live-checks      Explicitly run Telegram/X-UI live checks during bootstrap and doctor.
+  --configure-postgres-docker-bridge
+                    Opt in to host PostgreSQL config for Docker tenant access.
+                    Backs up postgresql.conf and pg_hba.conf, then binds only
+                    127.0.0.1 and 172.17.0.1 and allows 172.17.0.0/16.
   --clean-existing   Remove detected previous Qasedak install traces before installing.
   --with-systemd     Render, enable, and start systemd services.
   --without-systemd  Skip systemd services.
@@ -332,6 +337,9 @@ parse_args() {
         ;;
       --live-checks)
         RUN_LIVE_CHECKS=1
+        ;;
+      --configure-postgres-docker-bridge)
+        CONFIGURE_POSTGRES_DOCKER_BRIDGE=1
         ;;
       --clean-existing)
         CLEAN_EXISTING=1
@@ -1515,6 +1523,62 @@ check_postgres_connection() {
   log "PostgreSQL connection check passed."
 }
 
+configure_postgres_docker_bridge_access() {
+  [[ "${DATABASE_ENGINE:-sqlite}" == "postgres" ]] || return 0
+  (( CONFIGURE_POSTGRES_DOCKER_BRIDGE )) || {
+    log "PostgreSQL Docker bridge access: not modified. Use --configure-postgres-docker-bridge on SaaS hosts with Docker tenants."
+    return 0
+  }
+  if (( DRY_RUN )); then
+    log "DRY-RUN: would back up postgresql.conf and pg_hba.conf, set listen_addresses='127.0.0.1,172.17.0.1', append Docker bridge pg_hba rule if missing, and restart postgresql."
+    return 0
+  fi
+
+  local config_file hba_file stamp
+  mapfile -t postgres_files < <(postgres_psql_output -Atqc "SHOW config_file; SHOW hba_file;" postgres 2>/dev/null || true)
+  config_file="${postgres_files[0]:-}"
+  hba_file="${postgres_files[1]:-}"
+  [[ -n "$config_file" && -f "$config_file" ]] || die "Could not locate postgresql.conf for Docker bridge configuration."
+  [[ -n "$hba_file" && -f "$hba_file" ]] || die "Could not locate pg_hba.conf for Docker bridge configuration."
+
+  stamp="$(date +%Y%m%d%H%M%S)"
+  run_cmd "${SUDO_CMD[@]}" cp -a "$config_file" "$config_file.bak.$stamp"
+  run_cmd "${SUDO_CMD[@]}" cp -a "$hba_file" "$hba_file.bak.$stamp"
+
+  "${PYTHON_BIN:-python3}" - "$config_file" "$hba_file" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+config_path = Path(sys.argv[1])
+hba_path = Path(sys.argv[2])
+
+config_lines = config_path.read_text(encoding="utf-8").splitlines()
+replacement = "listen_addresses = '127.0.0.1,172.17.0.1'"
+for index, line in enumerate(config_lines):
+    if re.match(r"^\s*#?\s*listen_addresses\s*=", line):
+        config_lines[index] = replacement
+        break
+else:
+    config_lines.append(replacement)
+config_path.write_text("\n".join(config_lines) + "\n", encoding="utf-8")
+
+hba_text = hba_path.read_text(encoding="utf-8")
+rule = "host all all 172.17.0.0/16 scram-sha-256"
+has_rule = False
+for raw_line in hba_text.splitlines():
+    line = raw_line.split("#", 1)[0].strip()
+    if re.split(r"\s+", line) == rule.split():
+        has_rule = True
+        break
+if not has_rule:
+    suffix = "" if hba_text.endswith("\n") else "\n"
+    hba_path.write_text(hba_text + suffix + rule + "\n", encoding="utf-8")
+PY
+  run_cmd "${SUDO_CMD[@]}" systemctl restart postgresql
+  log "PostgreSQL Docker bridge access configured for 127.0.0.1 and 172.17.0.1 only; backups: $config_file.bak.$stamp and $hba_file.bak.$stamp"
+}
+
 configure_database_backend() {
   normalize_database_engine
   if [[ "$DATABASE_ENGINE" == "sqlite" ]]; then
@@ -1523,6 +1587,7 @@ configure_database_backend() {
   fi
   source_env
   create_postgres_role_and_db
+  configure_postgres_docker_bridge_access
   check_postgres_connection
 }
 

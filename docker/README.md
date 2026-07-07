@@ -26,6 +26,20 @@ Required runtime env:
 - `PORT=8000` by default
 - `DOMAIN` optional
 
+Host PostgreSQL requirement for SaaS tenant containers:
+
+- PostgreSQL on the host must listen on `127.0.0.1:5432` and `172.17.0.1:5432`.
+- `pg_hba.conf` must include `host all all 172.17.0.0/16 scram-sha-256`.
+- This is required because containers reach the host database over the Docker bridge, not through host loopback.
+- If this is missing, tenant startup can fail with `connection to server at "172.17.0.1", port 5432 failed: Connection refused`, the container can restart-loop, and Nginx can return `502`.
+
+Verify from the host:
+
+```sh
+ss -ltnp | grep 5432
+python manage.py check_postgres_bridge --no-fail
+```
+
 Startup flow:
 
 - load `/app/.env` or `ENV_FILE`

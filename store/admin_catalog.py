@@ -556,8 +556,53 @@ def get_catalog_action_items(store=None):
     return items
 
 
-def get_catalog_context(store=None):
+def _catalog_filter_value(filters, key, default="all"):
+    if not filters:
+        return default
+    value = (filters.get(key) or default).strip()
+    return value or default
+
+
+def filter_plan_catalog_items(items, filters=None):
+    filters = filters or {}
+    query = (filters.get("q") or "").strip().lower()
+    active = _catalog_filter_value(filters, "active")
+    visibility = _catalog_filter_value(filters, "visibility")
+    route = _catalog_filter_value(filters, "route")
+
+    filtered_items = []
+    for item in items:
+        plan = item["plan"]
+        if query:
+            searchable = " ".join(
+                [
+                    str(item.get("name") or ""),
+                    str(getattr(plan, "slug", "") or ""),
+                    str(getattr(plan, "description", "") or ""),
+                ]
+            ).lower()
+            if query not in searchable:
+                continue
+        if active == "active" and not item["is_active"]:
+            continue
+        if active == "inactive" and item["is_active"]:
+            continue
+        if visibility == "public" and not item["is_public"]:
+            continue
+        if visibility == "private" and item["is_public"]:
+            continue
+        has_explicit_route = item["route_status"]["code"] not in {ROUTE_STATUS_MISSING, ROUTE_STATUS_FALLBACK}
+        if route == "has_route" and not has_explicit_route:
+            continue
+        if route == "missing_route" and has_explicit_route:
+            continue
+        filtered_items.append(item)
+    return filtered_items
+
+
+def get_catalog_context(store=None, filters=None):
     plan_items = get_plan_catalog_items(store)
+    filtered_plan_items = filter_plan_catalog_items(plan_items, filters)
     action_plan_items = [
         item
         for item in plan_items
@@ -566,11 +611,19 @@ def get_catalog_context(store=None):
     return {
         "summary": get_route_coverage_summary(store),
         "plan_items": plan_items,
+        "filtered_plan_items": filtered_plan_items,
         "active_plan_items": [item for item in plan_items if item["plan"].is_active],
         "action_plan_items": action_plan_items,
         "inbound_items": get_inbound_catalog_items(store),
         "route_items": get_route_overview_items(store),
         "action_items": get_catalog_action_items(store),
+        "catalog_filters": {
+            "q": (filters or {}).get("q", ""),
+            "active": _catalog_filter_value(filters, "active"),
+            "visibility": _catalog_filter_value(filters, "visibility"),
+            "route": _catalog_filter_value(filters, "route"),
+        },
+        "filtered_plan_count": len(filtered_plan_items),
         "new_plan_url": catalog_plan_new_url(store),
         "bulk_assign_url": add_query(reverse("admin:store_planinboundroute_bulk_assign"), {"store": getattr(store, "pk", None)}),
         "inbound_admin_url": reverse("admin:store_inbound_changelist"),

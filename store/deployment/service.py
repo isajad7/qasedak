@@ -4,6 +4,7 @@ import pathlib
 import re
 import secrets
 import subprocess
+from urllib.parse import urlparse
 
 from django.conf import settings
 from django.db import transaction
@@ -21,6 +22,12 @@ class SubdomainDeploymentError(Exception):
 
 
 PG_IDENTIFIER_RE = re.compile(r"^[a-z0-9_]+$")
+DEFAULT_NO_PROXY_HOSTS = (
+    "127.0.0.1",
+    "localhost",
+    "::1",
+    "host.docker.internal",
+)
 
 
 def _quote_pg_identifier(value):
@@ -31,6 +38,57 @@ def _quote_pg_identifier(value):
 
 def _quote_pg_literal(value):
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _append_unique(items, value):
+    text = str(value or "").strip()
+    if not text:
+        return
+    key = text.lower()
+    if key not in {item.lower() for item in items}:
+        items.append(text)
+
+
+def _split_no_proxy(value):
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _host_from_url_or_host(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text if "://" in text else f"//{text}")
+    host = parsed.hostname or text.split("/", 1)[0].split(":", 1)[0].strip("[]")
+    return host.strip()
+
+
+def _merge_no_proxy_hosts(instance, values):
+    hosts = []
+    for source in (
+        os.environ.get("NO_PROXY", ""),
+        os.environ.get("no_proxy", ""),
+        values.get("NO_PROXY", ""),
+    ):
+        for host in _split_no_proxy(source):
+            _append_unique(hosts, host)
+    for host in DEFAULT_NO_PROXY_HOSTS:
+        _append_unique(hosts, host)
+
+    for key in ("DOMAIN", "DJANGO_ALLOWED_HOSTS", "POSTGRES_HOST", "DATABASE_HOST"):
+        for value in str(values.get(key, "") or "").split(","):
+            _append_unique(hosts, _host_from_url_or_host(value))
+    _append_unique(hosts, getattr(instance, "subdomain", ""))
+
+    for key, value in values.items():
+        upper_key = str(key).upper()
+        if "PROXY" in upper_key:
+            continue
+        if "PANEL" not in upper_key and "XUI" not in upper_key:
+            continue
+        if not any(marker in upper_key for marker in ("URL", "HOST")):
+            continue
+        _append_unique(hosts, _host_from_url_or_host(value))
+    return ",".join(hosts)
 
 
 class TenantDatabaseProvisioner:
@@ -521,6 +579,7 @@ class SubdomainDeploymentService:
             values["DJANGO_ALLOWED_HOSTS"] = f"{instance.subdomain},127.0.0.1,localhost"
             values["DJANGO_CSRF_TRUSTED_ORIGINS"] = f"https://{instance.subdomain},http://{instance.subdomain}"
         values.update(extra_env or {})
+        values["NO_PROXY"] = _merge_no_proxy_hosts(instance, values)
         lines = []
         for key, value in values.items():
             if not key.replace("_", "").isalnum() or key.upper() != key:

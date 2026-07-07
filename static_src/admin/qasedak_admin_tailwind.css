@@ -512,3 +512,132 @@
         justify-content: stretch;
     }
 }
+
+.tw-catalog-page {
+    min-height: calc(100vh - 130px);
+}
+
+.tw-catalog-filter-bar {
+    align-items: end;
+    display: grid;
+    gap: .75rem;
+    grid-template-columns: minmax(220px, 1.5fr) repeat(3, minmax(150px, 1fr)) auto;
+}
+
+.tw-filter-field {
+    display: grid;
+    gap: .35rem;
+    min-width: 0;
+}
+
+.tw-filter-field span {
+    color: #334155;
+    font-size: .78rem;
+    font-weight: 900;
+}
+
+.tw-filter-field input,
+.tw-filter-field select {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    color: #0f172a;
+    min-height: 42px;
+    padding: .55rem .7rem;
+    width: 100%;
+}
+
+.tw-filter-search input {
+    min-width: 0;
+}
+
+.tw-filter-actions {
+    display: flex;
+    gap: .5rem;
+}
+
+.tw-table-wrap {
+    overflow-x: auto;
+}
+
+.tw-catalog-table {
+    border-collapse: collapse;
+    min-width: 980px;
+    width: 100%;
+}
+
+.tw-catalog-table th,
+.tw-catalog-table td {
+    border-bottom: 1px solid #e2e8f0;
+    padding: .8rem .65rem;
+    text-align: right;
+    vertical-align: top;
+}
+
+.tw-catalog-table th {
+    color: #64748b;
+    font-size: .76rem;
+    font-weight: 900;
+    white-space: nowrap;
+}
+
+.tw-catalog-table td {
+    color: #0f172a;
+    font-size: .86rem;
+    line-height: 1.75;
+}
+
+.tw-catalog-table td a {
+    color: #0f172a;
+}
+
+.tw-catalog-table small {
+    color: #64748b;
+    display: block;
+    font-size: .75rem;
+    line-height: 1.7;
+}
+
+.tw-row-danger {
+    background: #fff1f2;
+}
+
+.tw-row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .4rem;
+}
+
+.tw-row-actions form {
+    margin: 0;
+}
+
+.tw-row-actions button.tw-mini-button {
+    cursor: pointer;
+}
+
+.tw-mini-button-warning {
+    background: #fffbeb;
+    border-color: #fde68a;
+    color: #92400e;
+}
+
+.tw-catalog-empty {
+    justify-content: space-between;
+}
+
+@media (max-width: 1199px) {
+    .tw-catalog-filter-bar {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 575px) {
+    .tw-catalog-filter-bar {
+        grid-template-columns: 1fr;
+    }
+
+    .tw-filter-actions {
+        flex-direction: column;
+    }
+}

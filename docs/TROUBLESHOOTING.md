@@ -130,8 +130,49 @@ Media is runtime data; include it explicitly in backups with `--include-media`.
 - Check `.env` for `DATABASE_ENGINE`.
 - SQLite mode: stop long-running writes before maintenance when possible. `backup.sh` uses SQLite backup mode when `sqlite3` is installed. If migrations fail due to locks, stop app services, rerun the update step, then run doctor before restarting.
 - PostgreSQL mode: confirm `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, and `POSTGRES_PORT` are set in `.env`.
-- Run `doctor.sh --no-fail`; it checks `pg_isready`, Django DB connectivity, migration status, and backup tools (`pg_dump`, `pg_restore`).
+- Run `doctor.sh --no-fail`; it checks `pg_isready`, Django DB connectivity, migration status, backup tools (`pg_dump`, `pg_restore`), and the Docker bridge path required by SaaS tenant containers.
 - PostgreSQL backups use `pg_dump -Fc`. Restore requires `pg_restore`, a fresh pre-restore backup, and explicit operator confirmation before any destructive clean.
+
+## Tenant 502 / Restart Loop With Host PostgreSQL
+
+Tenant containers connect to host PostgreSQL through Docker bridge networking at `172.17.0.1:5432`. If PostgreSQL only listens on `127.0.0.1:5432`, the tenant web container can restart repeatedly and Nginx will return `502`. The common log symptom is:
+
+```text
+connection to server at "172.17.0.1", port 5432 failed: Connection refused
+```
+
+Triage:
+
+```bash
+docker logs qasedak_<tenant>
+curl http://127.0.0.1:<port>/health/
+ss -ltnp | grep 5432
+pg_lsclusters
+sudo /opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --no-fail --verbose
+```
+
+Required host PostgreSQL shape:
+
+```text
+listen_addresses = '127.0.0.1,172.17.0.1'
+host all all 172.17.0.0/16 scram-sha-256
+```
+
+Recovery:
+
+```bash
+sudo -u postgres psql -Atqc "SHOW config_file; SHOW hba_file;" postgres
+sudo cp <postgresql.conf> <postgresql.conf>.bak.$(date +%Y%m%d%H%M%S)
+sudo cp <pg_hba.conf> <pg_hba.conf>.bak.$(date +%Y%m%d%H%M%S)
+sudoedit <postgresql.conf>
+sudoedit <pg_hba.conf>
+sudo systemctl restart postgresql
+sudo /opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --no-fail --verbose
+docker restart qasedak_<tenant>
+curl http://127.0.0.1:<port>/health/
+```
+
+Only bind PostgreSQL to `127.0.0.1` and `172.17.0.1` for this setup. Do not use `listen_addresses='*'` and do not add public CIDRs to `pg_hba.conf`.
 
 ## Backup and Restore Center
 

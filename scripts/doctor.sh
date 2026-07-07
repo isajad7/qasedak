@@ -417,6 +417,29 @@ check_database_backend() {
   fi
 }
 
+check_postgres_docker_bridge() {
+  local engine
+  engine="$(database_engine)"
+  [[ "$engine" == "postgres" ]] || return 0
+  if (( DRY_RUN )); then
+    record_info "postgres-docker-bridge" "would verify PostgreSQL listens on 172.17.0.1:5432, pg_hba allows 172.17.0.0/16, and a Docker container can reach the port"
+    return 0
+  fi
+  local python="$INSTALL_DIR/venv/bin/python"
+  if [[ ! -x "$python" || ! -f "$INSTALL_DIR/manage.py" ]]; then
+    record_warn "postgres-docker-bridge" "skipped until virtualenv/manage.py are available"
+    return 0
+  fi
+  local output=""
+  if output="$(cd "$INSTALL_DIR" && "$python" "$INSTALL_DIR/manage.py" check_postgres_bridge 2>&1)"; then
+    record_pass "postgres-docker-bridge" "host PostgreSQL is reachable from Docker bridge"
+    summarize_output "$output"
+  else
+    record_fail "postgres-docker-bridge" "host PostgreSQL is not ready for Docker tenant containers; run with --verbose for remediation"
+    summarize_output "$output"
+  fi
+}
+
 run_django_command() {
   local check_name="$1"
   shift
@@ -610,6 +633,7 @@ main() {
   check_permissions
   check_disk
   check_database_backend
+  check_postgres_docker_bridge
   check_django
   check_systemd
   check_nginx

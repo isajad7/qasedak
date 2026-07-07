@@ -6,7 +6,9 @@ The bootstrap command creates the initial database-backed install objects from a
 python manage.py bootstrap_install --config install.config.json
 ```
 
-This is not a shell installer. It does not configure systemd, nginx, TLS, DNS, cron, backups, virtualenvs, `.env`, `data/`, `media/`, logs, or database servers. The shell installer owns `.env`, SQLite/PostgreSQL runtime setup, and package installation.
+This is not a shell installer. It does not configure systemd, nginx, TLS, DNS, cron, backups, virtualenvs, `.env`, `data/`, `media/`, logs, or database servers. The shell installer owns `.env`, SQLite/PostgreSQL runtime setup, package installation, and the SaaS host PostgreSQL Docker bridge requirement.
+
+On SaaS hosts with Docker tenant containers, host PostgreSQL must listen on `127.0.0.1:5432` and `172.17.0.1:5432`, and `pg_hba.conf` must allow `host all all 172.17.0.0/16 scram-sha-256`. Tenant containers use the host database through the Docker bridge; if PostgreSQL only listens on loopback, tenants can fail with `connection to server at "172.17.0.1", port 5432 failed: Connection refused`, enter a restart loop, and surface as Nginx `502`. Use `scripts/doctor.sh --install-dir /opt/qasedak --no-fail --verbose` to check this path, or opt in to `scripts/install.sh --configure-postgres-docker-bridge` during host setup.
 
 ## Example Config
 

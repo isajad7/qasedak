@@ -150,7 +150,7 @@ from .vpn_client_reconciliation_services import (
     safe_remote_scope,
     soft_delete_remote_missing_clients,
 )
-from .setup_readiness import sync_store_setup_status
+from .setup_readiness import setup_not_ready_details, sync_store_setup_status
 from .telegram_bot.client import BotClient, BotDeliveryError
 from .xui_api import XUIService, sync_vpn_client_stats
 
@@ -2282,12 +2282,12 @@ def product_catalog(request):
 
     context = {
         **admin.site.each_context(request),
-        **get_catalog_context(selected_store),
+        **get_catalog_context(selected_store, request.GET),
         "stores": stores,
         "selected_store": selected_store,
         "can_manage_catalog": user_has_capability(request.user, "catalog.manage"),
-        "title": "مدیریت محصولات و مسیر فروش",
-        "subtitle": "کاتالوگ پلن‌ها، routeهای فروش و آمادگی inboundها بدون اجرای live call.",
+        "title": "محصولات / پلن‌ها",
+        "subtitle": "مدیریت پلن‌های فروش، قیمت، نمایش و آمادگی route بدون اجرای live call.",
     }
     return TemplateResponse(request, "admin/store/catalog/index.html", context)
 
@@ -2665,7 +2665,12 @@ def setup_wizard_step(request, step_slug):
                 _ensure_tenant_bot_worker_after_setup(request, selected_store)
                 messages.success(request, "فروشگاه آماده شد و فروش عمومی فعال است.")
             else:
-                messages.error(request, "هنوز چند مورد setup کامل نیست؛ تا رفع همه موارد فروش عمومی فعال نمی‌شود.")
+                details = setup_not_ready_details(selected_store)
+                blockers = ", ".join(details["pending"] or details["reasons"] or ["unknown"])
+                messages.error(
+                    request,
+                    f"هنوز چند مورد setup کامل نیست؛ تا رفع همه موارد فروش عمومی فعال نمی‌شود. موارد باقی‌مانده: {blockers}",
+                )
             return redirect(wizard_step_url("review", selected_store))
 
         context = {

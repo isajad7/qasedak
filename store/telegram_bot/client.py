@@ -5,7 +5,7 @@ from pathlib import PurePosixPath
 import requests
 from django.conf import settings
 
-from store.bot_proxy import bot_request_kwargs, capture_telegram_webhook_response
+from store.bot_proxy import bot_request_kwargs, capture_telegram_webhook_response, mask_proxy_secrets
 from store.models import BotConfiguration
 
 
@@ -44,7 +44,7 @@ class BotClient:
         self.base_url = self.BASE_URLS[config.provider].format(token=self.bot_token).rstrip("/")
 
     def sanitized_error(self, exc):
-        message = str(exc)
+        message = mask_proxy_secrets(exc)
         tokens = {str(self.config.bot_token or ""), str(self.bot_token or "")}
         for token in tokens:
             if not token:

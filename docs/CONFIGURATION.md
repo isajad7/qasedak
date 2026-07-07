@@ -103,6 +103,7 @@ Installer and doctor summaries should show only whether a secret is configured, 
 | `DJANGO_ALLOWED_HOSTS` | yes | `example.com,127.0.0.1,localhost` | Comma-separated public host allow-list. | no | yes |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | conditional | `https://example.com` | Required for public HTTPS forms/admin. | no | yes |
 | `DJANGO_USE_X_FORWARDED_HOST` | no | `True` | Trust reverse proxy host header. | no | advanced |
+| `NO_PROXY` | no | `127.0.0.1,localhost,::1,host.docker.internal` | Hosts that must bypass any global HTTP proxy; tenant deployment also adds the tenant domain and supplied panel hosts. | no | conditional |
 | `DATABASE_ENGINE` | yes | `postgres` | `postgres`/`postgresql` or `sqlite`. Defaults to SQLite if unset for dev/test compatibility. | no | yes |
 | `SQLITE_DATABASE_PATH` | sqlite only | `/opt/qasedak/data/db.sqlite3` | SQLite database path. | no | yes |
 | `POSTGRES_DB` | postgres only | `qasedak` | PostgreSQL database name. | no | yes |

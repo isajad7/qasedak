@@ -38,7 +38,7 @@ from .order_services import (
 from .referral_services import (
     apply_referral_code,
 )
-from .setup_readiness import SETUP_NOT_READY_MESSAGE, store_is_sellable
+from .setup_readiness import SETUP_NOT_READY_MESSAGE, setup_not_ready_details, store_is_sellable
 from .telegram_link_services import (
     WEB_TELEGRAM_INVALID_MESSAGE,
     link_bot_user_to_customer,
@@ -1408,6 +1408,13 @@ def handle_bot_update(provider, webhook_secret, update, *, source="webhook"):
     logger.info("Bot update extraction config=%s source=%s user_id=%s chat_id=%s is_admin=%s", config.pk, source, user_id, chat_id, is_admin)
 
     if not is_admin and config.store_id and not store_is_sellable(config.store):
+        readiness_details = setup_not_ready_details(config.store)
+        logger.warning(
+            "Customer bot update blocked until tenant setup is ready config=%s store_id=%s reasons=%s",
+            config.pk,
+            config.store_id,
+            ",".join(readiness_details["reasons"]) or "unknown",
+        )
         if chat_id and config.bot_token:
             BotClient(config).send_message(SETUP_NOT_READY_MESSAGE, chat_id=chat_id, parse_mode=None)
         log_event(
@@ -1415,7 +1422,11 @@ def handle_bot_update(provider, webhook_secret, update, *, source="webhook"):
             event_type=BotEventLog.EventType.WEBHOOK,
             status=BotEventLog.Status.SUCCESS,
             message="Customer bot update blocked until tenant setup is ready.",
-            raw_payload={"setup_status": getattr(config.store, "setup_status", "")},
+            raw_payload={
+                "setup_status": readiness_details["setup_status"],
+                "pending": readiness_details["pending"],
+                "reasons": readiness_details["reasons"],
+            },
         )
         return {"ok": True, "setup_required": True}
 

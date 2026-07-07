@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import re
 import threading
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -7,6 +8,7 @@ from django.conf import settings
 from .models import BotConfiguration
 
 _webhook_response_state = threading.local()
+URL_CREDENTIAL_RE = re.compile(r"\b([a-z][a-z0-9+.-]*://)([^/\s:@]+)(?::([^@\s]*))?@", re.IGNORECASE)
 
 
 class TelegramWebhookResponseState:
@@ -43,14 +45,18 @@ def sanitized_telegram_proxy_url(proxy_url=None):
 
     parsed = urlsplit(proxy_url)
     if not parsed.hostname:
-        return proxy_url
+        return mask_proxy_secrets(proxy_url)
 
     auth = ""
-    if parsed.username:
-        auth = f"{parsed.username}:****@"
+    if parsed.username or parsed.password:
+        auth = "****@"
     port = f":{parsed.port}" if parsed.port else ""
     netloc = f"{auth}{parsed.hostname}{port}"
-    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    return urlunsplit((parsed.scheme, netloc, "", "", ""))
+
+
+def mask_proxy_secrets(value):
+    return URL_CREDENTIAL_RE.sub(r"\1****@", str(value or ""))
 
 
 def bot_request_proxies(provider):

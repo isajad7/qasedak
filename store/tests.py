@@ -353,6 +353,60 @@ class TelegramProxyTests(TestCase):
         self.assertEqual(post_mock.call_args.kwargs["json"]["timeout"], 2)
         self.assertEqual(post_mock.call_args.kwargs["timeout"], (4, 7))
 
+    @override_settings(TELEGRAM_PROXY_URL="http://" + "proxy-user" + ":" + "proxy-secret" + "@proxy.example:7880")
+    @patch("store.telegram_bot.client.requests.post", return_value=DummyBotResponse({"ok": True, "result": {"id": 42}}))
+    def test_telegram_get_me_uses_telegram_proxy_url_and_masks_proxy_secret(self, post_mock):
+        from .bot_proxy import sanitized_telegram_proxy_url
+        from .telegram_bot.client import BotClient
+
+        config = BotConfiguration(
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Telegram",
+            bot_token="telegram-token",
+            admin_user_id="42",
+        )
+
+        BotClient(config).get_me()
+
+        self.assertEqual(post_mock.call_args.args[0], "https://api.telegram.org/bottelegram-token/getMe")
+        self.assertEqual(
+            post_mock.call_args.kwargs["proxies"],
+            {
+                "http": "http://proxy-user:proxy-secret@proxy.example:7880",
+                "https": "http://proxy-user:proxy-secret@proxy.example:7880",
+            },
+        )
+        safe_proxy = sanitized_telegram_proxy_url()
+        self.assertEqual(safe_proxy, "http://****@proxy.example:7880")
+        self.assertNotIn("proxy-secret", safe_proxy)
+        self.assertNotIn("proxy-user", safe_proxy)
+
+    @override_settings(TELEGRAM_PROXY_URL="http://" + "proxy-user" + ":" + "proxy-secret" + "@proxy.example:7880")
+    @patch(
+        "store.telegram_bot.client.requests.post",
+        side_effect=requests.exceptions.ProxyError(
+            "failed via http://" + "proxy-user" + ":" + "proxy-secret" + "@proxy.example:7880"
+        ),
+    )
+    def test_telegram_delivery_errors_mask_proxy_credentials(self, _post_mock):
+        from .telegram_bot.client import BotClient, BotDeliveryError
+
+        config = BotConfiguration(
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Telegram",
+            bot_token="telegram-token",
+            admin_user_id="42",
+        )
+
+        with self.assertRaises(BotDeliveryError) as error:
+            BotClient(config).get_me()
+
+        message = str(error.exception)
+        self.assertIn("http://****@proxy.example:7880", message)
+        self.assertNotIn("proxy-secret", message)
+        self.assertNotIn("proxy-user", message)
+        self.assertNotIn("telegram-token", message)
+
     @override_settings(TELEGRAM_PROXY_URL=proxy_url)
     @patch("store.bots.requests.post", return_value=DummyBotResponse())
     def test_telegram_delete_webhook_keeps_pending_updates(self, post_mock):
@@ -1142,6 +1196,41 @@ class XUIPanelProxyTests(TestCase):
 
         self.assertFalse(service.session.trust_env)
         self.assertEqual(service.session.proxies, {})
+
+    @override_settings(XUI_PANEL_PROXY_URL="", TELEGRAM_PROXY_URL="http://telegram-proxy.example:7880")
+    @patch.dict(os.environ, {"HTTP_PROXY": "http://telegram-proxy.example:7880", "HTTPS_PROXY": "http://telegram-proxy.example:7880"})
+    def test_xui_service_ignores_global_telegram_proxy_environment(self):
+        from .xui_api import XUIService
+
+        panel = Panel(
+            name="XUI",
+            url="http://panel.example:1111/admin",
+            username="user",
+            password="pass",
+        )
+
+        service = XUIService(panel)
+
+        self.assertFalse(service.session.trust_env)
+        self.assertEqual(service.session.proxies, {})
+
+    @override_settings(XUI_PANEL_PROXY_URL="", TELEGRAM_PROXY_URL="http://telegram-proxy.example:7880")
+    @patch.dict(os.environ, {"HTTP_PROXY": "http://telegram-proxy.example:7880", "HTTPS_PROXY": "http://telegram-proxy.example:7880"})
+    def test_panel_specific_proxy_still_works_with_global_telegram_proxy_environment(self):
+        from .xui_api import XUIService
+
+        panel = Panel(
+            name="XUI",
+            url="http://panel.example:1111/admin",
+            username="user",
+            password="pass",
+            proxy_url=self.proxy_url,
+        )
+
+        service = XUIService(panel)
+
+        self.assertFalse(service.session.trust_env)
+        self.assertEqual(service.session.proxies, self.expected_proxies)
 
     @patch("store.xui_api.requests.Session")
     def test_xui_login_retries_transient_connection_errors(self, session_class_mock):
@@ -5002,8 +5091,53 @@ class AdminCatalogTests(TestCase):
         response = self.client.get(reverse("admin_store_catalog"), {"store": self.store.pk})
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "مدیریت محصولات و مسیر فروش")
+        self.assertContains(response, "محصولات / پلن‌ها")
+        self.assertContains(response, "ساخت پلن جدید")
+        self.assertContains(response, "مدیریت مسیرها")
         self.assertContains(response, self.plan.name)
+
+    def test_catalog_center_focuses_on_plan_management(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_catalog"), {"store": self.store.pk})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "جستجو")
+        self.assertContains(response, "آمادگی route")
+        self.assertContains(response, "مشاهده")
+        self.assertContains(response, "ویرایش")
+        self.assertContains(response, "مسیر")
+        self.assertContains(response, "کپی")
+        self.assertNotContains(response, "وضعیت فروشگاه")
+        self.assertNotContains(response, "Quick Actions")
+        self.assertNotContains(response, "python manage.py audit_plan_inbound_routes")
+        self.assertNotContains(response, "Inboundهای آماده فروش")
+        self.assertNotContains(response, "Route overview")
+        self.assertNotContains(response, "Setup Wizard")
+
+    def test_catalog_filters_plan_rows_with_get_only_state(self):
+        Plan.objects.create(
+            store=self.store,
+            name="Hidden 20GB",
+            slug="hidden-20gb",
+            volume_gb=Decimal("20.000"),
+            duration_days=60,
+            price=450000,
+            currency=Plan.Currency.TOMAN,
+            is_active=False,
+            is_public=False,
+        )
+        self.login_admin()
+
+        active_response = self.client.get(reverse("admin_store_catalog"), {"store": self.store.pk, "active": "active"})
+        private_response = self.client.get(reverse("admin_store_catalog"), {"store": self.store.pk, "visibility": "private"})
+
+        self.assertEqual(active_response.status_code, 200)
+        self.assertContains(active_response, self.plan.name)
+        self.assertNotContains(active_response, "Hidden 20GB")
+        self.assertEqual(private_response.status_code, 200)
+        self.assertContains(private_response, "Hidden 20GB")
+        self.assertNotContains(private_response, self.plan.name)
 
     def test_catalog_center_requires_staff_login(self):
         response = self.client.get(reverse("admin_store_catalog"))
@@ -5026,7 +5160,7 @@ class AdminCatalogTests(TestCase):
         response = self.client.get(reverse("admin_store_catalog"), {"store": self.store.pk})
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Inbound آماده فروش وجود ندارد")
+        self.assertContains(response, "پلنی با این فیلترها پیدا نشد.")
 
     def test_route_status_ready_for_valid_route(self):
         from .admin_catalog import get_plan_route_status
@@ -8775,6 +8909,33 @@ class AdminSetupWizardTests(TestCase):
         self.store.refresh_from_db()
         self.assertEqual(self.store.setup_status, Store.SetupStatus.READY)
 
+    def test_review_activation_incomplete_keeps_previous_step_and_shows_reason(self):
+        self.store.setup_status = Store.SetupStatus.SETUP_REQUIRED
+        self.store.save(update_fields=["setup_status"])
+        BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            name="Telegram bot",
+            telegram_bot_username="wizard_bot",
+            bot_token="123456:telegram-secret-token",
+            admin_user_id="999",
+            is_active=True,
+        )
+        self.login_admin()
+
+        response = self.client.post(
+            self.step_url("review"),
+            {"wizard_action": "activate_store", "activation_confirmation": "ACTIVATE_STORE"},
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.store.refresh_from_db()
+        self.assertEqual(self.store.setup_status, Store.SetupStatus.TELEGRAM_CONFIGURED)
+        self.assertContains(response, "payment")
+        self.assertContains(response, "xui")
+        self.assertContains(response, "routes")
+
     def test_setup_required_store_blocks_public_orders_and_plan_listing(self):
         from .setup_readiness import SETUP_NOT_READY_MESSAGE
 
@@ -11804,6 +11965,61 @@ class TelegramPurchaseFlowTests(TestCase):
         self.assertEqual(payload["chat_id"], "42")
         self.assertEqual(payload["text"], SETUP_NOT_READY_MESSAGE)
         self.assertFalse(BotUser.objects.exists())
+
+    @patch("store.bots.requests.post", return_value=DummyBotResponse())
+    def test_plans_configured_store_blocks_non_admin_bot_start_with_debug_reason(self, post_mock):
+        from .setup_readiness import SETUP_NOT_READY_MESSAGE
+
+        self.store.setup_status = Store.SetupStatus.PLANS_CONFIGURED
+        self.store.save(update_fields=["setup_status"])
+
+        with self.assertLogs("store.bots", level="WARNING") as logs:
+            response = self.post_update(self.message("/start"))
+
+        self.assertEqual(response.status_code, 200)
+        payload = post_mock.call_args.kwargs["json"]
+        self.assertEqual(payload["text"], SETUP_NOT_READY_MESSAGE)
+        log_output = "\n".join(logs.output)
+        self.assertIn("setup_status=plans_configured", log_output)
+        self.assertNotIn(self.bot_config.bot_token, log_output)
+        self.assertFalse(BotUser.objects.exists())
+
+    @patch("store.bots.requests.post", return_value=DummyBotResponse())
+    def test_ready_store_public_plan_with_ready_route_appears_in_bot_plan_list(self, post_mock):
+        self.store.setup_status = Store.SetupStatus.READY
+        self.store.sales_mode = Store.SalesMode.TUNNEL
+        self.store.save(update_fields=["setup_status", "sales_mode"])
+        PlanInboundRoute.objects.create(store=self.store, plan=self.plan, inbound=self.inbound, is_active=True)
+
+        self.post_update(self.message("/start"))
+        response = self.post_update(self.callback("user:buy"))
+
+        self.assertEqual(response.status_code, 200)
+        payload = post_mock.call_args.kwargs["json"]
+        callback_values = [
+            button["callback_data"]
+            for row in payload["reply_markup"]["inline_keyboard"]
+            for button in row
+            if "callback_data" in button
+        ]
+        self.assertIn(f"user:buyplan:{self.plan.pk}", callback_values)
+        self.assertNotIn("در حال حاضر پلن فعالی برای خرید وجود ندارد.", payload["text"])
+
+    @patch("store.bots.requests.post", return_value=DummyBotResponse())
+    def test_empty_bot_plan_listing_logs_safe_debug_reason(self, post_mock):
+        self.plan.is_active = False
+        self.plan.save(update_fields=["is_active", "updated_at"])
+
+        self.post_update(self.message("/start"))
+        with self.assertLogs("store.telegram_bot.buy_flow", level="WARNING") as logs:
+            response = self.post_update(self.callback("user:buy"))
+
+        self.assertEqual(response.status_code, 200)
+        payload = post_mock.call_args.kwargs["json"]
+        self.assertIn("در حال حاضر پلن فعالی برای خرید وجود ندارد.", payload["text"])
+        log_output = "\n".join(logs.output)
+        self.assertIn("no_active_public_plans", log_output)
+        self.assertNotIn(self.bot_config.bot_token, log_output)
 
     @patch("store.order_services.create_inactive_client_details", return_value=fake_client_result("10101010-1010-4010-8010-101010101010"))
     @patch("store.bots.requests.get", return_value=DummyBotResponse(content=image_bytes("JPEG")))
@@ -18990,6 +19206,18 @@ class AdminStaffAccessCenterP11Tests(TestCase):
         self.assertContains(analyst_response, "گزارش‌ها و تحلیل کسب‌وکار")
         self.assertNotContains(analyst_response, "راه‌اندازی فروشگاه")
         self.assertNotContains(analyst_response, "tw-button-danger")
+
+    def test_sidebar_navigation_is_grouped_and_permission_aware(self):
+        catalog_response = self.login(self.catalog).get(reverse("admin:index"))
+
+        self.assertEqual(catalog_response.status_code, 200)
+        self.assertContains(catalog_response, "Sales")
+        self.assertContains(catalog_response, "Products / Plans")
+        self.assertContains(catalog_response, "Sales Routes")
+        self.assertContains(catalog_response, "Reports")
+        self.assertNotContains(catalog_response, "Staff Access")
+        self.assertNotContains(catalog_response, "Backup / Restore")
+        self.assertNotContains(catalog_response, "Revenue Engine")
 
     def test_finance_can_view_orders_but_not_catalog_mutation(self):
         client = self.login(self.finance)

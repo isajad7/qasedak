@@ -13,6 +13,7 @@ from store.order_services import (
     OPERATOR_INVALID_MESSAGE,
     OPERATOR_NO_PLANS_MESSAGE,
     OPERATOR_REQUIRED_MESSAGE,
+    bot_plan_listing_debug_reasons,
     calculate_percentage_discount,
     custom_volume_is_available,
     get_active_operator,
@@ -371,11 +372,28 @@ def send_plan_list(client, config, *, chat_id, buy_mode=False, operator=None):
     plans = list(get_store_plans(store, public_only=True, operator=operator))
     custom_volume = custom_volume_is_available(store)
     if operator and not operator_has_available_plans(store, operator):
+        reasons = bot_plan_listing_debug_reasons(store, operator=operator)
+        logger.warning(
+            "Bot operator plan listing hidden store_id=%s setup_status=%s operator_id=%s reasons=%s",
+            getattr(store, "pk", None),
+            getattr(store, "setup_status", ""),
+            getattr(operator, "pk", None),
+            ",".join(reasons) or "unknown",
+        )
         client.send_message(OPERATOR_NO_PLANS_MESSAGE, chat_id=chat_id, reply_markup=operator_keyboard(get_active_operators(store)))
-        return {"ok": True, "handled": True}
+        return {"ok": True, "handled": True, "reasons": reasons}
     if not plans and not custom_volume:
+        reasons = bot_plan_listing_debug_reasons(store, operator=operator)
+        logger.warning(
+            "Bot plan listing hidden store_id=%s setup_status=%s sales_mode=%s operator_id=%s reasons=%s",
+            getattr(store, "pk", None),
+            getattr(store, "setup_status", ""),
+            getattr(store, "sales_mode", ""),
+            getattr(operator, "pk", None),
+            ",".join(reasons) or "unknown",
+        )
         client.send_message("در حال حاضر پلن فعالی برای خرید وجود ندارد.", chat_id=chat_id, reply_markup=main_menu_keyboard())
-        return {"ok": True, "handled": True}
+        return {"ok": True, "handled": True, "reasons": reasons}
 
     client.send_message(
         format_plan_lines(plans, store=store, custom_volume=custom_volume, operator=operator),

@@ -135,6 +135,39 @@ def setup_checklist_passes(store):
     return all(item.passed for item in build_store_readiness_checklist(store))
 
 
+def setup_readiness_blockers(store):
+    return [item for item in build_store_readiness_checklist(store) if not item.passed]
+
+
+def setup_not_ready_details(store):
+    if not store:
+        return {
+            "setup_status": "",
+            "pending": ["store"],
+            "reasons": ["store_missing"],
+        }
+
+    pending = [item.key for item in setup_readiness_blockers(store)]
+    setup_status = getattr(store, "setup_status", "") or ""
+    reasons = []
+    if not getattr(store, "is_active", False):
+        reasons.append("store_inactive")
+    if setup_status != Store.SetupStatus.READY:
+        reasons.append(f"setup_status={setup_status or 'missing'}")
+    if pending and setup_status != Store.SetupStatus.READY:
+        reasons.append(f"pending={','.join(pending)}")
+    return {
+        "setup_status": setup_status,
+        "pending": pending,
+        "reasons": reasons,
+    }
+
+
+def setup_not_ready_reason(store):
+    details = setup_not_ready_details(store)
+    return "; ".join(details["reasons"]) or "unknown"
+
+
 def derive_setup_status(store, *, allow_ready=False):
     if not store:
         return Store.SetupStatus.ERROR

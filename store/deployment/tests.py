@@ -11,6 +11,7 @@ from unittest.mock import patch
 from store.deployment.nginx_generator import NginxConfigGenerator
 from store.deployment.owner_toolkit import OwnerToolkitError, TenantCommandResult, TenantOwnerToolkit
 from store.deployment.port_allocator import PortAllocator
+from store.deployment.postgres_bridge import pg_hba_allows_bridge, run_checks, ss_listens_on_bridge
 from store.deployment.service import DockerRunner, SubdomainDeploymentError, SubdomainDeploymentService
 from store.deployment.subdomain_manager import SubdomainError, SubdomainManager
 from store.orchestrator_v2.models import ServerNode, TenantInstance
@@ -23,6 +24,24 @@ class FakeCommandRunner:
     def run(self, argv, *, timeout=60, input=None):
         self.calls.append(list(argv))
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+
+class FakeBridgeRunner:
+    def __init__(self, *, ss_output="", hba_file="", docker_returncode=0):
+        self.calls = []
+        self.ss_output = ss_output
+        self.hba_file = hba_file
+        self.docker_returncode = docker_returncode
+
+    def run(self, argv, *, timeout=30):
+        self.calls.append(list(argv))
+        if argv[:2] == ["ss", "-ltnp"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=self.ss_output, stderr="")
+        if "SHOW hba_file;" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{self.hba_file}\n", stderr="")
+        if argv[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(argv, self.docker_returncode, stdout="", stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
 
 
 class FakeOwnerCommandRunner(FakeCommandRunner):
@@ -130,6 +149,54 @@ class FakeDatabaseProvisioner:
 class FailingNginxGenerator(NginxConfigGenerator):
     def reload(self):
         raise RuntimeError("nginx reload failed")
+
+
+class PostgresDockerBridgePreflightTests(TestCase):
+    def test_ss_parser_accepts_bridge_listener(self):
+        output = "LISTEN 0 244 172.17.0.1:5432 0.0.0.0:* users:((\"postgres\",pid=1,fd=7))"
+
+        self.assertTrue(ss_listens_on_bridge(output))
+        self.assertFalse(ss_listens_on_bridge("LISTEN 0 244 127.0.0.1:5432 0.0.0.0:*"))
+
+    def test_pg_hba_parser_requires_bridge_scram_rule(self):
+        self.assertTrue(pg_hba_allows_bridge("host all all 172.17.0.0/16 scram-sha-256\n"))
+        self.assertFalse(pg_hba_allows_bridge("host all all 172.17.0.0/15 scram-sha-256\n"))
+        self.assertFalse(pg_hba_allows_bridge("host all all 172.17.0.0/16 md5\n"))
+        self.assertFalse(pg_hba_allows_bridge("# host all all 172.17.0.0/16 scram-sha-256\n"))
+
+    def test_run_checks_uses_config_and_container_probe_without_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hba = pathlib.Path(tmp) / "pg_hba.conf"
+            hba.write_text("host all all 172.17.0.0/16 scram-sha-256\n", encoding="utf-8")
+            runner = FakeBridgeRunner(
+                ss_output="LISTEN 0 244 172.17.0.1:5432 0.0.0.0:*",
+                hba_file=str(hba),
+                docker_returncode=0,
+            )
+
+            checks = run_checks(runner=runner)
+
+        self.assertTrue(all(check.ok for check in checks))
+        flat_calls = " ".join(" ".join(call) for call in runner.calls)
+        self.assertIn("pg_isready", flat_calls)
+        self.assertNotIn("DATABASE_URL", flat_calls)
+        self.assertNotIn("password", flat_calls.lower())
+
+    def test_run_checks_returns_remediation_on_missing_bridge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hba = pathlib.Path(tmp) / "pg_hba.conf"
+            hba.write_text("host all all 127.0.0.1/32 scram-sha-256\n", encoding="utf-8")
+            runner = FakeBridgeRunner(
+                ss_output="LISTEN 0 244 127.0.0.1:5432 0.0.0.0:*",
+                hba_file=str(hba),
+                docker_returncode=1,
+            )
+
+            checks = run_checks(runner=runner)
+
+        self.assertEqual([check.ok for check in checks], [False, False, False])
+        remediation = "\n".join(check.remediation[0] for check in checks if check.remediation)
+        self.assertIn("SHOW config_file", remediation)
 
 
 class SubdomainDeploymentTests(TestCase):
@@ -307,6 +374,42 @@ class SubdomainDeploymentTests(TestCase):
             bootstrap_config = docker.bootstraps[0]["config"]
             self.assertFalse(bootstrap_config["telegram"]["enabled"])
             self.assertTrue(bootstrap_config["telegram"]["create_inactive_placeholder"])
+
+    def test_tenant_env_merges_no_proxy_for_panel_and_local_hosts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            docker = FakeDockerRunner()
+            service = SubdomainDeploymentService(
+                docker_runner=docker,
+                nginx_generator=NginxConfigGenerator(
+                    available_root=root / "available" / "qasedak",
+                    enabled_root=root / "enabled",
+                    command_runner=FakeCommandRunner(),
+                ),
+                instance_root=root / "instances",
+            )
+
+            service.deploy_instance(
+                "tenant-a",
+                base_domain="yourdomain.com",
+                database_url="postgres://user:pass@db/qasedak",
+                server_node_id=self.server.pk,
+                extra_env={
+                    "NO_PROXY": "existing.internal",
+                    "XUI_PANEL_URL": "https://panel.internal.example:2053/admin",
+                },
+            )
+
+            env_lines = pathlib.Path(docker.runs[0]["env_file"]).read_text(encoding="utf-8").splitlines()
+            env_values = dict(line.split("=", 1) for line in env_lines if "=" in line)
+            no_proxy_hosts = set(env_values["NO_PROXY"].split(","))
+
+            self.assertIn("existing.internal", no_proxy_hosts)
+            self.assertIn("panel.internal.example", no_proxy_hosts)
+            self.assertIn("tenant-a.yourdomain.com", no_proxy_hosts)
+            self.assertIn("127.0.0.1", no_proxy_hosts)
+            self.assertIn("localhost", no_proxy_hosts)
+            self.assertIn("host.docker.internal", no_proxy_hosts)
 
     def test_provisioned_database_env_does_not_inherit_control_database_url(self):
         with tempfile.TemporaryDirectory() as tmp:
