@@ -12,7 +12,7 @@ from .admin_notifications import send_admin_message_to_telegram_admins
 from .jalali import format_jalali_datetime, persian_digits
 from .models import BotEventLog, Inbound, Panel, PanelHealthCheckLog, PanelHealthStatus, Store
 from .telegram_bot.redaction import sanitize_bot_event_log_value
-from .xui_api import XUIError, XUIService
+from .xui_api import XUIError, XUIService, classify_xui_exception
 from .xui_compat import discover_xui_capabilities
 
 
@@ -75,9 +75,26 @@ def sanitize_operational_text(value, *, panel=None, max_length=500):
         if secret and len(secret) >= 3:
             text = text.replace(secret, "<redacted>")
     text = URL_RE.sub("<url-redacted>", text)
+    text = re.sub(r"(?i)(csrf[-_ ]?token|session|cookie)[\"':=\s]+[^\"'\s,}]+", r"\1=<redacted>", text)
+    text = re.sub(r"(?i)\bcsrf[-_a-z0-9]{6,}\b", "<csrf-redacted>", text)
+    text = re.sub(r"(?i)\b(?:session|cookie)[-_a-z0-9]{8,}\b", "<session-redacted>", text)
     if len(text) > max_length:
         text = f"{text[:max_length - 1]}..."
     return text
+
+
+def sanitize_operational_metadata(value, *, panel=None):
+    value = sanitize_bot_event_log_value(value)
+    if isinstance(value, dict):
+        return {
+            sanitize_operational_text(key, panel=panel): sanitize_operational_metadata(item, panel=panel)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize_operational_metadata(item, panel=panel) for item in value]
+    if isinstance(value, str):
+        return sanitize_operational_text(value, panel=panel)
+    return value
 
 
 def _base_result(panel, settings, *, status, summary, login_ok=None, error_code="", error_message="", metadata=None):
@@ -108,22 +125,56 @@ def _base_result(panel, settings, *, status, summary, login_ok=None, error_code=
 
 
 def _classify_exception(exc):
-    if isinstance(exc, requests.Timeout):
-        return "timeout", "عدم پاسخ پنل در زمان مجاز"
-    if isinstance(exc, requests.ConnectionError):
-        return "connection_error", "اتصال به پنل برقرار نشد"
-    if isinstance(exc, requests.RequestException):
-        return "connection_error", "خطای ارتباط با پنل"
     if isinstance(exc, XUIError):
+        if exc.category == "http_403_csrf_required":
+            return (
+                "http_403_csrf_required",
+                "ورود به پنل با خطای HTTP 403 ناموفق شد. احتمالاً CSRF یا تنظیمات امنیتی پنل نیاز به سازگاری دارد.",
+            )
+        if exc.category == "http_403":
+            return "http_403", "درخواست پنل با خطای HTTP 403 ناموفق شد."
+        if exc.category == "http_401":
+            return "http_401", "ورود به پنل با خطای HTTP 401 ناموفق شد. نام کاربری یا رمز پنل را بررسی کنید."
+        if exc.category == "two_factor_required":
+            return (
+                "two_factor_required",
+                "ورود دو مرحله‌ای برای این پنل فعال است و اتصال خودکار پشتیبانی نمی‌شود.",
+            )
+        if exc.category == "auth_failed":
+            return "auth_failed", "ورود به پنل ناموفق بود"
+        if exc.category == "unexpected_response":
+            return "unexpected_response", "پاسخ پنل قابل خواندن یا قابل انتظار نبود"
+        if exc.category == "unsupported_version":
+            return "unsupported_version", "نسخه یا پروفایل پنل پشتیبانی نمی‌شود"
         message = str(exc).lower()
         if "login" in message or "rejected" in message or "auth" in message:
             return "auth_failed", "ورود به پنل ناموفق بود"
         if "json" in message or "invalid" in message:
-            return "malformed_response", "پاسخ پنل قابل خواندن نبود"
+            return "unexpected_response", "پاسخ پنل قابل خواندن یا قابل انتظار نبود"
         if "not found" in message:
             return "inbound_not_found", "اینباند در پنل پیدا نشد"
-        return "xui_api_error", "خطای API پنل"
+        return exc.category or "unknown", "خطای API پنل"
+    category, _message, _metadata = classify_xui_exception(exc)
+    if category == "network_timeout":
+        return "network_timeout", "عدم پاسخ پنل در زمان مجاز"
+    if category == "connection_refused":
+        return "connection_refused", "اتصال به پنل برقرار نشد"
+    if category == "dns_error":
+        return "dns_error", "نام دامنه پنل قابل resolve نبود"
+    if category == "tls_error":
+        return "tls_error", "خطای TLS/SSL هنگام اتصال به پنل"
+    if category == "invalid_url":
+        return "invalid_url", "آدرس پنل نامعتبر است"
+    if isinstance(exc, requests.RequestException):
+        return category, "خطای ارتباط با پنل"
     return "unexpected_error", "خطای غیرمنتظره هنگام بررسی پنل"
+
+
+def _exception_metadata(exc, *, panel):
+    _category, _message, metadata = classify_xui_exception(exc)
+    safe_metadata = sanitize_operational_metadata(dict(metadata or {}), panel=panel)
+    safe_metadata["exception"] = sanitize_operational_text(exc, panel=panel)
+    return safe_metadata
 
 
 def _xui_bool(value, default=True):
@@ -299,7 +350,7 @@ def build_panel_health_result(panel, *, settings=None):
             login_ok=False,
             error_code=error_code,
             error_message=friendly_message,
-            metadata={"exception": sanitize_operational_text(exc, panel=panel)},
+            metadata=_exception_metadata(exc, panel=panel),
         )
         result["response_time_ms"] = int((time.monotonic() - start) * 1000)
         return result
@@ -364,7 +415,7 @@ def build_panel_health_result(panel, *, settings=None):
                 expected=inbound.inbound_id,
                 actual="",
             )
-            issue["exception"] = sanitize_operational_text(exc, panel=panel)
+            issue.update(_exception_metadata(exc, panel=panel))
             errors.append(issue)
             continue
 
@@ -426,7 +477,7 @@ def build_panel_health_result(panel, *, settings=None):
 def update_panel_health_status(panel, result):
     checked_at = result.get("checked_at") or timezone.now()
     status = result["status"]
-    metadata = sanitize_bot_event_log_value(result.get("metadata") or {})
+    metadata = sanitize_operational_metadata(result.get("metadata") or {}, panel=panel)
     with transaction.atomic():
         health_status, _created = PanelHealthStatus.objects.select_for_update().get_or_create(panel=panel)
         health_status.status = status

@@ -45,7 +45,34 @@ USAGE_SNAPSHOT_INTERVAL_SECONDS = 300
 
 
 class XUIError(Exception):
-    pass
+    def __init__(
+        self,
+        message,
+        *,
+        category="unknown",
+        http_status=None,
+        endpoint="",
+        response_snippet="",
+        remediation_hint="",
+    ):
+        super().__init__(message)
+        self.category = category or "unknown"
+        self.http_status = http_status
+        self.endpoint = endpoint or ""
+        self.response_snippet = response_snippet or ""
+        self.remediation_hint = remediation_hint or ""
+
+    def safe_metadata(self):
+        metadata = {"error_category": self.category}
+        if self.http_status is not None:
+            metadata["http_status"] = self.http_status
+        if self.endpoint:
+            metadata["endpoint"] = self.endpoint
+        if self.response_snippet:
+            metadata["response_snippet"] = self.response_snippet
+        if self.remediation_hint:
+            metadata["remediation_hint"] = self.remediation_hint
+        return metadata
 
 
 def xui_panel_proxy_url(panel=None, proxy_url=None):
@@ -546,6 +573,9 @@ def sanitize_xui_operational_text(value, *, panel=None, max_length=500):
             text = text.replace(secret, "<redacted>")
     text = re.sub(r"https?://[^\s<>()]+", "<url-redacted>", text, flags=re.IGNORECASE)
     text = re.sub(r"\b(?:vless|vmess|trojan|ss|ssr)://[^\s<>()]+", "<config-link-redacted>", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?i)(csrf[-_ ]?token|session|cookie)[\"':=\s]+[^\"'\s,}]+", r"\1=<redacted>", text)
+    text = re.sub(r"(?i)\bcsrf[-_a-z0-9]{6,}\b", "<csrf-redacted>", text)
+    text = re.sub(r"(?i)\b(?:session|cookie)[-_a-z0-9]{8,}\b", "<session-redacted>", text)
     text = re.sub(
         r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
         lambda match: mask_xui_value(match.group(0)),
@@ -555,6 +585,88 @@ def sanitize_xui_operational_text(value, *, panel=None, max_length=500):
     if len(text) > max_length:
         text = f"{text[:max_length - 1]}..."
     return text
+
+
+def _safe_response_snippet(response, *, panel=None, max_length=240):
+    text = getattr(response, "text", "") or ""
+    if not text:
+        try:
+            text = json.dumps(response.json(), ensure_ascii=False)
+        except Exception:
+            text = ""
+    text = sanitize_xui_operational_text(text, panel=panel, max_length=max_length)
+    text = re.sub(r"(?i)(csrf[-_ ]?token|session|cookie)[\"':=\s]+[^\"'\s,}]+", r"\1=<redacted>", text)
+    text = re.sub(r"(?i)\bcsrf[-_a-z0-9]{6,}\b", "<csrf-redacted>", text)
+    text = re.sub(r"(?i)\b(?:session|cookie)[-_a-z0-9]{8,}\b", "<session-redacted>", text)
+    return text
+
+
+def _xui_http_category(status_code, *, endpoint=""):
+    if status_code == 403:
+        if endpoint in {"login", "csrf-token", "getTwoFactorEnable"}:
+            return "http_403_csrf_required"
+        return "http_403"
+    if status_code == 401:
+        return "http_401"
+    return "unexpected_response"
+
+
+def _xui_remediation_hint(category):
+    return {
+        "http_403_csrf_required": "CSRF/login flow mismatch; use the 3X-UI 3.5 CSRF login flow and verify panel security settings.",
+        "http_403": "Panel refused the request with HTTP 403; verify login/session permissions and panel security settings.",
+        "http_401": "Panel returned HTTP 401; verify panel username/password and account permissions.",
+        "auth_failed": "Verify panel username/password and account permissions.",
+        "two_factor_required": "Disable two-factor login for this panel account or use an automation account without 2FA.",
+        "network_timeout": "Check panel reachability, firewall rules, and timeout settings.",
+        "connection_refused": "Check that the panel service is running and the host/port are reachable.",
+        "dns_error": "Check the panel hostname and DNS resolution.",
+        "tls_error": "Check the panel TLS certificate and HTTPS configuration.",
+        "invalid_url": "Check the panel URL format, including scheme, host, port, and base path.",
+        "unexpected_response": "Panel returned an unexpected response; verify panel version and API compatibility.",
+        "unsupported_version": "Panel version/profile is not supported by the current integration.",
+    }.get(category or "", "Check panel connectivity and X-UI compatibility.")
+
+
+def classify_xui_exception(exc):
+    if isinstance(exc, XUIError):
+        return exc.category or "unknown", str(exc) or "Panel operation failed.", exc.safe_metadata()
+    if isinstance(exc, requests.Timeout):
+        return "network_timeout", "Panel request timed out.", {
+            "error_category": "network_timeout",
+            "remediation_hint": _xui_remediation_hint("network_timeout"),
+        }
+    if isinstance(exc, requests.exceptions.SSLError):
+        return "tls_error", "Panel TLS/SSL request failed.", {
+            "error_category": "tls_error",
+            "remediation_hint": _xui_remediation_hint("tls_error"),
+        }
+    if isinstance(exc, (requests.exceptions.InvalidURL, requests.exceptions.MissingSchema, requests.exceptions.InvalidSchema)):
+        return "invalid_url", "Panel URL is invalid.", {
+            "error_category": "invalid_url",
+            "remediation_hint": _xui_remediation_hint("invalid_url"),
+        }
+    if isinstance(exc, requests.ConnectionError):
+        message = str(exc).lower()
+        if "name or service not known" in message or "temporary failure in name resolution" in message or "nodename nor servname" in message:
+            category = "dns_error"
+        elif "connection refused" in message:
+            category = "connection_refused"
+        else:
+            category = "connection_refused"
+        return category, "Panel connection failed.", {
+            "error_category": category,
+            "remediation_hint": _xui_remediation_hint(category),
+        }
+    if isinstance(exc, requests.RequestException):
+        return "unknown", "Panel request failed.", {
+            "error_category": "unknown",
+            "remediation_hint": _xui_remediation_hint("unknown"),
+        }
+    return "unknown", "Panel operation failed.", {
+        "error_category": "unknown",
+        "remediation_hint": _xui_remediation_hint("unknown"),
+    }
 
 
 def hash_xui_identifier(value):
@@ -765,7 +877,7 @@ class XUIClientStats:
 class XUIService:
     def __init__(self, panel, *, timeout_seconds=None):
         self.panel = panel
-        self.base_url = panel.url.rstrip("/")
+        self.base_url = self._normalize_base_url(panel.url)
         self.session = configure_xui_session(requests.Session(), panel=panel)
         self._logged_in = False
         if timeout_seconds is None:
@@ -775,6 +887,36 @@ class XUIService:
             self.timeout_seconds = max(int(timeout_seconds or PANEL_TIMEOUT_SECONDS), 1)
             connect_timeout = min(5, self.timeout_seconds)
             self.login_timeout = (connect_timeout, self.timeout_seconds)
+
+    def _normalize_base_url(self, value):
+        url = str(value or "").strip().rstrip("/")
+        if not url:
+            raise XUIError(
+                "Panel URL is invalid.",
+                category="invalid_url",
+                remediation_hint=_xui_remediation_hint("invalid_url"),
+            )
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise XUIError(
+                "Panel URL is invalid.",
+                category="invalid_url",
+                remediation_hint=_xui_remediation_hint("invalid_url"),
+            )
+        return url
+
+    def _url(self, path=""):
+        path = str(path or "").strip()
+        if not path:
+            return self.base_url
+        return f"{self.base_url}/{path.lstrip('/')}"
+
+    def _base_page_url(self):
+        return f"{self.base_url}/"
+
+    def _origin(self):
+        parsed = urlparse(self.base_url)
+        return f"{parsed.scheme}://{parsed.netloc}"
 
     def _inbound_id(self, inbound_or_id):
         return getattr(inbound_or_id, "inbound_id", inbound_or_id)
@@ -1005,18 +1147,11 @@ class XUIService:
                 return self._ensure_success(response, "Panel rejected traffic reset.")
             raise
 
-    def login(self):
-        if self._logged_in:
-            return self.session
+    def _login_request_with_retries(self, request_func):
         last_exception = None
         for attempt in range(1, PANEL_LOGIN_ATTEMPTS + 1):
             try:
-                response = self.session.post(
-                    f"{self.base_url}/login",
-                    data={"username": self.panel.username, "password": self.panel.password},
-                    timeout=self.login_timeout,
-                )
-                break
+                return request_func()
             except requests.RequestException as exc:
                 last_exception = exc
                 if attempt >= PANEL_LOGIN_ATTEMPTS:
@@ -1028,29 +1163,189 @@ class XUIService:
                     PANEL_LOGIN_ATTEMPTS,
                 )
                 time.sleep(min(attempt, 2))
-        else:
-            raise last_exception or XUIError("Panel login failed.")
-        if response.status_code != 200:
-            raise XUIError("Panel login failed.")
+        raise last_exception or XUIError("Panel login failed.", category="unknown")
+
+    def _login_response_json(self, response, *, endpoint):
         try:
-            payload = response.json()
+            return response.json()
         except ValueError as exc:
-            raise XUIError("Panel returned an invalid login response.") from exc
+            raise XUIError(
+                "Panel returned an invalid login response.",
+                category="unexpected_response",
+                http_status=getattr(response, "status_code", None),
+                endpoint=endpoint,
+                response_snippet=_safe_response_snippet(response, panel=self.panel),
+                remediation_hint=_xui_remediation_hint("unexpected_response"),
+            ) from exc
+
+    def _raise_login_http_error(self, response, *, endpoint):
+        status_code = getattr(response, "status_code", None)
+        category = _xui_http_category(status_code, endpoint=endpoint)
+        if category == "http_403_csrf_required":
+            message = "Panel login failed with HTTP 403; CSRF-aware login may be required."
+        elif category == "http_401":
+            message = "Panel login failed with HTTP 401."
+        else:
+            message = f"Panel login failed with HTTP {status_code}."
+        raise XUIError(
+            message,
+            category=category,
+            http_status=status_code,
+            endpoint=endpoint,
+            response_snippet=_safe_response_snippet(response, panel=self.panel),
+            remediation_hint=_xui_remediation_hint(category),
+        )
+
+    def _legacy_login(self):
+        response = self._login_request_with_retries(
+            lambda: self.session.post(
+                self._url("login"),
+                data={"username": self.panel.username, "password": self.panel.password},
+                timeout=self.login_timeout,
+            )
+        )
+        if response.status_code != 200:
+            self._raise_login_http_error(response, endpoint="login")
+        payload = self._login_response_json(response, endpoint="login")
         if not payload.get("success"):
-            raise XUIError(payload.get("msg") or "Panel login was rejected.")
+            raise XUIError(
+                payload.get("msg") or "Panel login was rejected.",
+                category="auth_failed",
+                http_status=response.status_code,
+                endpoint="login",
+                response_snippet=_safe_response_snippet(response, panel=self.panel),
+                remediation_hint=_xui_remediation_hint("auth_failed"),
+            )
+        return payload
+
+    def _csrf_login_headers(self, token=""):
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "Mozilla/5.0",
+            "Origin": self._origin(),
+            "Referer": self._base_page_url(),
+        }
+        if token:
+            headers["X-CSRF-Token"] = token
+        return headers
+
+    def _csrf_response_json(self, response, *, endpoint):
+        if response.status_code != 200:
+            self._raise_login_http_error(response, endpoint=endpoint)
+        return self._login_response_json(response, endpoint=endpoint)
+
+    def _csrf_login(self):
+        self._login_request_with_retries(
+            lambda: self.session.get(
+                self._base_page_url(),
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "User-Agent": "Mozilla/5.0",
+                },
+                timeout=self.login_timeout,
+            )
+        )
+        csrf_response = self.session.get(
+            self._url("csrf-token"),
+            headers=self._csrf_login_headers(),
+            timeout=self.login_timeout,
+        )
+        csrf_payload = self._csrf_response_json(csrf_response, endpoint="csrf-token")
+        token = csrf_payload.get("obj") if csrf_payload.get("success") else ""
+        if not isinstance(token, str) or not token:
+            raise XUIError(
+                "Panel returned an invalid CSRF token response.",
+                category="unexpected_response",
+                http_status=csrf_response.status_code,
+                endpoint="csrf-token",
+                response_snippet=_safe_response_snippet(csrf_response, panel=self.panel),
+                remediation_hint=_xui_remediation_hint("unexpected_response"),
+            )
+
+        two_factor_response = self.session.post(
+            self._url("getTwoFactorEnable"),
+            headers=self._csrf_login_headers(token),
+            timeout=self.login_timeout,
+        )
+        two_factor_payload = self._csrf_response_json(two_factor_response, endpoint="getTwoFactorEnable")
+        if not two_factor_payload.get("success"):
+            raise XUIError(
+                two_factor_payload.get("msg") or "Panel returned an invalid two-factor response.",
+                category="unexpected_response",
+                http_status=two_factor_response.status_code,
+                endpoint="getTwoFactorEnable",
+                response_snippet=_safe_response_snippet(two_factor_response, panel=self.panel),
+                remediation_hint=_xui_remediation_hint("unexpected_response"),
+            )
+        if two_factor_payload.get("obj") is True:
+            raise XUIError(
+                "Two-factor login is enabled for this panel account.",
+                category="two_factor_required",
+                http_status=two_factor_response.status_code,
+                endpoint="getTwoFactorEnable",
+                remediation_hint=_xui_remediation_hint("two_factor_required"),
+            )
+
+        login_response = self.session.post(
+            self._url("login"),
+            data={
+                "username": self.panel.username,
+                "password": self.panel.password,
+                "twoFactorCode": "",
+            },
+            headers=self._csrf_login_headers(token),
+            timeout=self.login_timeout,
+        )
+        login_payload = self._csrf_response_json(login_response, endpoint="login")
+        if not login_payload.get("success"):
+            raise XUIError(
+                login_payload.get("msg") or "Panel login was rejected.",
+                category="auth_failed",
+                http_status=login_response.status_code,
+                endpoint="login",
+                response_snippet=_safe_response_snippet(login_response, panel=self.panel),
+                remediation_hint=_xui_remediation_hint("auth_failed"),
+            )
+        return login_payload
+
+    def login(self):
+        if self._logged_in:
+            return self.session
+        try:
+            self._legacy_login()
+        except XUIError as exc:
+            if exc.category != "http_403_csrf_required":
+                raise
+            self._csrf_login()
         self._logged_in = True
         return self.session
 
     def request_json(self, method, path, **kwargs):
         if "timeout" not in kwargs:
             kwargs["timeout"] = self.timeout_seconds
-        response = self.session.request(method, f"{self.base_url}{path}", **kwargs)
+        response = self.session.request(method, self._url(path), **kwargs)
         if response.status_code != 200:
-            raise XUIError(f"Panel request failed with HTTP {response.status_code}.")
+            category = _xui_http_category(response.status_code, endpoint=str(path or "").lstrip("/"))
+            raise XUIError(
+                f"Panel request failed with HTTP {response.status_code}.",
+                category=category,
+                http_status=response.status_code,
+                endpoint=str(path or "").lstrip("/"),
+                response_snippet=_safe_response_snippet(response, panel=self.panel),
+                remediation_hint=_xui_remediation_hint(category),
+            )
         try:
             return response.json()
         except ValueError as exc:
-            raise XUIError("Panel returned invalid JSON.") from exc
+            raise XUIError(
+                "Panel returned invalid JSON.",
+                category="unexpected_response",
+                http_status=response.status_code,
+                endpoint=str(path or "").lstrip("/"),
+                response_snippet=_safe_response_snippet(response, panel=self.panel),
+                remediation_hint=_xui_remediation_hint("unexpected_response"),
+            ) from exc
 
     def authenticated_json(self, method, path, **kwargs):
         self.login()
@@ -2676,11 +2971,13 @@ def sync_inbound_data(panel_url, username, password, inbound_id, *, proxy_url=No
         return False, sanitize_xui_operational_text(exc, panel=panel_like)
 
 
-def login_to_panel(panel):
+def login_to_panel(panel, *, raise_errors=False):
     try:
         return XUIService(panel).login()
     except Exception as exc:
         logger.warning("Could not login to X-UI panel: %s", sanitize_xui_operational_text(exc, panel=panel))
+        if raise_errors:
+            raise
         return None
 
 

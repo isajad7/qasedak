@@ -160,6 +160,19 @@ admin.site.index_title = _("Operations dashboard")
 admin.site.index_template = "admin/dashboard.html"
 
 
+def _panel_health_admin_reason(result):
+    metadata = result.get("metadata") or {}
+    http_status = result.get("http_status") or metadata.get("http_status")
+    error_code = result.get("error_code") or metadata.get("error_category") or ""
+    if error_code == "http_403_csrf_required":
+        return "HTTP 403 - CSRF/login flow mismatch"
+    if error_code == "two_factor_required":
+        return "two_factor_required - two-factor login is enabled"
+    if http_status:
+        return f"HTTP {http_status} - {error_code or 'panel request failed'}"
+    return error_code or result.get("error_message") or result.get("summary") or "unknown"
+
+
 class ImportExportModelAdmin(BaseImportExportModelAdmin):
     """Keep raw import/export surfaces for superusers only."""
 
@@ -2274,6 +2287,7 @@ class PanelAdmin(ImportExportModelAdmin):
         "masked_url",
         "credential_status",
         "proxy_status",
+        "latest_health_details",
         "inbounds_link",
         "compatibility_metadata_summary",
         "created_at",
@@ -2304,7 +2318,7 @@ class PanelAdmin(ImportExportModelAdmin):
         (
             _("Operations"),
             {
-                "fields": ("inbounds_link", "last_sync_at", "created_at", "updated_at"),
+                "fields": ("inbounds_link", "latest_health_details", "last_sync_at", "created_at", "updated_at"),
             },
         ),
         (
@@ -2347,7 +2361,7 @@ class PanelAdmin(ImportExportModelAdmin):
             (
                 _("Operations"),
                 {
-                    "fields": ("inbounds_link", "last_sync_at", "created_at", "updated_at"),
+                    "fields": ("inbounds_link", "latest_health_details", "last_sync_at", "created_at", "updated_at"),
                 },
             ),
         )
@@ -2399,7 +2413,50 @@ class PanelAdmin(ImportExportModelAdmin):
             PanelHealthStatus.Status.ERROR: "bg-danger",
             PanelHealthStatus.Status.DISABLED: "bg-secondary",
         }.get(health_status.status, "bg-secondary")
-        return format_html('<span class="badge {}">{}</span>', tone, health_status.get_status_display())
+        details = []
+        if health_status.error_code:
+            details.append(health_status.error_code)
+        http_status = (health_status.metadata or {}).get("http_status")
+        if http_status:
+            details.append(f"HTTP {http_status}")
+        if health_status.error_message:
+            details.append(health_status.error_message)
+        if health_status.last_checked_at:
+            details.append(timezone.localtime(health_status.last_checked_at).strftime("%Y-%m-%d %H:%M"))
+        return format_html(
+            '<span class="badge {}">{}</span>{}',
+            tone,
+            health_status.get_status_display(),
+            format_html('<div class="small text-muted">{}</div>', " | ".join(details)) if details else "",
+        )
+
+    @admin.display(description=_("Latest health details"))
+    def latest_health_details(self, obj):
+        if not obj:
+            return "-"
+        try:
+            health_status = obj.health_status
+        except PanelHealthStatus.DoesNotExist:
+            return _("No health check has been recorded yet.")
+        metadata = health_status.metadata or {}
+        http_status = metadata.get("http_status")
+        remediation_hint = metadata.get("remediation_hint") or ""
+        checked_at = (
+            timezone.localtime(health_status.last_checked_at).strftime("%Y-%m-%d %H:%M")
+            if health_status.last_checked_at
+            else "-"
+        )
+        lines = [
+            _("status=%(status)s") % {"status": health_status.status},
+            _("error_code=%(code)s") % {"code": health_status.error_code or "-"},
+            _("message=%(message)s") % {"message": health_status.error_message or health_status.summary or "-"},
+            _("checked_at=%(checked_at)s") % {"checked_at": checked_at},
+        ]
+        if http_status:
+            lines.append(_("http_status=HTTP %(status)s") % {"status": http_status})
+        if remediation_hint:
+            lines.append(_("remediation_hint=%(hint)s") % {"hint": remediation_hint})
+        return format_html("<br>".join("{}" for _ in lines), *lines)
 
     @admin.display(description=_("Compatibility"), ordering="capability_profile")
     def compatibility_profile_status(self, obj):
@@ -2447,8 +2504,17 @@ class PanelAdmin(ImportExportModelAdmin):
         errors = 0
         for panel in queryset.select_related("store"):
             try:
-                check_panel_health(panel, send_alerts=False)
+                result = check_panel_health(panel, send_alerts=False)
                 checked += 1
+                if result.get("status") == PanelHealthStatus.Status.OK:
+                    messages.success(request, _("Health check passed for %(panel)s") % {"panel": panel.name})
+                else:
+                    errors += 1
+                    messages.warning(
+                        request,
+                        _("Health check failed for %(panel)s: %(reason)s")
+                        % {"panel": panel.name, "reason": _panel_health_admin_reason(result)},
+                    )
             except Exception as exc:
                 errors += 1
                 messages.error(request, _("Could not check %(panel)s: %(error)s") % {"panel": panel, "error": exc})
@@ -2463,6 +2529,9 @@ class PanelHealthStatusAdmin(ImportExportModelAdmin):
     list_display = (
         "panel",
         "status",
+        "error_code",
+        "error_message_short",
+        "remediation_hint_short",
         "last_checked_at",
         "last_ok_at",
         "last_error_at",
@@ -2497,6 +2566,14 @@ class PanelHealthStatusAdmin(ImportExportModelAdmin):
     def summary_short(self, obj):
         return (obj.summary or "-")[:140]
 
+    @admin.display(description=_("Error message"))
+    def error_message_short(self, obj):
+        return (obj.error_message or obj.summary or "-")[:140]
+
+    @admin.display(description=_("Remediation"))
+    def remediation_hint_short(self, obj):
+        return ((obj.metadata or {}).get("remediation_hint") or "-")[:140]
+
     @admin.action(description=_("Run health check for selected panels without alerts"))
     def run_health_check(self, request, queryset):
         from .panel_health_services import check_panel_health
@@ -2505,8 +2582,20 @@ class PanelHealthStatusAdmin(ImportExportModelAdmin):
         errors = 0
         for health_status in queryset.select_related("panel", "panel__store"):
             try:
-                check_panel_health(health_status.panel, send_alerts=False)
+                result = check_panel_health(health_status.panel, send_alerts=False)
                 checked += 1
+                if result.get("status") == PanelHealthStatus.Status.OK:
+                    messages.success(
+                        request,
+                        _("Health check passed for %(panel)s") % {"panel": health_status.panel.name},
+                    )
+                else:
+                    errors += 1
+                    messages.warning(
+                        request,
+                        _("Health check failed for %(panel)s: %(reason)s")
+                        % {"panel": health_status.panel.name, "reason": _panel_health_admin_reason(result)},
+                    )
             except Exception as exc:
                 errors += 1
                 messages.error(
@@ -2524,6 +2613,9 @@ class PanelHealthCheckLogAdmin(ImportExportModelAdmin):
     list_display = (
         "panel",
         "status",
+        "error_code",
+        "error_message_short",
+        "remediation_hint_short",
         "checked_at",
         "response_time_ms",
         "login_ok",
@@ -2552,6 +2644,14 @@ class PanelHealthCheckLogAdmin(ImportExportModelAdmin):
         "metadata",
         "alert_sent",
     )
+
+    @admin.display(description=_("Error message"))
+    def error_message_short(self, obj):
+        return (obj.error_message or "-")[:140]
+
+    @admin.display(description=_("Remediation"))
+    def remediation_hint_short(self, obj):
+        return ((obj.metadata or {}).get("remediation_hint") or "-")[:140]
 
 
 @admin.register(PanelUsageSnapshot)

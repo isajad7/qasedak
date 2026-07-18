@@ -564,11 +564,18 @@ class Command(BaseCommand):
 
     def check_live_panel(self, panel, subject):
         try:
-            from store.xui_api import login_to_panel
+            from store.xui_api import classify_xui_exception, login_to_panel
 
-            session = login_to_panel(panel)
+            session = login_to_panel(panel, raise_errors=True)
         except Exception as exc:
-            self.error(subject, f"X-UI login failed: {exc}")
+            category, message, metadata = classify_xui_exception(exc)
+            parts = [f"X-UI login failed: error_code={category}"]
+            if metadata.get("http_status"):
+                parts.append(f"http_status=HTTP {metadata['http_status']}")
+            parts.append(f"message={self.sanitize_panel_error(message, panel)}")
+            if metadata.get("remediation_hint"):
+                parts.append(f"remediation_hint={self.sanitize_panel_error(metadata['remediation_hint'], panel)}")
+            self.error(subject, " ".join(parts))
             return
 
         if session:
@@ -590,17 +597,9 @@ class Command(BaseCommand):
             self.error(subject, "X-UI login failed.")
 
     def sanitize_panel_error(self, exc, panel):
-        text = str(exc or "")
-        for secret in (
-            getattr(panel, "password", ""),
-            getattr(panel, "username", ""),
-            getattr(panel, "url", ""),
-            getattr(panel, "proxy_url", ""),
-        ):
-            secret = str(secret or "").strip()
-            if secret:
-                text = text.replace(secret, "<redacted>")
-        return text or exc.__class__.__name__
+        from store.xui_api import sanitize_xui_operational_text
+
+        return sanitize_xui_operational_text(exc, panel=panel) or exc.__class__.__name__
 
     def check_live_inbound_exists(self, panel, inbound):
         try:
@@ -930,7 +929,12 @@ class Command(BaseCommand):
                 subject,
                 (
                     f"Latest health check: panel={latest_check.panel.name} "
-                    f"status={latest_check.status} at {latest_check.checked_at.isoformat()}."
+                    f"status={latest_check.status} "
+                    f"error_code={latest_check.error_code or '-'} "
+                    f"http_status={(latest_check.metadata or {}).get('http_status') or '-'} "
+                    f"message={latest_check.error_message or latest_check.status} "
+                    f"remediation_hint={(latest_check.metadata or {}).get('remediation_hint') or '-'} "
+                    f"at {latest_check.checked_at.isoformat()}."
                 ),
             )
             cooldown_minutes = max(int(store.panel_monitor_alert_cooldown_minutes or 30), 1)

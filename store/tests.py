@@ -148,10 +148,10 @@ class DummyBotResponse:
 
 
 class DummyXUIResponse:
-    status_code = 200
-
-    def __init__(self, payload=None):
+    def __init__(self, payload=None, *, status_code=200, text=""):
         self.payload = payload or {"success": True}
+        self.status_code = status_code
+        self.text = text
 
     def json(self):
         return self.payload
@@ -1060,6 +1060,40 @@ class IntegrationCheckCommandTests(TestCase):
         self.assertIn("No inbound available for new orders could be verified in X-UI", output)
         self.assertIn("ERROR=", output)
 
+    @override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="")
+    def test_check_integrations_live_xui_outputs_safe_structured_login_error(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+        from store.xui_api import XUIError
+
+        _store, panel, _inbound = self.create_integration_store_with_panel()
+
+        def fail_login(_panel, *, raise_errors=False):
+            exc = XUIError(
+                "Panel login failed with HTTP 403 secret csrf-secret-token",
+                category="http_403_csrf_required",
+                http_status=403,
+                endpoint="login",
+                response_snippet="Forbidden secret csrf-secret-token",
+                remediation_hint="CSRF/login flow mismatch",
+            )
+            if raise_errors:
+                raise exc
+            return None
+
+        stdout = StringIO()
+        with patch("store.xui_api.login_to_panel", side_effect=fail_login):
+            call_command("check_integrations", "--live-xui", "--no-fail", stdout=stdout)
+
+        output = stdout.getvalue()
+        self.assertIn(f"Panel #{panel.pk}", output)
+        self.assertIn("error_code=http_403_csrf_required", output)
+        self.assertIn("http_status=HTTP 403", output)
+        self.assertIn("CSRF/login flow mismatch", output)
+        self.assertNotIn(" secret ", output)
+        self.assertNotIn("csrf-secret-token", output)
+
     @override_settings(SMSFORWARDER_WEBHOOK_TOKEN="sms-secret", TELEGRAM_BOT_USERNAME="vpn_store_bot")
     def test_free_trial_configuration_errors_are_reported(self):
         from io import StringIO
@@ -1253,6 +1287,137 @@ class XUIPanelProxyTests(TestCase):
         XUIService(panel).login()
 
         self.assertEqual(session.post.call_count, 2)
+
+    @patch("store.xui_api.requests.Session")
+    def test_xui_legacy_login_still_uses_existing_flow(self, session_class_mock):
+        from .xui_api import XUIService
+
+        session = Mock()
+        session.proxies = {}
+        session.post.return_value = DummyXUIResponse({"success": True})
+        session_class_mock.return_value = session
+        panel = Panel(
+            name="XUI",
+            url="http://panel.example:1111/admin/",
+            username="user",
+            password="pass",
+        )
+
+        XUIService(panel).login()
+
+        session.post.assert_called_once()
+        self.assertEqual(session.post.call_args.args[0], "http://panel.example:1111/admin/login")
+        self.assertEqual(session.post.call_args.kwargs["data"], {"username": "user", "password": "pass"})
+        session.get.assert_not_called()
+
+    @patch("store.xui_api.requests.Session")
+    def test_xui_35_csrf_login_with_base_path_and_authenticated_list(self, session_class_mock):
+        from .xui_api import XUIService
+
+        session = Mock()
+        session.proxies = {}
+        session.post.side_effect = [
+            DummyXUIResponse({"success": False}, status_code=403, text="Forbidden"),
+            DummyXUIResponse({"success": True, "msg": "", "obj": False}),
+            DummyXUIResponse({"success": True, "msg": "ok", "obj": None}),
+        ]
+        session.get.side_effect = [
+            DummyXUIResponse({"success": True}),
+            DummyXUIResponse({"success": True, "obj": "csrf-secret-token"}),
+        ]
+        session.request.return_value = DummyXUIResponse({"success": True, "obj": []})
+        session_class_mock.return_value = session
+        panel = Panel(
+            name="XUI",
+            url="http://panel.example:1111/secret",
+            username="user",
+            password="pass",
+        )
+
+        service = XUIService(panel)
+        service.login()
+        payload = service.authenticated_json("GET", "/panel/api/inbounds/list")
+
+        self.assertEqual(payload, {"success": True, "obj": []})
+        self.assertEqual(session.post.call_args_list[0].args[0], "http://panel.example:1111/secret/login")
+        self.assertEqual(session.get.call_args_list[0].args[0], "http://panel.example:1111/secret/")
+        self.assertEqual(session.get.call_args_list[1].args[0], "http://panel.example:1111/secret/csrf-token")
+        self.assertEqual(session.post.call_args_list[1].args[0], "http://panel.example:1111/secret/getTwoFactorEnable")
+        self.assertEqual(session.post.call_args_list[2].args[0], "http://panel.example:1111/secret/login")
+        self.assertEqual(session.request.call_args.args[1], "http://panel.example:1111/secret/panel/api/inbounds/list")
+        login_kwargs = session.post.call_args_list[2].kwargs
+        self.assertEqual(login_kwargs["data"]["twoFactorCode"], "")
+        self.assertEqual(login_kwargs["headers"]["X-CSRF-Token"], "csrf-secret-token")
+        self.assertEqual(login_kwargs["headers"]["Origin"], "http://panel.example:1111")
+        self.assertEqual(login_kwargs["headers"]["Referer"], "http://panel.example:1111/secret/")
+
+    @patch("store.xui_api.requests.Session")
+    def test_xui_35_base_path_normalization_without_duplicate_path(self, session_class_mock):
+        from .xui_api import XUIService
+
+        for raw_url in ("http://panel.example:1111/secret", "http://panel.example:1111/secret/"):
+            session = Mock()
+            session.proxies = {}
+            session.post.return_value = DummyXUIResponse({"success": True})
+            session.request.return_value = DummyXUIResponse({"success": True, "obj": []})
+            session_class_mock.return_value = session
+
+            XUIService(Panel(name="XUI", url=raw_url, username="user", password="pass")).request_json(
+                "GET",
+                "/panel/api/inbounds/list",
+            )
+
+            self.assertEqual(session.request.call_args.args[1], "http://panel.example:1111/secret/panel/api/inbounds/list")
+            self.assertNotIn("/secret/secret/", session.request.call_args.args[1])
+
+    @patch("store.xui_api.requests.Session")
+    def test_xui_403_without_csrf_is_classified_safely(self, session_class_mock):
+        from .xui_api import XUIError, XUIService
+
+        session = Mock()
+        session.proxies = {}
+        session.post.side_effect = [
+            DummyXUIResponse({"success": False}, status_code=403, text="Forbidden"),
+            DummyXUIResponse({"success": False}, status_code=403, text="still forbidden csrf-secret-token pass"),
+        ]
+        session.get.side_effect = [
+            DummyXUIResponse({"success": True}),
+            DummyXUIResponse({"success": True, "obj": "csrf-secret-token"}),
+        ]
+        session_class_mock.return_value = session
+        panel = Panel(name="XUI", url="http://panel.example/admin", username="user", password="pass")
+
+        with self.assertRaises(XUIError) as caught:
+            XUIService(panel).login()
+
+        self.assertEqual(caught.exception.category, "http_403_csrf_required")
+        self.assertEqual(caught.exception.http_status, 403)
+        metadata = caught.exception.safe_metadata()
+        self.assertNotIn("pass", json.dumps(metadata))
+        self.assertIn("remediation_hint", metadata)
+
+    @patch("store.xui_api.requests.Session")
+    def test_xui_35_two_factor_enabled_is_classified(self, session_class_mock):
+        from .xui_api import XUIError, XUIService
+
+        session = Mock()
+        session.proxies = {}
+        session.post.side_effect = [
+            DummyXUIResponse({"success": False}, status_code=403),
+            DummyXUIResponse({"success": True, "msg": "", "obj": True}),
+        ]
+        session.get.side_effect = [
+            DummyXUIResponse({"success": True}),
+            DummyXUIResponse({"success": True, "obj": "csrf-secret-token"}),
+        ]
+        session_class_mock.return_value = session
+        panel = Panel(name="XUI", url="http://panel.example/admin", username="user", password="pass")
+
+        with self.assertRaises(XUIError) as caught:
+            XUIService(panel).login()
+
+        self.assertEqual(caught.exception.category, "two_factor_required")
+        self.assertNotIn("csrf-secret-token", json.dumps(caught.exception.safe_metadata()))
 
 
 class XUICompatibilityFacadeTests(TestCase):
@@ -1910,6 +2075,56 @@ class PanelHealthServiceTests(TestCase):
         self.assertNotIn("panel-password", str(result))
         self.assertEqual(PanelHealthCheckLog.objects.get(panel=self.panel).status, PanelHealthStatus.Status.ERROR)
 
+    def test_panel_login_403_persists_safe_structured_error(self):
+        from .panel_health_services import check_panel_health
+        from .xui_api import XUIError
+
+        service = self.service_mock(
+            login_side_effect=XUIError(
+                "Panel login failed with HTTP 403.",
+                category="http_403_csrf_required",
+                http_status=403,
+                endpoint="login",
+                response_snippet="Forbidden csrf-secret-token panel-password",
+                remediation_hint="CSRF/login flow mismatch; use the 3X-UI 3.5 CSRF login flow.",
+            )
+        )
+        with patch("store.panel_health_services.XUIService", return_value=service):
+            result = check_panel_health(self.panel)
+
+        self.assertEqual(result["status"], PanelHealthStatus.Status.ERROR)
+        self.assertEqual(result["error_code"], "http_403_csrf_required")
+        self.assertIn("HTTP 403", result["error_message"])
+        health = PanelHealthStatus.objects.get(panel=self.panel)
+        log = PanelHealthCheckLog.objects.get(panel=self.panel)
+        self.assertEqual(health.metadata["http_status"], 403)
+        self.assertEqual(log.error_code, "http_403_csrf_required")
+        payload = json.dumps({"result": result, "health": health.metadata, "log": log.metadata}, ensure_ascii=False, default=str)
+        self.assertNotIn("panel-password", payload)
+        self.assertNotIn("csrf-secret-token", payload)
+
+    def test_panel_two_factor_persists_safe_structured_error(self):
+        from .panel_health_services import check_panel_health
+        from .xui_api import XUIError
+
+        service = self.service_mock(
+            login_side_effect=XUIError(
+                "Two-factor login is enabled for this panel account.",
+                category="two_factor_required",
+                endpoint="getTwoFactorEnable",
+                remediation_hint="Disable two-factor login for this panel account.",
+            )
+        )
+        with patch("store.panel_health_services.XUIService", return_value=service):
+            result = check_panel_health(self.panel)
+
+        self.assertEqual(result["error_code"], "two_factor_required")
+        self.assertEqual(
+            result["error_message"],
+            "ورود دو مرحله‌ای برای این پنل فعال است و اتصال خودکار پشتیبانی نمی‌شود.",
+        )
+        self.assertEqual(PanelHealthStatus.objects.get(panel=self.panel).error_code, "two_factor_required")
+
     def test_panel_timeout_is_caught_and_sanitized(self):
         from .panel_health_services import check_panel_health
 
@@ -1920,10 +2135,95 @@ class PanelHealthServiceTests(TestCase):
             result = check_panel_health(self.panel)
 
         self.assertEqual(result["status"], PanelHealthStatus.Status.ERROR)
-        self.assertEqual(result["error_code"], "timeout")
+        self.assertEqual(result["error_code"], "network_timeout")
         payload = json.dumps(PanelHealthCheckLog.objects.get(panel=self.panel).metadata, ensure_ascii=False)
         self.assertNotIn("https://panel.example.com/secret", payload)
         self.assertNotIn("panel-password", payload)
+
+    def test_check_panel_health_verbose_outputs_safe_error_details(self):
+        from .xui_api import XUIError
+
+        service = self.service_mock(
+            login_side_effect=XUIError(
+                "Panel login failed with HTTP 403.",
+                category="http_403_csrf_required",
+                http_status=403,
+                endpoint="login",
+                response_snippet="Forbidden csrf-secret-token panel-password",
+                remediation_hint="CSRF/login flow mismatch",
+            )
+        )
+        stdout = StringIO()
+        with patch("store.panel_health_services.XUIService", return_value=service):
+            call_command("check_panel_health", "--panel-id", str(self.panel.pk), "--verbose", stdout=stdout)
+
+        output = stdout.getvalue()
+        self.assertIn(f"panel={self.panel.pk}", output)
+        self.assertIn("error_code=http_403_csrf_required", output)
+        self.assertIn("http_status=403", output)
+        self.assertIn("CSRF/login flow mismatch", output)
+        self.assertNotIn("panel-password", output)
+        self.assertNotIn("csrf-secret-token", output)
+
+    def test_panel_admin_change_page_displays_safe_health_error_details(self):
+        User = get_user_model()
+        User.objects.create_superuser("owner", "owner@example.com", "password")
+        self.client.login(username="owner", password="password")
+        PanelHealthStatus.objects.create(
+            panel=self.panel,
+            status=PanelHealthStatus.Status.ERROR,
+            last_checked_at=timezone.now(),
+            error_code="http_403_csrf_required",
+            error_message="ورود به پنل با خطای HTTP 403 ناموفق شد.",
+            summary="ورود به پنل با خطای HTTP 403 ناموفق شد.",
+            metadata={
+                "http_status": 403,
+                "endpoint": "login",
+                "remediation_hint": "CSRF/login flow mismatch",
+                "response_snippet": "Forbidden <csrf-redacted>",
+            },
+        )
+
+        response = self.client.get(reverse("admin:store_panel_change", args=[self.panel.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "http_403_csrf_required")
+        self.assertContains(response, "HTTP 403")
+        self.assertContains(response, "CSRF/login flow mismatch")
+        self.assertNotContains(response, "csrf-secret-token")
+
+    def test_panel_admin_health_action_message_uses_safe_reason(self):
+        from .xui_api import XUIError
+
+        User = get_user_model()
+        User.objects.create_superuser("owner", "owner@example.com", "password")
+        self.client.login(username="owner", password="password")
+        service = self.service_mock(
+            login_side_effect=XUIError(
+                "Panel login failed with HTTP 403 panel-password csrf-secret-token",
+                category="http_403_csrf_required",
+                http_status=403,
+                endpoint="login",
+                response_snippet="Forbidden panel-password csrf-secret-token",
+                remediation_hint="CSRF/login flow mismatch",
+            )
+        )
+
+        with patch("store.panel_health_services.XUIService", return_value=service):
+            response = self.client.post(
+                reverse("admin:store_panel_changelist"),
+                {
+                    "action": "run_health_check",
+                    "_selected_action": [str(self.panel.pk)],
+                },
+                follow=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Health check failed")
+        self.assertContains(response, "HTTP 403 - CSRF/login flow mismatch")
+        self.assertNotContains(response, "panel-password")
+        self.assertNotContains(response, "csrf-secret-token")
 
     def test_missing_inbound_becomes_warning(self):
         from .panel_health_services import check_panel_health

@@ -11,7 +11,16 @@ from unittest.mock import patch
 from store.deployment.nginx_generator import NginxConfigGenerator
 from store.deployment.owner_toolkit import OwnerToolkitError, TenantCommandResult, TenantOwnerToolkit
 from store.deployment.port_allocator import PortAllocator
-from store.deployment.postgres_bridge import pg_hba_allows_bridge, run_checks, ss_listens_on_bridge
+from store.deployment.postgres_bridge import (
+    configure_postgres_bridge,
+    discover_postgres_bridge_files,
+    pg_hba_allows_bridge,
+    pg_hba_with_bridge_rule,
+    postgres_discovery_command,
+    postgresql_conf_with_bridge_listener,
+    run_checks,
+    ss_listens_on_bridge,
+)
 from store.deployment.service import DockerRunner, SubdomainDeploymentError, SubdomainDeploymentService
 from store.deployment.subdomain_manager import SubdomainError, SubdomainManager
 from store.orchestrator_v2.models import ServerNode, TenantInstance
@@ -27,18 +36,23 @@ class FakeCommandRunner:
 
 
 class FakeBridgeRunner:
-    def __init__(self, *, ss_output="", hba_file="", docker_returncode=0):
+    def __init__(self, *, ss_output="", hba_file="", config_file="", docker_returncode=0):
         self.calls = []
         self.ss_output = ss_output
         self.hba_file = hba_file
+        self.config_file = config_file
         self.docker_returncode = docker_returncode
 
     def run(self, argv, *, timeout=30):
         self.calls.append(list(argv))
         if argv[:2] == ["ss", "-ltnp"]:
             return subprocess.CompletedProcess(argv, 0, stdout=self.ss_output, stderr="")
+        if argv == postgres_discovery_command():
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{self.config_file}\n{self.hba_file}\n", stderr="")
         if "SHOW hba_file;" in argv:
             return subprocess.CompletedProcess(argv, 0, stdout=f"{self.hba_file}\n", stderr="")
+        if argv[:3] == ["sudo", "systemctl", "restart"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         if argv[:2] == ["docker", "run"]:
             return subprocess.CompletedProcess(argv, self.docker_returncode, stdout="", stderr="")
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
@@ -197,6 +211,81 @@ class PostgresDockerBridgePreflightTests(TestCase):
         self.assertEqual([check.ok for check in checks], [False, False, False])
         remediation = "\n".join(check.remediation[0] for check in checks if check.remediation)
         self.assertIn("SHOW config_file", remediation)
+
+    def test_discover_postgres_bridge_files_uses_sudo_postgres_psql(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pathlib.Path(tmp) / "postgresql.conf"
+            hba = pathlib.Path(tmp) / "pg_hba.conf"
+            config.write_text("#listen_addresses = 'localhost'\n", encoding="utf-8")
+            hba.write_text("", encoding="utf-8")
+            runner = FakeBridgeRunner(config_file=str(config), hba_file=str(hba))
+
+            files = discover_postgres_bridge_files(runner)
+
+        self.assertEqual(files.config_file, config)
+        self.assertEqual(files.hba_file, hba)
+        self.assertEqual(runner.calls[0], postgres_discovery_command())
+
+    def test_postgres_bridge_config_text_generation_is_idempotent(self):
+        config_text, config_changed = postgresql_conf_with_bridge_listener("#listen_addresses = 'localhost'\n")
+        self.assertTrue(config_changed)
+        self.assertIn("listen_addresses = '127.0.0.1,172.17.0.1'", config_text)
+
+        second_config_text, second_config_changed = postgresql_conf_with_bridge_listener(config_text)
+        self.assertFalse(second_config_changed)
+        self.assertEqual(second_config_text, config_text)
+
+        hba_text, hba_changed = pg_hba_with_bridge_rule("host all all 127.0.0.1/32 scram-sha-256\n")
+        self.assertTrue(hba_changed)
+        self.assertEqual(hba_text.count("host all all 172.17.0.0/16 scram-sha-256"), 1)
+
+        second_hba_text, second_hba_changed = pg_hba_with_bridge_rule(hba_text)
+        self.assertFalse(second_hba_changed)
+        self.assertEqual(second_hba_text, hba_text)
+
+    def test_configure_postgres_bridge_backs_up_restarts_and_checks_without_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pathlib.Path(tmp) / "postgresql.conf"
+            hba = pathlib.Path(tmp) / "pg_hba.conf"
+            config.write_text("#listen_addresses = 'localhost'\n", encoding="utf-8")
+            hba.write_text("host all all 127.0.0.1/32 scram-sha-256\n", encoding="utf-8")
+            runner = FakeBridgeRunner(
+                ss_output="LISTEN 0 244 172.17.0.1:5432 0.0.0.0:*",
+                config_file=str(config),
+                hba_file=str(hba),
+                docker_returncode=0,
+            )
+
+            result = configure_postgres_bridge(
+                runner=runner,
+                apply=True,
+                restart=True,
+                check_after_restart=True,
+                stamp="20260719000000",
+            )
+
+            self.assertTrue(result.config_changed)
+            self.assertTrue(result.hba_changed)
+            self.assertTrue(result.restarted)
+            self.assertTrue((pathlib.Path(str(config) + ".bak.20260719000000")).exists())
+            self.assertTrue((pathlib.Path(str(hba) + ".bak.20260719000000")).exists())
+            self.assertIn("listen_addresses = '127.0.0.1,172.17.0.1'", config.read_text(encoding="utf-8"))
+            self.assertEqual(hba.read_text(encoding="utf-8").count("host all all 172.17.0.0/16 scram-sha-256"), 1)
+            self.assertTrue(all(check.ok for check in result.checks))
+            flat_calls = " ".join(" ".join(call) for call in runner.calls)
+            self.assertIn("sudo -u postgres psql", flat_calls)
+            self.assertIn("systemctl restart postgresql", flat_calls)
+            self.assertNotIn("DATABASE_URL", flat_calls)
+            self.assertNotIn("password", flat_calls.lower())
+
+            second = configure_postgres_bridge(
+                runner=runner,
+                apply=False,
+                restart=False,
+                check_after_restart=False,
+            )
+            self.assertFalse(second.config_changed)
+            self.assertFalse(second.hba_changed)
 
 
 class SubdomainDeploymentTests(TestCase):

@@ -43,10 +43,21 @@ class Command(BaseCommand):
 
         if options.get("verbose"):
             for result in summary["results"]:
+                metadata = result.get("metadata") or {}
+                compatibility = metadata.get("compatibility") or {}
+                http_status = metadata.get("http_status") or "-"
+                remediation_hint = metadata.get("remediation_hint") or "-"
+                profile = compatibility.get("profile") or "-"
+                version = compatibility.get("version") or "-"
                 self.stdout.write(
                     f"{result.get('status')}: panel={result.get('panel_id')} "
                     f"name={result.get('panel_name')} "
+                    f"error_code={result.get('error_code') or '-'} "
+                    f"http_status={http_status} "
                     f"response_ms={result.get('response_time_ms') if result.get('response_time_ms') is not None else '-'} "
                     f"alert_sent={result.get('alert_sent')} "
-                    f"summary={result.get('summary') or result.get('error_message') or '-'}"
+                    f"profile={profile} "
+                    f"version={version} "
+                    f"message={result.get('error_message') or result.get('summary') or '-'} "
+                    f"remediation_hint={remediation_hint}"
                 )

@@ -80,6 +80,7 @@ Options:
                     Opt in to host PostgreSQL config for Docker tenant access.
                     Backs up postgresql.conf and pg_hba.conf, then binds only
                     127.0.0.1 and 172.17.0.1 and allows 172.17.0.0/16.
+                    On an existing install, runs a repair-only path and exits.
   --clean-existing   Remove detected previous Qasedak install traces before installing.
   --with-systemd     Render, enable, and start systemd services.
   --without-systemd  Skip systemd services.
@@ -788,6 +789,11 @@ handle_existing_install() {
     return 0
   fi
 
+  if (( CONFIGURE_POSTGRES_DOCKER_BRIDGE && ! CLEAN_EXISTING )) && [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
+    repair_existing_postgres_bridge
+    exit 0
+  fi
+
   warn "Previous Qasedak install traces were detected."
   printf 'Detected traces:\n'
   printf '  %s\n' "${markers[@]}"
@@ -814,6 +820,25 @@ handle_existing_install() {
 
   confirm "Delete the existing Qasedak install before continuing? This removes database/media/backups inside $INSTALL_DIR." "no" || die "Install cancelled. Use the update command for an existing install."
   cleanup_existing_install
+}
+
+repair_existing_postgres_bridge() {
+  local repair_script="$INSTALL_DIR/scripts/configure-postgres-bridge.sh"
+  if [[ ! -x "$repair_script" ]]; then
+    repair_script="$REPO_DIR/scripts/configure-postgres-bridge.sh"
+  fi
+  [[ -x "$repair_script" ]] || die "PostgreSQL bridge repair script not found or not executable: $repair_script"
+
+  local args=("$repair_script" --install-dir "$INSTALL_DIR")
+  if (( DRY_RUN )); then
+    log "Existing install detected. Previewing PostgreSQL Docker bridge repair only."
+  else
+    args+=(--apply)
+  fi
+  if (( YES )); then
+    args+=(--yes)
+  fi
+  bash "${args[@]}"
 }
 
 collect_config() {

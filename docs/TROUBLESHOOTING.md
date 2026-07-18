@@ -161,15 +161,19 @@ host all all 172.17.0.0/16 scram-sha-256
 Recovery:
 
 ```bash
-sudo -u postgres psql -Atqc "SHOW config_file; SHOW hba_file;" postgres
-sudo cp <postgresql.conf> <postgresql.conf>.bak.$(date +%Y%m%d%H%M%S)
-sudo cp <pg_hba.conf> <pg_hba.conf>.bak.$(date +%Y%m%d%H%M%S)
-sudoedit <postgresql.conf>
-sudoedit <pg_hba.conf>
-sudo systemctl restart postgresql
+sudo /opt/qasedak/scripts/configure-postgres-bridge.sh --install-dir /opt/qasedak
+sudo /opt/qasedak/scripts/configure-postgres-bridge.sh --install-dir /opt/qasedak --apply
 sudo /opt/qasedak/scripts/doctor.sh --install-dir /opt/qasedak --no-fail --verbose
 docker restart qasedak_<tenant>
 curl http://127.0.0.1:<port>/health/
+```
+
+The first command previews the discovered `postgresql.conf` and `pg_hba.conf` paths without changing files. The `--apply` command backs up both files, sets `listen_addresses = '127.0.0.1,172.17.0.1'`, appends `host all all 172.17.0.0/16 scram-sha-256` only when missing, asks before restarting PostgreSQL, and then runs `check_postgres_bridge`. For unattended repair, use `--apply --yes`.
+
+For an existing `/opt/qasedak` install, this also works through the installer bridge flag without deleting or overwriting the install tree:
+
+```bash
+sudo /opt/qasedak/scripts/install.sh --configure-postgres-docker-bridge
 ```
 
 Only bind PostgreSQL to `127.0.0.1` and `172.17.0.1` for this setup. Do not use `listen_addresses='*'` and do not add public CIDRs to `pg_hba.conf`.
