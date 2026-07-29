@@ -302,6 +302,8 @@ JAZZMIN_SETTINGS = {
             {"model": "store.SupportMessage"},
         ],
         "Infrastructure": [
+            {"name": _("Panel Integration Center"), "url": "admin_store_panel_center", "icon": "fas fa-plug", "permissions": ["store.view_panel"]},
+            {"name": _("Plan Routing Builder"), "url": "admin_store_panel_center_routing", "icon": "fas fa-route", "permissions": ["store.view_plan"]},
             {"model": "store.Panel"},
             {"model": "store.Inbound"},
             {"model": "store.BotConfiguration"},
@@ -343,6 +345,8 @@ JAZZMIN_SETTINGS = {
         "store.BotUser",
         "store.SupportConversation",
         "store.SupportMessage",
+        "admin_store_panel_center",
+        "admin_store_panel_center_routing",
         "store.Panel",
         "store.Inbound",
         "store.BotConfiguration",

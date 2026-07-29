@@ -50,6 +50,8 @@ def preview_bulk_plan_routes(
     *,
     store=None,
     inbound=None,
+    inbounds=None,
+    multi_inbound_bundle=False,
     operator=None,
     selected_plan_ids=None,
     all_active=False,
@@ -68,6 +70,8 @@ def preview_bulk_plan_routes(
         result,
         store=store,
         inbound=inbound,
+        inbounds=inbounds,
+        multi_inbound_bundle=multi_inbound_bundle,
         selected_plan_ids=selected_ids,
         all_active=all_active,
         priority=priority,
@@ -84,6 +88,8 @@ def preview_bulk_plan_routes(
             store=store,
             plan=plan,
             inbound=inbound,
+            inbounds=inbounds,
+            multi_inbound_bundle=multi_inbound_bundle,
             operator=operator,
             priority=priority,
             weight=weight,
@@ -97,6 +103,8 @@ def apply_bulk_plan_routes(
     *,
     store=None,
     inbound=None,
+    inbounds=None,
+    multi_inbound_bundle=False,
     operator=None,
     selected_plan_ids=None,
     all_active=False,
@@ -108,6 +116,8 @@ def apply_bulk_plan_routes(
     preview = preview_bulk_plan_routes(
         store=store,
         inbound=inbound,
+        inbounds=inbounds,
+        multi_inbound_bundle=multi_inbound_bundle,
         operator=operator,
         selected_plan_ids=selected_plan_ids,
         all_active=all_active,
@@ -130,6 +140,8 @@ def apply_bulk_plan_routes(
             result,
             store=store,
             inbound=inbound,
+            inbounds=inbounds,
+            multi_inbound_bundle=multi_inbound_bundle,
             selected_plan_ids=selected_ids,
             all_active=all_active,
             priority=priority,
@@ -146,6 +158,8 @@ def apply_bulk_plan_routes(
                 store=store,
                 plan=plan,
                 inbound=inbound,
+                inbounds=inbounds,
+                multi_inbound_bundle=multi_inbound_bundle,
                 operator=operator,
                 priority=priority,
                 weight=weight,
@@ -202,6 +216,8 @@ def validate_bulk_route_inputs(
     *,
     store,
     inbound,
+    inbounds=None,
+    multi_inbound_bundle=False,
     selected_plan_ids,
     all_active,
     priority,
@@ -231,9 +247,55 @@ def validate_bulk_route_inputs(
     except (TypeError, ValueError):
         result["errors"].append("Weight must be a number.")
 
-    inbound_errors, inbound_warnings = sales_inbound_issues(inbound, store=store)
+    if multi_inbound_bundle:
+        inbound_errors, inbound_warnings = sales_inbound_bundle_issues(inbounds, store=store)
+        if existing_strategy not in {BULK_ROUTE_STRATEGY_REPLACE_ACTIVE, BULK_ROUTE_STRATEGY_UPDATE_EXISTING}:
+            inbound_errors.append("Multi-inbound bundle can only replace/update active routes.")
+    else:
+        inbound_errors, inbound_warnings = sales_inbound_issues(inbound, store=store)
     result["errors"].extend(inbound_errors)
     result["warnings"].extend(inbound_warnings)
+
+
+def normalize_inbound_bundle(inbounds):
+    normalized = []
+    seen = set()
+    for inbound in inbounds or []:
+        if not inbound:
+            continue
+        inbound_pk = getattr(inbound, "pk", None)
+        if inbound_pk in seen:
+            continue
+        seen.add(inbound_pk)
+        normalized.append(inbound)
+    return normalized
+
+
+def sales_inbound_bundle_issues(inbounds, *, store=None):
+    errors = []
+    warnings = []
+    inbounds = normalize_inbound_bundle(inbounds)
+    if len(inbounds) < 2:
+        return ["Select at least two inbounds for a multi-inbound bundle."], warnings
+
+    panel_ids = {inbound.panel_id for inbound in inbounds}
+    if len(panel_ids) != 1:
+        errors.append("All bundle inbounds must belong to the same panel.")
+    panel = None
+    try:
+        panel = inbounds[0].panel
+    except Exception:
+        panel = None
+    if not panel:
+        errors.append("Bundle panel is missing.")
+    elif panel.capability_profile != Panel.CapabilityProfile.MODERN_MULTI_NODE:
+        errors.append("Multi-inbound bundle requires a modern multi-node 3X-UI panel.")
+
+    for inbound in inbounds:
+        inbound_errors, inbound_warnings = sales_inbound_issues(inbound, store=store)
+        errors.extend(f"Inbound #{inbound.pk}: {message}" for message in inbound_errors)
+        warnings.extend(f"Inbound #{inbound.pk}: {message}" for message in inbound_warnings)
+    return errors, warnings
 
 
 def sales_inbound_issues(inbound, *, store=None):
@@ -284,6 +346,8 @@ def preview_plan_route_operation(
     store,
     plan,
     inbound,
+    inbounds=None,
+    multi_inbound_bundle=False,
     operator,
     priority,
     weight,
@@ -299,6 +363,19 @@ def preview_plan_route_operation(
         )
         result["to_skip"] += 1
         result["warnings"].append(f"Plan #{plan.pk} skipped: operator is not enabled on the plan.")
+        return
+
+    if multi_inbound_bundle:
+        preview_multi_plan_route_operation(
+            result,
+            store=store,
+            plan=plan,
+            inbounds=normalize_inbound_bundle(inbounds),
+            operator=operator,
+            priority=priority,
+            weight=weight,
+            note=note,
+        )
         return
 
     active_routes = list(active_routes_for_plan_operator(plan, operator, store=store))
@@ -390,6 +467,8 @@ def apply_plan_route_operation(
     store,
     plan,
     inbound,
+    inbounds=None,
+    multi_inbound_bundle=False,
     operator,
     priority,
     weight,
@@ -405,6 +484,19 @@ def apply_plan_route_operation(
         )
         result["skipped"] += 1
         result["warnings"].append(f"Plan #{plan.pk} skipped: operator is not enabled on the plan.")
+        return
+
+    if multi_inbound_bundle:
+        apply_multi_plan_route_operation(
+            result,
+            store=store,
+            plan=plan,
+            inbounds=normalize_inbound_bundle(inbounds),
+            operator=operator,
+            priority=priority,
+            weight=weight,
+            note=note,
+        )
         return
 
     active_routes = list(active_routes_for_plan_operator(plan, operator, store=store))
@@ -424,6 +516,7 @@ def apply_plan_route_operation(
         return
 
     if existing_strategy == BULK_ROUTE_STRATEGY_UPDATE_EXISTING and active_routes:
+        set_plan_single_inbound_mode(plan)
         route = active_routes[0]
         update_route_fields(route, inbound=inbound, priority=priority, weight=weight, note=note)
         route.full_clean()
@@ -433,6 +526,7 @@ def apply_plan_route_operation(
         return
 
     if existing_strategy == BULK_ROUTE_STRATEGY_REPLACE_ACTIVE:
+        set_plan_single_inbound_mode(plan)
         reusable_route = same_inbound_route
         deactivation_count = 0
         for route in active_routes:
@@ -481,6 +575,7 @@ def apply_plan_route_operation(
         result["deactivated"] += deactivation_count
         return
 
+    set_plan_single_inbound_mode(plan)
     route = build_new_route(
         store=store,
         plan=plan,
@@ -494,6 +589,124 @@ def apply_plan_route_operation(
     route.save()
     add_plan_result(result, plan, "created", f"Route #{route.pk} created.")
     result["created"] += 1
+
+
+def set_plan_single_inbound_mode(plan):
+    if getattr(plan, "multi_inbound_bundle", False):
+        plan.multi_inbound_bundle = False
+        plan.save(update_fields=["multi_inbound_bundle", "updated_at"])
+
+
+def preview_multi_plan_route_operation(result, *, store, plan, inbounds, operator, priority, weight, note):
+    active_routes = list(active_routes_for_plan_operator(plan, operator, store=store))
+    selected_ids = {inbound.pk for inbound in inbounds}
+    routes_by_inbound_id = {route.inbound_id: route for route in active_routes}
+    to_create = 0
+    to_update = 0
+    error_count = len(result["errors"])
+
+    for offset, inbound in enumerate(inbounds):
+        route = routes_by_inbound_id.get(inbound.pk) or first_route_for_same_inbound(plan, operator, inbound)
+        candidate_priority = int(priority) + offset
+        if route:
+            candidate = build_updated_route(
+                route,
+                store=store,
+                inbound=inbound,
+                priority=candidate_priority,
+                weight=weight,
+                note=note,
+                is_active=True,
+            )
+            action = "update"
+            to_update += 1
+        else:
+            candidate = build_new_route(
+                store=store,
+                plan=plan,
+                operator=operator,
+                inbound=inbound,
+                priority=candidate_priority,
+                weight=weight,
+                note=note,
+            )
+            action = "create"
+            to_create += 1
+        validate_candidate_route(result, candidate, plan=plan, action=action)
+
+    to_deactivate = len([route for route in active_routes if route.inbound_id not in selected_ids])
+    if len(result["errors"]) != error_count:
+        return
+    add_plan_result(
+        result,
+        plan,
+        "bundle",
+        f"{len(inbounds)} inbound bundle will be active; {to_create} create, {to_update} update, {to_deactivate} deactivate.",
+    )
+    result["to_create"] += to_create
+    result["to_update"] += to_update
+    result["to_deactivate"] += to_deactivate
+
+
+def apply_multi_plan_route_operation(result, *, store, plan, inbounds, operator, priority, weight, note):
+    active_routes = list(active_routes_for_plan_operator(plan, operator, store=store))
+    selected_ids = {inbound.pk for inbound in inbounds}
+    routes_by_inbound_id = {route.inbound_id: route for route in active_routes}
+    created = 0
+    updated = 0
+    deactivated = 0
+
+    if not plan.multi_inbound_bundle:
+        plan.multi_inbound_bundle = True
+        plan.save(update_fields=["multi_inbound_bundle", "updated_at"])
+
+    for route in active_routes:
+        if route.inbound_id in selected_ids:
+            continue
+        route.is_active = False
+        route.full_clean()
+        route.save(update_fields=["is_active", "updated_at"])
+        deactivated += 1
+
+    for offset, inbound in enumerate(inbounds):
+        route = routes_by_inbound_id.get(inbound.pk) or first_route_for_same_inbound(plan, operator, inbound)
+        candidate_priority = int(priority) + offset
+        if route:
+            update_route_fields(
+                route,
+                store=store,
+                inbound=inbound,
+                priority=candidate_priority,
+                weight=weight,
+                note=note,
+                is_active=True,
+            )
+            route.full_clean()
+            route.save()
+            updated += 1
+        else:
+            route = build_new_route(
+                store=store,
+                plan=plan,
+                operator=operator,
+                inbound=inbound,
+                priority=candidate_priority,
+                weight=weight,
+                note=note,
+            )
+            route.full_clean()
+            route.save()
+            created += 1
+
+    add_plan_result(
+        result,
+        plan,
+        "bundle",
+        f"{len(inbounds)} inbound bundle active; {created} created, {updated} updated, {deactivated} deactivated.",
+    )
+    result["created"] += created
+    result["updated"] += updated
+    result["deactivated"] += deactivated
 
 
 def plan_accepts_operator(plan, operator, *, store=None):

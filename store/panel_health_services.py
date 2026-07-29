@@ -337,6 +337,24 @@ def build_panel_health_result(panel, *, settings=None):
         result["response_time_ms"] = int((time.monotonic() - start) * 1000)
         return result
 
+    from .panels import get_safe_panel_adapter
+
+    adapter = get_safe_panel_adapter(panel)
+    capability_report = adapter.get_capability_report()
+    if getattr(adapter, "family", "") != "xui":
+        result = _base_result(
+            panel,
+            settings,
+            status=PanelHealthStatus.Status.WARNING,
+            summary="این خانواده پنل هنوز در مانیتورینگ سلامت پیاده‌سازی نشده است.",
+            login_ok=None,
+            error_code="panel_family_unsupported",
+            error_message="Panel family is not supported by health monitoring yet.",
+            metadata={"capability_report": capability_report.to_dict()},
+        )
+        result["response_time_ms"] = int((time.monotonic() - start) * 1000)
+        return result
+
     service = XUIService(panel, timeout_seconds=settings.timeout_seconds)
     try:
         service.login()
@@ -358,6 +376,7 @@ def build_panel_health_result(panel, *, settings=None):
     try:
         compatibility_profile = discover_xui_capabilities(panel, live=True, service=service, write=True, use_cache=False)
         compatibility_metadata, node_issues = _compatibility_health_metadata(compatibility_profile)
+        compatibility_metadata["capability_report"] = adapter.detect_capabilities(live=False).to_dict()
     except Exception as exc:
         compatibility_profile = None
         compatibility_metadata, node_issues = _compatibility_health_metadata(

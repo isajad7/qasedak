@@ -1,0 +1,37 @@
+{% extends "admin/store/panel_center/_base_panel_center.html" %}
+
+{% block panel_breadcrumb %}&rsaquo; {{ title }}{% endblock %}
+
+{% block panel_center_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+    <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+        <div class="tw-min-w-0">
+            {% include "admin/store/panel_center/_badge.html" with tone="amber" label="Credentials" icon="fas fa-key" %}
+            <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">{{ title }}</h1>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+                اطلاعات ورود برای همین پنل ذخیره می‌شود. مقدار رمز فعلی در حالت ویرایش نمایش داده نمی‌شود.
+            </p>
+        </div>
+        <a href="{{ cancel_url }}" class="tw-button tw-button-secondary">بازگشت</a>
+    </div>
+</section>
+
+<section class="tw-section">
+    <form method="post" class="tw-admin-card tw-space-y-3" novalidate>
+        {% csrf_token %}
+        {{ form.non_field_errors }}
+        {% for field in form %}
+            <div class="tw-filter-field">
+                <span>{{ field.label }}</span>
+                {{ field }}
+                {% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}
+                {% for error in field.errors %}<small class="tw-text-slate-600">{{ error }}</small>{% endfor %}
+            </div>
+        {% endfor %}
+        <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row">
+            <button type="submit" class="tw-button tw-button-primary">ذخیره پنل</button>
+            <a href="{{ cancel_url }}" class="tw-button tw-button-secondary">انصراف</a>
+        </div>
+    </form>
+</section>
+{% endblock %}

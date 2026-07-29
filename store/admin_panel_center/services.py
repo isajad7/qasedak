@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from urllib.parse import urlsplit
+
+from django.urls import reverse
+from django.utils import timezone
+
+from store.models import Inbound, Panel, PanelHealthStatus
+from store.panels import get_safe_panel_adapter
+from store.panels.capabilities import sanitize_capability_metadata
+from store.panels.errors import PanelOperationUnsupportedError
+from store.xui_api import XUIService, classify_xui_exception, sanitize_xui_operational_text
+from store.xui_compat import discover_xui_capabilities
+from store.management.commands.sync_xui_topology import Command as SyncXUITopologyCommand
+
+
+SUPPORTED_PROTOCOLS = {"vless", "vmess", "trojan"}
+
+
+@dataclass
+class PanelActionResult:
+    ok: bool
+    title: str
+    message: str
+    details: dict = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+def mask_panel_url(value):
+    parsed = urlsplit(str(value or ""))
+    if not parsed.netloc:
+        return "-"
+    host = parsed.hostname or parsed.netloc.split("@")[-1]
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    path = parsed.path.rstrip("/")
+    if path and path != "/":
+        return f"{parsed.scheme}://{host}{path}"
+    return f"{parsed.scheme}://{host}"
+
+
+def panel_center_url(name, *args):
+    return reverse(name, args=args)
+
+
+def panel_action_urls(panel):
+    return {
+        "detail": panel_center_url("admin_store_panel_center_detail", panel.pk),
+        "edit": panel_center_url("admin_store_panel_center_edit", panel.pk),
+        "test": panel_center_url("admin_store_panel_center_test", panel.pk),
+        "sync": panel_center_url("admin_store_panel_center_sync", panel.pk),
+        "inbounds": panel_center_url("admin_store_panel_center_inbounds", panel.pk),
+        "capabilities": panel_center_url("admin_store_panel_center_capabilities", panel.pk),
+        "django_admin": reverse("admin:store_panel_change", args=[panel.pk]),
+    }
+
+
+def badge_tone_for_report(report):
+    if not report.supported:
+        return "slate"
+    if report.errors:
+        return "rose"
+    if report.warnings:
+        return "amber"
+    return "emerald"
+
+
+def boolean_badge(value):
+    if value is True:
+        return {"label": "پشتیبانی می‌شود", "tone": "emerald"}
+    if value is False:
+        return {"label": "پشتیبانی نمی‌شود", "tone": "slate"}
+    return {"label": "نامشخص", "tone": "amber"}
+
+
+def capability_items(report):
+    return [
+        ("ورود", boolean_badge(report.supports_login)),
+        ("خواندن اینباندها", boolean_badge(report.supports_read_inbounds)),
+        ("ساخت کلاینت", boolean_badge(report.supports_create_client)),
+        ("حذف کلاینت", boolean_badge(report.supports_delete_client)),
+        ("ساخت چند اینباندی", boolean_badge(report.supports_multi_inbound_create)),
+        ("لینک subscription", boolean_badge(report.supports_subscription)),
+        ("CSRF در login", boolean_badge(report.requires_csrf_for_login)),
+        ("CSRF در write", boolean_badge(report.requires_csrf_for_write)),
+    ]
+
+
+def safe_capability_report(panel):
+    adapter = get_safe_panel_adapter(panel)
+    report = adapter.get_capability_report()
+    report_dict = report.to_dict()
+    return adapter, report, report_dict
+
+
+def panel_summary(panel):
+    _adapter, report, _report_dict = safe_capability_report(panel)
+    health = getattr(panel, "health_status", None)
+    return {
+        "panel": panel,
+        "family": panel.get_family_display() if hasattr(panel, "get_family_display") else report.family,
+        "masked_url": mask_panel_url(panel.url),
+        "report": report,
+        "report_tone": badge_tone_for_report(report),
+        "health": health,
+        "health_label": health.get_status_display() if health else "بدون بررسی",
+        "health_checked_at": timezone.localtime(health.last_checked_at).strftime("%Y-%m-%d %H:%M") if health and health.last_checked_at else "-",
+        "actions": panel_action_urls(panel),
+    }
+
+
+def panel_list_items():
+    panels = get_panel_queryset()
+    return [panel_summary(panel) for panel in panels.order_by("store__name", "name", "pk")]
+
+
+def get_panel_queryset():
+    return Panel.objects.select_related("store", "health_status").order_by("store__name", "name", "pk")
+
+
+def build_test_connection_result(panel):
+    adapter = get_safe_panel_adapter(panel)
+    if getattr(adapter, "family", "") != Panel.Family.XUI:
+        report = adapter.get_capability_report()
+        message = "; ".join(report.errors or report.warnings) or "این خانواده پنل هنوز پشتیبانی عملیاتی ندارد."
+        return PanelActionResult(False, "تست اتصال انجام نشد", message, details=report.to_dict(), errors=list(report.errors))
+
+    try:
+        login_ok = adapter.test_connection()
+        read_inbounds = adapter.list_inbounds()
+        report = adapter.detect_capabilities(live=True, write=False)
+    except Exception as exc:
+        category, message, metadata = classify_xui_exception(exc)
+        safe_message = sanitize_xui_operational_text(message or exc, panel=panel)
+        return PanelActionResult(
+            False,
+            "تست اتصال ناموفق بود",
+            safe_message,
+            details=sanitize_capability_metadata({"error_code": category, **(metadata or {})}),
+            errors=[safe_message],
+        )
+
+    return PanelActionResult(
+        True,
+        "تست اتصال موفق بود",
+        "ورود و خواندن API با موفقیت انجام شد.",
+        details={
+            "login_ok": bool(login_ok),
+            "read_api_ok": True,
+            "remote_inbounds": len(read_inbounds),
+            "detected_version": report.detected_version or "-",
+            "capability_profile": report.capability_profile or "-",
+        },
+        warnings=list(report.warnings),
+        errors=list(report.errors),
+    )
+
+
+def sync_panel_inbounds(panel):
+    adapter = get_safe_panel_adapter(panel)
+    if getattr(adapter, "family", "") != Panel.Family.XUI:
+        report = adapter.get_capability_report()
+        message = "; ".join(report.errors or report.warnings) or "همگام‌سازی برای این خانواده پنل هنوز پشتیبانی نمی‌شود."
+        return PanelActionResult(False, "همگام‌سازی پشتیبانی نمی‌شود", message, details=report.to_dict(), errors=list(report.errors))
+
+    command = SyncXUITopologyCommand()
+    service = XUIService(panel)
+    try:
+        profile = discover_xui_capabilities(panel, live=True, service=service, write=True, use_cache=False)
+        remote_inbounds, remote_nodes = command.fetch_topology(service, panel)
+        planned = command.plan_updates(panel, remote_inbounds)
+        updated = command.apply_updates(planned)
+    except Exception as exc:
+        safe_error = sanitize_xui_operational_text(exc, panel=panel)
+        return PanelActionResult(False, "همگام‌سازی ناموفق بود", safe_error, errors=[safe_error])
+
+    protocols = {
+        str(item.get("protocol") or "").lower()
+        for item in remote_inbounds
+        if str(item.get("protocol") or "").strip()
+    }
+    unsupported_protocols = sorted(protocol for protocol in protocols if protocol not in SUPPORTED_PROTOCOLS)
+    skipped = planned.get("skipped") or []
+    return PanelActionResult(
+        True,
+        "همگام‌سازی انجام شد",
+        "اطلاعات local inboundها با API خواندنی پنل به‌روزرسانی شد.",
+        details={
+            "profile": profile.profile,
+            "version": profile.version or "-",
+            "remote_inbounds": len(remote_inbounds),
+            "remote_nodes": len(remote_nodes),
+            "created": 0,
+            "updated": updated,
+            "skipped": len(skipped),
+            "unsupported_protocols": unsupported_protocols,
+        },
+        warnings=[str(item.get("reason") or "") for item in skipped[:10] if item.get("reason")],
+    )
+
+
+def inbound_status(inbound):
+    warnings = []
+    panel = getattr(inbound, "panel", None)
+    if not inbound.is_active:
+        warnings.append("اینباند غیرفعال است.")
+    if not inbound.available_for_new_orders:
+        warnings.append("برای فروش جدید فعال نیست.")
+    if panel and not panel.is_active:
+        warnings.append("پنل متصل غیرفعال است.")
+    if inbound.max_clients is not None and inbound.current_users >= inbound.max_clients:
+        warnings.append("ظرفیت تکمیل شده است.")
+    protocol = str(inbound.protocol or "").lower()
+    if protocol and protocol not in SUPPORTED_PROTOCOLS:
+        warnings.append("پروتکل برای لینک مستقیم استاندارد پشتیبانی نشده است.")
+    return warnings
+
+
+def inbound_rows(panel):
+    rows = []
+    for inbound in Inbound.objects.filter(panel=panel).order_by("-is_active", "inbound_id", "pk"):
+        warnings = inbound_status(inbound)
+        rows.append(
+            {
+                "inbound": inbound,
+                "warnings": warnings,
+                "tone": "amber" if warnings else "emerald",
+                "sellable": bool(inbound.is_active and inbound.available_for_new_orders and not warnings),
+                "link_support": "پشتیبانی می‌شود" if str(inbound.protocol or "").lower() in SUPPORTED_PROTOCOLS else "نامشخص",
+            }
+        )
+    return rows

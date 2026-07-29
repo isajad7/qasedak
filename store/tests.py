@@ -114,7 +114,7 @@ from .customer_analytics import (
     get_customers_by_segment,
     get_period_range,
 )
-from .order_services import create_manual_payment_order, get_store_plans, select_inbound_for_plan
+from .order_services import create_manual_payment_order, get_store_plans, select_inbound_for_plan, select_inbounds_for_plan
 from .plan_route_services import (
     BULK_ROUTE_STRATEGY_REPLACE_ACTIVE,
     BULK_ROUTE_STRATEGY_SKIP_EXISTING,
@@ -1289,6 +1289,29 @@ class XUIPanelProxyTests(TestCase):
         self.assertEqual(session.post.call_count, 2)
 
     @patch("store.xui_api.requests.Session")
+    def test_xui_json_request_retries_transient_connection_errors(self, session_class_mock):
+        from .xui_api import XUIService
+
+        session = Mock()
+        session.proxies = {}
+        session.request.side_effect = [
+            requests.ReadTimeout("temporary slow panel"),
+            DummyXUIResponse({"success": True, "obj": []}),
+        ]
+        session_class_mock.return_value = session
+        panel = Panel(
+            name="XUI",
+            url="http://panel.example:1111/admin",
+            username="user",
+            password="pass",
+        )
+
+        payload = XUIService(panel).request_json("GET", "/panel/api/inbounds/list")
+
+        self.assertEqual(payload, {"success": True, "obj": []})
+        self.assertEqual(session.request.call_count, 2)
+
+    @patch("store.xui_api.requests.Session")
     def test_xui_legacy_login_still_uses_existing_flow(self, session_class_mock):
         from .xui_api import XUIService
 
@@ -1350,6 +1373,178 @@ class XUIPanelProxyTests(TestCase):
         self.assertEqual(login_kwargs["headers"]["X-CSRF-Token"], "csrf-secret-token")
         self.assertEqual(login_kwargs["headers"]["Origin"], "http://panel.example:1111")
         self.assertEqual(login_kwargs["headers"]["Referer"], "http://panel.example:1111/secret/")
+
+    @patch("store.xui_api.requests.Session")
+    def test_xui_35_unsafe_post_includes_csrf_ajax_headers(self, session_class_mock):
+        from .xui_api import XUIService
+
+        session = Mock()
+        session.proxies = {}
+        session.post.return_value = DummyXUIResponse({"success": True})
+        session.get.side_effect = [
+            DummyXUIResponse({"success": True}),
+            DummyXUIResponse({"success": True, "obj": "csrf-secret-token"}),
+        ]
+        session.request.return_value = DummyXUIResponse({"success": True, "obj": None})
+        session_class_mock.return_value = session
+        panel = Panel(
+            name="XUI",
+            url="http://panel.example:1111/secret",
+            username="user",
+            password="pass",
+            capability_profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+        )
+
+        payload = XUIService(panel).authenticated_json(
+            "POST",
+            "/panel/api/clients/add",
+            json={"client": {"email": "safe-test"}, "inboundIds": [1, 6]},
+            headers={"Accept": "application/json"},
+        )
+
+        self.assertEqual(payload, {"success": True, "obj": None})
+        self.assertEqual(session.get.call_args_list[0].args[0], "http://panel.example:1111/secret/")
+        self.assertEqual(session.get.call_args_list[1].args[0], "http://panel.example:1111/secret/csrf-token")
+        headers = session.request.call_args.kwargs["headers"]
+        self.assertEqual(headers["X-CSRF-Token"], "csrf-secret-token")
+        self.assertEqual(headers["X-Requested-With"], "XMLHttpRequest")
+        self.assertEqual(headers["Accept"], "application/json, text/plain, */*")
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Origin"], "http://panel.example:1111")
+        self.assertEqual(headers["Referer"], "http://panel.example:1111/secret/")
+        self.assertFalse(session.trust_env)
+
+    @patch("store.xui_api.requests.Session")
+    def test_xui_35_unsafe_post_refreshes_csrf_and_retries_once_on_403(self, session_class_mock):
+        from .xui_api import XUIService
+
+        session = Mock()
+        session.proxies = {}
+        session.post.return_value = DummyXUIResponse({"success": True})
+        session.get.side_effect = [
+            DummyXUIResponse({"success": True}),
+            DummyXUIResponse({"success": True, "obj": "csrf-old-token"}),
+            DummyXUIResponse({"success": True}),
+            DummyXUIResponse({"success": True, "obj": "csrf-new-token"}),
+        ]
+        session.request.side_effect = [
+            DummyXUIResponse({"success": False}, status_code=403, text="forbidden csrf-old-token"),
+            DummyXUIResponse({"success": True, "obj": None}),
+        ]
+        session_class_mock.return_value = session
+        panel = Panel(
+            name="XUI",
+            url="http://panel.example:1111/secret",
+            username="user",
+            password="pass",
+            capability_profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+        )
+
+        payload = XUIService(panel).authenticated_json(
+            "POST",
+            "/panel/api/clients/add",
+            json={"client": {"email": "safe-test"}, "inboundIds": [1, 6]},
+        )
+
+        self.assertEqual(payload, {"success": True, "obj": None})
+        self.assertEqual(session.request.call_count, 2)
+        self.assertEqual(session.request.call_args_list[0].kwargs["headers"]["X-CSRF-Token"], "csrf-old-token")
+        self.assertEqual(session.request.call_args_list[1].kwargs["headers"]["X-CSRF-Token"], "csrf-new-token")
+
+    @patch("store.xui_api.requests.Session")
+    def test_xui_35_unsafe_post_403_after_retry_is_write_api_forbidden_and_redacted(self, session_class_mock):
+        from .xui_api import XUIError, XUIService
+
+        session = Mock()
+        session.proxies = {}
+        session.post.return_value = DummyXUIResponse({"success": True})
+        session.get.side_effect = [
+            DummyXUIResponse({"success": True}),
+            DummyXUIResponse({"success": True, "obj": "csrf-old-token"}),
+            DummyXUIResponse({"success": True}),
+            DummyXUIResponse({"success": True, "obj": "csrf-new-token"}),
+        ]
+        session.request.side_effect = [
+            DummyXUIResponse({"success": False}, status_code=403, text="forbidden csrf-old-token panel-password"),
+            DummyXUIResponse({"success": False}, status_code=403, text="still forbidden csrf-new-token panel-password"),
+        ]
+        session_class_mock.return_value = session
+        panel = Panel(
+            name="XUI",
+            url="http://panel.example:1111/secret",
+            username="user",
+            password="panel-password",
+            capability_profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+        )
+
+        with self.assertRaises(XUIError) as caught:
+            XUIService(panel).authenticated_json(
+                "POST",
+                "/panel/api/clients/add",
+                json={"client": {"email": "safe-test"}, "inboundIds": [1, 6]},
+            )
+
+        self.assertEqual(caught.exception.category, "write_api_forbidden")
+        self.assertEqual(caught.exception.http_status, 403)
+        self.assertEqual(caught.exception.endpoint, "panel/api/clients/add")
+        metadata = json.dumps(caught.exception.safe_metadata())
+        self.assertIn("write permissions", metadata)
+        self.assertNotIn("csrf-new-token", metadata)
+        self.assertNotIn("panel-password", metadata)
+
+    @patch("store.xui_api.requests.Session")
+    def test_xui_legacy_unsafe_post_does_not_require_csrf_endpoint(self, session_class_mock):
+        from .xui_api import XUIService
+
+        cache.clear()
+        session = Mock()
+        session.proxies = {}
+        session.request.return_value = DummyXUIResponse({"success": True})
+        session_class_mock.return_value = session
+        panel = Panel(
+            name="XUI",
+            url="http://panel.example:1111/admin",
+            username="user",
+            password="pass",
+            capability_profile=Panel.CapabilityProfile.LEGACY_SINGLE_NODE,
+        )
+
+        payload = XUIService(panel).request_json("POST", "/panel/api/inbounds/addClient", json={"settings": "{}"})
+
+        self.assertEqual(payload, {"success": True})
+        session.get.assert_not_called()
+        self.assertEqual(session.request.call_count, 1)
+        self.assertNotIn("headers", session.request.call_args.kwargs)
+
+    @patch("store.xui_api.requests.Session")
+    def test_xui_35_clients_add_multi_inbound_payload_keeps_inbound_ids(self, session_class_mock):
+        from .xui_api import XUIService
+
+        session = Mock()
+        session.proxies = {}
+        session.post.return_value = DummyXUIResponse({"success": True})
+        session.get.side_effect = [
+            DummyXUIResponse({"success": True}),
+            DummyXUIResponse({"success": True, "obj": "csrf-secret-token"}),
+        ]
+        session.request.return_value = DummyXUIResponse({"success": True, "obj": None})
+        session_class_mock.return_value = session
+        panel = Panel(
+            name="XUI",
+            url="http://panel.example:1111/secret",
+            username="user",
+            password="pass",
+            capability_profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+        )
+        inbound = Inbound(panel=panel, inbound_id=1, server_ip="node.example", port="443", config_params="")
+
+        XUIService(panel)._post_modern_client_create(
+            inbound,
+            {"id": "client-id", "email": "safe-test", "enable": True},
+            inbound_ids=[1, 6, 8, 9],
+        )
+
+        self.assertEqual(session.request.call_args.kwargs["json"]["inboundIds"], [1, 6, 8, 9])
 
     @patch("store.xui_api.requests.Session")
     def test_xui_35_base_path_normalization_without_duplicate_path(self, session_class_mock):
@@ -1599,6 +1794,212 @@ class XUICompatibilityFacadeTests(TestCase):
             self.assertIn("profiles", payload["summary"])
 
 
+class PanelAdapterFactoryTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.store = Store.objects.create(
+            name="VPN Store",
+            english_name="VPN Store",
+            card_number="0000000000000000",
+            card_owner="VPN Store",
+        )
+        self.panel = Panel.objects.create(
+            store=self.store,
+            name="Modern panel",
+            url="https://panel.example.com",
+            username="admin",
+            password="secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+            detected_xui_version="3.4.0",
+        )
+        self.inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=1,
+            remark="Main",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="vpn.example.com",
+            port="443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+        )
+
+    def test_factory_defaults_existing_panel_model_to_xui_adapter(self):
+        from .panels import CapabilityFlag, get_panel_adapter
+        from .panels.xui import XUIPanelAdapter
+
+        self.assertEqual(self.panel.family, Panel.Family.XUI)
+        adapter = get_panel_adapter(self.panel)
+        report = adapter.detect_capabilities()
+
+        self.assertIsInstance(adapter, XUIPanelAdapter)
+        self.assertEqual(report.family, "xui")
+        self.assertEqual(report.profile.profile, Panel.CapabilityProfile.MODERN_MULTI_NODE)
+        self.assertTrue(report.profile.supports(CapabilityFlag.MULTI_INBOUND_CLIENTS))
+        self.assertTrue(report.profile.supports(CapabilityFlag.PRECISE_CLIENT_SCOPE))
+        report_dict = report.to_dict()
+        self.assertEqual(report_dict["detected_version"], "3.4.0")
+        self.assertTrue(report_dict["supports_create_client"])
+        self.assertTrue(report_dict["supports_delete_client"])
+        self.assertTrue(report_dict["supports_multi_inbound_create"])
+        self.assertTrue(report_dict["supports_subscription"])
+        self.assertTrue(report_dict["requires_csrf_for_login"])
+        self.assertTrue(report_dict["requires_csrf_for_write"])
+        self.assertEqual(report_dict["supported_protocols"], ["vless", "vmess", "trojan"])
+
+    def test_factory_returns_xui_adapter_for_xui_legacy_profile(self):
+        from .panels import get_panel_adapter
+        from .panels.xui import XUIPanelAdapter
+
+        self.panel.capability_profile = Panel.CapabilityProfile.LEGACY_SINGLE_NODE
+        self.panel.detected_xui_version = "2.4.0"
+        self.panel.save(update_fields=["capability_profile", "detected_xui_version", "updated_at"])
+        cache.clear()
+
+        adapter = get_panel_adapter(self.panel)
+        report = adapter.get_capability_report()
+
+        self.assertIsInstance(adapter, XUIPanelAdapter)
+        self.assertEqual(report.family, "xui")
+        self.assertEqual(report.capability_profile, Panel.CapabilityProfile.LEGACY_SINGLE_NODE)
+        self.assertTrue(report.supports_create_client)
+        self.assertFalse(report.supports_multi_inbound_create)
+
+    def test_factory_returns_safe_unsupported_marzban_adapter(self):
+        from .panels import get_panel_adapter
+        from .panels.errors import PanelOperationUnsupportedError
+
+        self.panel.family = Panel.Family.MARZBAN
+        self.panel.save(update_fields=["family", "updated_at"])
+        adapter = get_panel_adapter(self.panel)
+        report = adapter.get_capability_report()
+
+        self.assertEqual(adapter.family, "marzban")
+        self.assertFalse(report.supported)
+        self.assertEqual(report.profile.profile, "unsupported_safe")
+        self.assertIn("not implemented", report.warnings[0])
+        with self.assertRaises(PanelOperationUnsupportedError):
+            adapter.test_connection()
+
+    def test_unknown_and_unsupported_family_return_safe_unsupported_report(self):
+        from .panels import get_panel_adapter
+
+        self.panel.family = Panel.Family.UNKNOWN
+        self.panel.save(update_fields=["family", "updated_at"])
+        unknown_adapter = get_panel_adapter(self.panel)
+        unknown_report = unknown_adapter.get_capability_report()
+
+        self.assertEqual(unknown_report.family, "unknown")
+        self.assertFalse(unknown_report.supported)
+        self.assertFalse(unknown_report.supports_login)
+        self.assertFalse(unknown_report.supports_create_client)
+        self.assertIn("unknown", " ".join(unknown_report.errors).lower())
+
+        unsupported_adapter = get_panel_adapter(SimpleNamespace(family="wireguard"))
+        unsupported_report = unsupported_adapter.get_capability_report()
+
+        self.assertEqual(unsupported_report.family, "wireguard")
+        self.assertFalse(unsupported_report.supported)
+        self.assertIn("not supported", " ".join(unsupported_report.errors))
+
+    def test_capability_report_redacts_sensitive_metadata(self):
+        from .panels.capabilities import CapabilityFlag, CapabilityProfile, PanelCapabilityReport
+
+        report = PanelCapabilityReport(
+            family="xui",
+            profile=CapabilityProfile(
+                family="xui",
+                profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+                version="3.5.0",
+                flags=frozenset({CapabilityFlag.LOGIN}),
+                metadata={
+                    "csrf_token": "csrf-secret-token",
+                    "nested": {
+                        "uuid": "11111111-1111-4111-8111-111111111111",
+                        "note": "vless://11111111-1111-4111-8111-111111111111@example.com:443",
+                        "url": "https://admin:password@panel.example.com/secret",
+                    },
+                },
+            ),
+            metadata={
+                "cookie": "session-secret",
+                "subscription_link": "https://panel.example.com/sub/private-sub-id",
+            },
+        )
+
+        text = json.dumps(report.to_dict(), ensure_ascii=False)
+
+        self.assertNotIn("csrf-secret-token", text)
+        self.assertNotIn("session-secret", text)
+        self.assertNotIn("11111111-1111-4111-8111-111111111111", text)
+        self.assertNotIn("vless://", text)
+        self.assertNotIn("admin:password", text)
+        self.assertNotIn("private-sub-id", text)
+
+    def test_xui_adapter_delegates_read_and_write_to_injected_service(self):
+        from .panels.xui.adapter import XUIPanelAdapter, XUIProvisioningRequest
+
+        service = Mock()
+        service.authenticated_json.return_value = {"success": True, "obj": [{"id": self.inbound.inbound_id}]}
+        service.create_enabled_client.return_value = {"uuid": "client-id"}
+
+        adapter = XUIPanelAdapter(self.panel, service=service)
+
+        self.assertEqual(adapter.list_inbounds(), [{"id": self.inbound.inbound_id}])
+        result = adapter.create_enabled_client(
+            XUIProvisioningRequest(
+                email_prefix="alice",
+                total_gb=Decimal("1"),
+                duration_days=30,
+                inbound=self.inbound,
+                limit_ip=2,
+                client_uuid="client-id",
+                sub_id="sub-id",
+                email="alice_client",
+            )
+        )
+
+        self.assertEqual(result["uuid"], "client-id")
+        service.authenticated_json.assert_called_once_with("GET", "/panel/api/inbounds/list")
+        service.create_enabled_client.assert_called_once()
+        self.assertEqual(service.create_enabled_client.call_args.kwargs["duration_hours"], 720)
+        self.assertEqual(service.create_enabled_client.call_args.kwargs["inbound"], self.inbound)
+
+    def test_xui_adapter_delegates_multi_inbound_write_to_injected_service(self):
+        from .panels.xui.adapter import XUIPanelAdapter, XUIProvisioningRequest
+
+        second_inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=2,
+            remark="Second",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="vpn2.example.com",
+            port="443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+        )
+        service = Mock()
+        service.create_enabled_multi_inbound_client.return_value = {"bundle_inbound_ids": [1, 2]}
+
+        adapter = XUIPanelAdapter(self.panel, service=service)
+        result = adapter.create_enabled_multi_inbound_client(
+            XUIProvisioningRequest(
+                email_prefix="route-test",
+                total_gb=Decimal("1"),
+                duration_days=30,
+                inbounds=[self.inbound, second_inbound],
+                limit_ip=2,
+                client_uuid="client-id",
+                sub_id="sub-id",
+                email="route-test",
+            )
+        )
+
+        self.assertEqual(result["bundle_inbound_ids"], [1, 2])
+        service.create_enabled_multi_inbound_client.assert_called_once()
+        self.assertEqual(service.create_enabled_multi_inbound_client.call_args.kwargs["inbounds"], [self.inbound, second_inbound])
+
+
 class ModernPaidProvisioningTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -1668,6 +2069,24 @@ class ModernPaidProvisioningTests(TestCase):
                 "sub_id": identity["sub_id"],
                 "xui_node_id": self.inbound.xui_node_id,
                 "remote_client_key": f"{self.panel.pk}:{self.inbound.xui_node_id}:{self.inbound.inbound_id}:{identity['uuid']}",
+                "raw": {"id": identity["uuid"], "email": identity["email"], "enable": True},
+            }
+        )
+        return result
+
+    def remote_result_for_bundle(self, order, inbound, inbounds, *, index=1):
+        from .provisioning_services import multi_inbound_order_identity
+
+        identity = multi_inbound_order_identity(order, inbounds, index=index)
+        result = fake_client_result(identity["uuid"])
+        result.update(
+            {
+                "email": identity["email"],
+                "sub_id": identity["sub_id"],
+                "sub_link": f"https://modern.example.com:2096/sub/{identity['sub_id']}",
+                "direct_link": f"vless://{identity['uuid']}@{inbound.server_ip}:{inbound.port}#bundle-{inbound.inbound_id}",
+                "xui_node_id": inbound.xui_node_id,
+                "remote_client_key": f"{self.panel.pk}:{inbound.xui_node_id}:{inbound.inbound_id}:{identity['uuid']}",
                 "raw": {"id": identity["uuid"], "email": identity["email"], "enable": True},
             }
         )
@@ -1957,6 +2376,65 @@ class ModernPaidProvisioningTests(TestCase):
         self.assertEqual(len(clients), 2)
         self.assertNotEqual(clients[0].uuid, clients[1].uuid)
         self.assertEqual(create_enabled.call_count, 2)
+
+    @patch("store.provisioning_services.create_enabled_multi_inbound_client_details")
+    @patch("store.provisioning_services.lookup_existing_remote_client")
+    def test_modern_multi_inbound_bundle_creates_one_remote_client_attached_to_all_routes(
+        self,
+        lookup_remote,
+        create_multi,
+    ):
+        self.plan.multi_inbound_bundle = True
+        self.plan.save(update_fields=["multi_inbound_bundle", "updated_at"])
+        second_inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=8,
+            xui_node_id="node-beta",
+            xui_node_name="Node Beta",
+            remark="Second node inbound",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="vpn-beta.example.com",
+            port="8443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        PlanInboundRoute.objects.create(store=self.store, plan=self.plan, inbound=second_inbound, priority=2)
+        result = create_manual_payment_order(
+            store=self.store,
+            customer=self.customer,
+            plan=self.plan,
+            sender_card_name="Bundle Buyer",
+            sender_card_last4="1234",
+            payment_time=time(17, 0),
+            metadata={"source": "modern_bundle"},
+        )
+        self.assertTrue(result.success)
+        order = result.order
+        bundle_inbounds = [self.inbound, second_inbound]
+        first_remote = self.remote_result_for_bundle(order, self.inbound, bundle_inbounds)
+        second_remote = self.remote_result_for_bundle(order, second_inbound, bundle_inbounds)
+        first_remote["expires_at"] = timezone.now() + timedelta(days=30)
+        second_remote["expires_at"] = timezone.now() + timedelta(days=30)
+        lookup_remote.side_effect = [None, None, first_remote, second_remote]
+        create_multi.return_value = {"bundle_inbound_results": [first_remote, second_remote]}
+
+        activation = activate_order(order, notify=False)
+
+        self.assertTrue(activation.success)
+        order.refresh_from_db()
+        clients = list(order.vpn_clients.order_by("inbound_id"))
+        self.assertEqual(order.status, Order.Status.COMPLETED)
+        self.assertTrue(order.metadata["multi_inbound_bundle"])
+        self.assertEqual(len(order.metadata["provisioning_scopes"]), 2)
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(clients[0].inbound_id, self.inbound.pk)
+        self.assertEqual(clients[0].uuid, first_remote["uuid"])
+        self.assertEqual(clients[0].sub_id, first_remote["sub_id"])
+        self.assertEqual(len(clients[0].xui_raw["bundle_inbound_results"]), 2)
+        self.assertIsInstance(clients[0].xui_raw["bundle_inbound_results"][0]["expires_at"], str)
+        create_multi.assert_called_once()
+        self.assertEqual([inbound.pk for inbound in create_multi.call_args.kwargs["inbounds"]], [self.inbound.pk, second_inbound.pk])
 
     @patch("store.provisioning_services.create_enabled_client_details")
     @patch("store.provisioning_services.lookup_existing_remote_client")
@@ -4670,6 +5148,19 @@ class PlanInboundRouteTests(TestCase):
 
         self.assertNotIn(legacy, list(get_valid_sales_inbounds(self.store)))
 
+    def test_multi_inbound_plan_accepts_modern_deferred_routes_by_default(self):
+        self.panel.capability_profile = Panel.CapabilityProfile.MODERN_MULTI_NODE
+        self.panel.save(update_fields=["capability_profile", "updated_at"])
+        self.plan.multi_inbound_bundle = True
+        self.plan.save(update_fields=["multi_inbound_bundle", "updated_at"])
+        second_route = self.create_inbound(33, remark="second route")
+        self.create_route(inbound=self.route_inbound, priority=10)
+        self.create_route(inbound=second_route, priority=20)
+
+        inbounds = select_inbounds_for_plan(self.plan, store=self.store)
+
+        self.assertEqual([inbound.pk for inbound in inbounds], [self.route_inbound.pk, second_route.pk])
+
     def test_preview_bulk_plan_routes_counts_all_active_plans(self):
         self.create_plan("10 GB")
         self.create_plan("Inactive 10 GB", is_active=False)
@@ -4770,6 +5261,83 @@ class PlanInboundRouteTests(TestCase):
         self.assertFalse(old_route.is_active)
         self.assertFalse(second_old_route.is_active)
         self.assertTrue(PlanInboundRoute.objects.get(plan=self.plan, inbound=replacement_inbound).is_active)
+
+    def test_apply_bulk_plan_routes_multi_bundle_replaces_active_routes(self):
+        self.panel.capability_profile = Panel.CapabilityProfile.MODERN_MULTI_NODE
+        self.panel.save(update_fields=["capability_profile", "updated_at"])
+        old_route = self.create_route(inbound=self.fallback_inbound, priority=5)
+        inactive_reusable_route = self.create_route(inbound=self.exact_inbound, priority=50, is_active=False)
+
+        result = apply_bulk_plan_routes(
+            store=self.store,
+            inbounds=[self.route_inbound, self.exact_inbound],
+            multi_inbound_bundle=True,
+            selected_plan_ids=[self.plan.pk],
+            all_active=False,
+            priority=20,
+            weight=1,
+            existing_strategy=BULK_ROUTE_STRATEGY_REPLACE_ACTIVE,
+            note="bundle from test",
+        )
+
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["deactivated"], 1)
+        self.plan.refresh_from_db()
+        old_route.refresh_from_db()
+        inactive_reusable_route.refresh_from_db()
+        self.assertTrue(self.plan.multi_inbound_bundle)
+        self.assertFalse(old_route.is_active)
+        self.assertTrue(inactive_reusable_route.is_active)
+        active_routes = list(PlanInboundRoute.objects.filter(plan=self.plan, is_active=True).order_by("priority"))
+        self.assertEqual([route.inbound for route in active_routes], [self.route_inbound, self.exact_inbound])
+        self.assertEqual([route.priority for route in active_routes], [20, 21])
+
+    def test_preview_bulk_plan_routes_multi_bundle_rejects_cross_panel_inbounds(self):
+        other_panel = Panel.objects.create(
+            store=self.store,
+            name="Other Route Panel",
+            url="https://other-route-panel.example.com",
+            username="admin",
+            password="secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+        )
+        other_inbound = self.create_inbound(41, remark="other panel", panel=other_panel)
+        self.panel.capability_profile = Panel.CapabilityProfile.MODERN_MULTI_NODE
+        self.panel.save(update_fields=["capability_profile", "updated_at"])
+
+        preview = preview_bulk_plan_routes(
+            store=self.store,
+            inbounds=[self.route_inbound, other_inbound],
+            multi_inbound_bundle=True,
+            selected_plan_ids=[self.plan.pk],
+            all_active=False,
+            priority=20,
+            weight=1,
+            existing_strategy=BULK_ROUTE_STRATEGY_REPLACE_ACTIVE,
+        )
+
+        self.assertTrue(preview["errors"])
+        self.assertIn("same panel", " ".join(preview["errors"]))
+
+    def test_apply_bulk_plan_routes_single_disables_multi_bundle_flag(self):
+        self.plan.multi_inbound_bundle = True
+        self.plan.save(update_fields=["multi_inbound_bundle", "updated_at"])
+
+        result = apply_bulk_plan_routes(
+            store=self.store,
+            inbound=self.route_inbound,
+            selected_plan_ids=[self.plan.pk],
+            all_active=False,
+            priority=25,
+            weight=1,
+            existing_strategy=BULK_ROUTE_STRATEGY_REPLACE_ACTIVE,
+        )
+
+        self.assertEqual(result["created"], 1)
+        self.plan.refresh_from_db()
+        self.assertFalse(self.plan.multi_inbound_bundle)
 
     def test_apply_bulk_plan_routes_skips_operator_not_enabled_on_plan(self):
         other_operator = Operator.objects.create(store=self.store, name="رایتل", slug="rightel")
@@ -6559,6 +7127,739 @@ class AdminSetupCenterTests(TestCase):
         output = stdout.getvalue()
         self.assertIn("Setup incomplete: no active X-UI panel exists yet", output)
         self.assertIn("ERROR=0", output)
+
+
+class AdminPanelCenterTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="panel-admin",
+            email="panel-admin@example.com",
+            password="secret",
+        )
+        self.store = Store.objects.create(
+            name="Qasedak",
+            english_name="Qasedak",
+            slug="qasedak-panel",
+            card_number="0000000000000000",
+            card_owner="Configure Payment Owner",
+        )
+        self.panel = Panel.objects.create(
+            store=self.store,
+            name="Production 194",
+            family=Panel.Family.XUI,
+            url="https://admin:panelpass@panel.example.com:2053/secret/",
+            username="admin-user",
+            password="panel-secret",
+            proxy_url="http://proxy-user:proxy-secret@proxy.example.com:8080",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+            detected_xui_version="3.4.0",
+        )
+        self.inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=7,
+            xui_node_id="node-alpha",
+            xui_node_name="Node Alpha",
+            remark="Main inbound",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="vpn.example.com",
+            port="443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+
+    def login_admin(self):
+        self.client.force_login(self.admin_user)
+
+    def test_panel_center_index_renders_for_admin(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_panel_center"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "مرکز اتصال پنل‌ها")
+        self.assertContains(response, self.panel.name)
+        self.assertContains(response, "modern_multi_node")
+        self.assertNotContains(response, "panel-secret")
+        self.assertNotContains(response, "proxy-secret")
+        self.assertNotContains(response, "admin:panelpass")
+
+    def test_panel_center_requires_staff_login(self):
+        response = self.client.get(reverse("admin_store_panel_center"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        regular_user = get_user_model().objects.create_user(username="panel-regular", password="secret")
+        self.client.force_login(regular_user)
+        response = self.client.get(reverse("admin_store_panel_center"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_panel_form_hides_password_and_renders_family_choices(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_panel_center_edit", args=[self.panel.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "خانواده پنل")
+        self.assertContains(response, Panel.Family.XUI)
+        self.assertContains(response, Panel.Family.MARZBAN)
+        self.assertContains(response, Panel.Family.UNKNOWN)
+        self.assertNotContains(response, "panel-secret")
+        self.assertNotContains(response, "proxy-secret")
+
+    def test_capability_report_uses_adapter_factory(self):
+        from .panels.capabilities import CapabilityFlag, CapabilityProfile, PanelCapabilityReport
+
+        self.login_admin()
+        fake_report = PanelCapabilityReport(
+            family="xui",
+            profile=CapabilityProfile(
+                family="xui",
+                profile=Panel.CapabilityProfile.LEGACY_SINGLE_NODE,
+                version="2.4.0",
+                flags=frozenset({CapabilityFlag.LOGIN, CapabilityFlag.READ_INBOUNDS}),
+            ),
+        )
+        fake_adapter = SimpleNamespace(family="xui", get_capability_report=Mock(return_value=fake_report))
+
+        with patch("store.admin_panel_center.services.get_safe_panel_adapter", return_value=fake_adapter) as factory_mock:
+            response = self.client.get(reverse("admin_store_panel_center_capabilities", args=[self.panel.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        factory_mock.assert_called()
+        fake_adapter.get_capability_report.assert_called()
+        self.assertContains(response, "legacy_single_node")
+        self.assertContains(response, "2.4.0")
+
+    def test_marzban_placeholder_displays_unsupported_safely(self):
+        self.panel.family = Panel.Family.MARZBAN
+        self.panel.save(update_fields=["family", "updated_at"])
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_panel_center_detail", args=[self.panel.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "marzban")
+        self.assertContains(response, "unsupported_safe")
+        self.assertContains(response, "پشتیبانی نمی‌شود")
+
+    def test_unknown_family_does_not_crash(self):
+        self.panel.family = Panel.Family.UNKNOWN
+        self.panel.save(update_fields=["family", "updated_at"])
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_panel_center_detail", args=[self.panel.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "unknown")
+        self.assertContains(response, "unsupported_safe")
+
+    def test_test_connection_action_does_not_render_secrets(self):
+        from .xui_api import XUIError
+
+        self.login_admin()
+        with patch(
+            "store.admin_panel_center.services.XUIService.login",
+            side_effect=XUIError("login failed panel-secret csrf-secret-token"),
+        ):
+            response = self.client.post(
+                reverse("admin_store_panel_center_test", args=[self.panel.pk]),
+                follow=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "تست اتصال")
+        self.assertNotContains(response, "panel-secret")
+        self.assertNotContains(response, "csrf-secret-token")
+
+    def test_inbound_explorer_renders_xui_shaped_rows(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_panel_center_inbounds", args=[self.panel.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "کاوشگر اینباند")
+        self.assertContains(response, "Main inbound")
+        self.assertContains(response, "Node Alpha")
+        self.assertContains(response, "قابل فروش")
+
+    def test_unsafe_capability_metadata_is_redacted(self):
+        self.panel.capability_metadata = {
+            "csrf_token": "csrf-secret-token",
+            "sample": {
+                "uuid": "11111111-1111-4111-8111-111111111111",
+                "link": "vless://11111111-1111-4111-8111-111111111111@example.com:443",
+                "url": "https://admin:password@panel.example.com/secret",
+            },
+        }
+        self.panel.save(update_fields=["capability_metadata", "updated_at"])
+        cache.clear()
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_panel_center_capabilities", args=[self.panel.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "csrf-secret-token")
+        self.assertNotContains(response, "11111111-1111-4111-8111-111111111111")
+        self.assertNotContains(response, "vless://")
+        self.assertNotContains(response, "admin:password")
+
+    def test_existing_panel_admin_page_still_loads(self):
+        self.login_admin()
+
+        changelist = self.client.get(reverse("admin:store_panel_changelist"))
+        change = self.client.get(reverse("admin:store_panel_change", args=[self.panel.pk]))
+
+        self.assertEqual(changelist.status_code, 200)
+        self.assertEqual(change.status_code, 200)
+        self.assertContains(change, reverse("admin_store_panel_center_detail", args=[self.panel.pk]))
+
+
+class AdminPlanRoutingBuilderTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="routing-admin",
+            email="routing-admin@example.com",
+            password="secret",
+        )
+        self.store = Store.objects.create(
+            name="Routing Store",
+            english_name="Routing Store",
+            slug="routing-store",
+            card_number="0000000000000000",
+            card_owner="Routing Store",
+        )
+        self.plan = Plan.objects.create(
+            store=self.store,
+            name="Routing 10GB",
+            slug="routing-10gb",
+            volume_gb=Decimal("10.000"),
+            duration_days=30,
+            price=100000,
+            currency=Plan.Currency.TOMAN,
+            device_limit=2,
+            is_active=True,
+            is_public=True,
+        )
+        self.panel = Panel.objects.create(
+            store=self.store,
+            name="Modern routing panel",
+            family=Panel.Family.XUI,
+            url="https://panel.example.com/admin",
+            username="admin",
+            password="panel-secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+            detected_xui_version="3.4.0",
+        )
+        self.inbound = self.create_inbound(7, remark="Alpha", node_id="node-alpha")
+        self.second_inbound = self.create_inbound(8, remark="Beta", node_id="node-beta")
+
+    def login_admin(self):
+        self.client.force_login(self.admin_user)
+
+    def create_inbound(self, inbound_id, *, panel=None, remark="", node_id="", protocol=Inbound.Protocol.VLESS):
+        return Inbound.objects.create(
+            panel=panel or self.panel,
+            inbound_id=inbound_id,
+            xui_node_id=node_id,
+            xui_node_name=node_id.title() if node_id else "",
+            remark=remark,
+            protocol=protocol,
+            server_ip=f"vpn-{inbound_id}.example.com",
+            port="443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+
+    def routing_payload(self, *, mode="single", panel=None, inbound=None, inbounds=None, action="preview"):
+        return {
+            "delivery_mode": mode,
+            "panel": str((panel or self.panel).pk) if panel is not False else "",
+            "inbound": str((inbound or self.inbound).pk) if inbound is not False else "",
+            "inbounds": [str(item.pk) for item in (inbounds or [])],
+            "action": action,
+        }
+
+    def test_routing_index_and_detail_render_for_admin(self):
+        PlanInboundRoute.objects.create(store=self.store, plan=self.plan, inbound=self.inbound, priority=1)
+        self.login_admin()
+
+        index = self.client.get(reverse("admin_store_panel_center_routing"))
+        detail = self.client.get(reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]))
+
+        self.assertEqual(index.status_code, 200)
+        self.assertContains(index, "تنظیم مسیر فروش پلن‌ها")
+        self.assertContains(index, self.plan.name)
+        self.assertContains(index, "single")
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(detail, "Route فعلی")
+        self.assertContains(detail, "Alpha")
+
+    def test_routing_requires_staff_login(self):
+        response = self.client.get(reverse("admin_store_panel_center_routing"))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        regular_user = get_user_model().objects.create_user(username="routing-regular", password="secret")
+        self.client.force_login(regular_user)
+        response = self.client.get(reverse("admin_store_panel_center_routing"))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_detail_shows_current_multi_routes(self):
+        self.plan.multi_inbound_bundle = True
+        self.plan.save(update_fields=["multi_inbound_bundle", "updated_at"])
+        PlanInboundRoute.objects.create(store=self.store, plan=self.plan, inbound=self.inbound, priority=1)
+        PlanInboundRoute.objects.create(store=self.store, plan=self.plan, inbound=self.second_inbound, priority=2)
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "multi")
+        self.assertContains(response, "Alpha")
+        self.assertContains(response, "Beta")
+
+    def test_unsupported_panel_shown_safely(self):
+        self.panel.family = Panel.Family.MARZBAN
+        self.panel.save(update_fields=["family", "updated_at"])
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "unsupported")
+        self.assertNotContains(response, "panel-secret")
+
+    def test_single_mode_requires_exactly_one_inbound(self):
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+            self.routing_payload(mode="single", inbound=False, action="preview"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Exactly one inbound is required")
+
+    def test_multi_mode_requires_at_least_two_inbounds(self):
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+            self.routing_payload(mode="multi", inbound=False, inbounds=[self.inbound], action="preview"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "At least two inbounds")
+
+    def test_multi_mode_rejects_mixed_panels_and_unsupported_profile(self):
+        other_panel = Panel.objects.create(
+            store=self.store,
+            name="Legacy panel",
+            family=Panel.Family.XUI,
+            url="https://legacy.example.com",
+            username="admin",
+            password="secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.LEGACY_SINGLE_NODE,
+        )
+        other_inbound = self.create_inbound(9, panel=other_panel, remark="Other")
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+            self.routing_payload(mode="multi", inbound=False, inbounds=[self.inbound, other_inbound], action="preview"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "same panel")
+
+        response = self.client.post(
+            reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+            self.routing_payload(mode="multi", panel=other_panel, inbound=False, inbounds=[other_inbound, self.create_inbound(10, panel=other_panel)], action="preview"),
+        )
+        self.assertContains(response, "does not support multi-inbound")
+
+    def test_multi_mode_rejects_duplicate_remote_inbound_ids(self):
+        duplicate = self.create_inbound(7, remark="Duplicate", node_id="node-duplicate")
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+            self.routing_payload(mode="multi", inbound=False, inbounds=[self.inbound, duplicate], action="preview"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Duplicate remote inbound IDs")
+
+    def test_unsupported_protocol_is_blocked(self):
+        weird = self.create_inbound(11, protocol="shadowsocks")
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+            self.routing_payload(mode="single", inbound=weird, action="preview"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "protocol is not supported")
+
+    def test_saving_single_route_sets_single_mode_and_routes_match(self):
+        self.plan.multi_inbound_bundle = True
+        self.plan.save(update_fields=["multi_inbound_bundle", "updated_at"])
+        old_route = PlanInboundRoute.objects.create(store=self.store, plan=self.plan, inbound=self.second_inbound, priority=1)
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+            self.routing_payload(mode="single", inbound=self.inbound, action="save"),
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.plan.refresh_from_db()
+        old_route.refresh_from_db()
+        self.assertFalse(self.plan.multi_inbound_bundle)
+        active_routes = list(PlanInboundRoute.objects.filter(plan=self.plan, is_active=True))
+        self.assertEqual(len(active_routes), 1)
+        self.assertEqual(active_routes[0].inbound_id, self.inbound.pk)
+        self.assertFalse(old_route.is_active)
+
+    def test_saving_multi_route_sets_bundle_and_routes_match(self):
+        unrelated_plan = Plan.objects.create(
+            store=self.store,
+            name="Unrelated",
+            slug="unrelated",
+            volume_gb=Decimal("1.000"),
+            duration_days=30,
+            price=10000,
+            currency=Plan.Currency.TOMAN,
+            is_active=True,
+            is_public=True,
+        )
+        unrelated_route = PlanInboundRoute.objects.create(store=self.store, plan=unrelated_plan, inbound=self.inbound, priority=1)
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+            self.routing_payload(mode="multi", inbound=False, inbounds=[self.inbound, self.second_inbound], action="save"),
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.plan.refresh_from_db()
+        unrelated_route.refresh_from_db()
+        self.assertTrue(self.plan.multi_inbound_bundle)
+        self.assertTrue(unrelated_route.is_active)
+        active_inbound_ids = list(
+            PlanInboundRoute.objects.filter(plan=self.plan, is_active=True).order_by("priority").values_list("inbound_id", flat=True)
+        )
+        self.assertEqual(active_inbound_ids, [self.inbound.pk, self.second_inbound.pk])
+
+    def test_save_uses_existing_bulk_route_service(self):
+        self.login_admin()
+        with patch(
+            "store.admin_panel_center.routing_services.apply_bulk_plan_routes",
+            return_value={"created": 1, "updated": 0, "deactivated": 0, "skipped": 0, "warnings": [], "errors": []},
+        ) as apply_mock:
+            response = self.client.post(
+                reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+                self.routing_payload(mode="single", inbound=self.inbound, action="save"),
+            )
+
+        self.assertEqual(response.status_code, 302)
+        apply_mock.assert_called_once()
+
+    def test_preview_does_not_create_local_or_remote_objects(self):
+        self.login_admin()
+        order_count = Order.objects.count()
+        client_count = VPNClient.objects.count()
+
+        with patch("store.xui_api.XUIService.create_enabled_client") as remote_write:
+            response = self.client.post(
+                reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+                self.routing_payload(mode="multi", inbound=False, inbounds=[self.inbound, self.second_inbound], action="preview"),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        remote_write.assert_not_called()
+        self.assertEqual(Order.objects.count(), order_count)
+        self.assertEqual(VPNClient.objects.count(), client_count)
+        self.assertContains(response, "multi inboundIds create")
+        self.assertContains(response, "remote_inbound_ids")
+        self.assertNotContains(response, "panel-secret")
+
+    def test_dry_run_test_masks_sensitive_values_and_defers_live_create(self):
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+            self.routing_payload(mode="single", inbound=self.inbound, action="test"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Dry-run")
+        self.assertContains(response, "&lt;masked&gt;")
+        self.assertContains(response, "&lt;redacted&gt;")
+        self.assertNotContains(response, "vless://")
+        self.assertFalse(Order.objects.exists())
+        self.assertFalse(VPNClient.objects.exists())
+
+    def fake_live_adapter(self, *, cleanup_removes=True):
+        from .panels import get_safe_panel_adapter
+
+        class FakeService:
+            def __init__(self):
+                self.clients_by_inbound = {}
+
+            def get_inbound(self, inbound, use_cache=False):
+                clients = self.clients_by_inbound.get(inbound.pk, [])
+                return {
+                    "protocol": inbound.protocol,
+                    "port": inbound.port,
+                    "settings": json.dumps({"clients": clients}),
+                    "streamSettings": "{}",
+                }
+
+        class FakeAdapter:
+            family = Panel.Family.XUI
+
+            def __init__(self, panel, service):
+                self.panel = panel
+                self.service = service
+                self.create_calls = []
+                self.delete_calls = []
+
+            def get_capability_report(self):
+                return get_safe_panel_adapter(self.panel).get_capability_report()
+
+            def create_enabled_client(self, request):
+                self.create_calls.append(("single", request))
+                client = {"id": request.client_uuid, "email": request.email, "subId": request.sub_id, "enable": True}
+                self.service.clients_by_inbound.setdefault(request.inbound.pk, []).append(client)
+                return {
+                    "uuid": request.client_uuid,
+                    "email": request.email,
+                    "sub_id": request.sub_id,
+                    "sub_link": f"https://panel.example.com/sub/{request.sub_id}",
+                    "direct_link": f"vless://{request.client_uuid}@vpn.example.com:443#secret",
+                    "raw": client,
+                }
+
+            def create_enabled_multi_inbound_client(self, request):
+                self.create_calls.append(("multi", request))
+                bundle = []
+                for inbound in request.inbounds:
+                    client = {"id": request.client_uuid, "email": request.email, "subId": request.sub_id, "enable": True}
+                    self.service.clients_by_inbound.setdefault(inbound.pk, []).append(client)
+                    bundle.append(
+                        {
+                            "inbound_pk": inbound.pk,
+                            "uuid": request.client_uuid,
+                            "email": request.email,
+                            "sub_id": request.sub_id,
+                            "sub_link": f"https://panel.example.com/sub/{request.sub_id}",
+                            "direct_link": f"vless://{request.client_uuid}@vpn-{inbound.inbound_id}.example.com:443#secret",
+                            "raw": client,
+                        }
+                    )
+                return {
+                    **bundle[0],
+                    "sub_link": bundle[0]["sub_link"],
+                    "bundle_inbound_results": bundle,
+                    "bundle_inbound_ids": [inbound.inbound_id for inbound in request.inbounds],
+                }
+
+            def delete_client(self, inbound, identifier, *, allow_multi_scope=False):
+                self.delete_calls.append((inbound.pk, identifier, allow_multi_scope))
+                if cleanup_removes:
+                    self.service.clients_by_inbound[inbound.pk] = [
+                        client
+                        for client in self.service.clients_by_inbound.get(inbound.pk, [])
+                        if identifier not in {client.get("id"), client.get("email"), client.get("subId")}
+                    ]
+                return True
+
+        service = FakeService()
+        return FakeAdapter(self.panel, service)
+
+    def run_fake_live_test(self, *, mode="single", inbounds=None, adapter=None):
+        from .admin_panel_center.routing_test_services import SafeProvisioningTestRequest, SafeRouteProvisioningTestService
+
+        adapter = adapter or self.fake_live_adapter()
+        service = SafeRouteProvisioningTestService(adapter_factory=lambda panel: adapter)
+        return service.run(
+            SafeProvisioningTestRequest(
+                plan=self.plan,
+                mode=mode,
+                panel=self.panel,
+                inbound=self.inbound if mode == "single" else None,
+                inbounds=list(inbounds or []),
+            )
+        ), adapter
+
+    def test_safe_live_service_single_success_cleans_up_and_masks_links(self):
+        result, adapter = self.run_fake_live_test(mode="single")
+
+        self.assertEqual(result.status, "success")
+        self.assertTrue(result.create_attempted)
+        self.assertTrue(result.create_success)
+        self.assertTrue(result.cleanup_attempted)
+        self.assertTrue(result.cleanup_success)
+        self.assertEqual(result.remaining_remote_test_clients_count, 0)
+        self.assertEqual(result.verified_inbound_count, 1)
+        self.assertEqual(result.direct_link_count, 1)
+        self.assertEqual(result.masked_delivery_preview.direct_links, ["vless://<direct-link-redacted>"])
+        self.assertEqual(result.masked_delivery_preview.subscription_link, "<subscription-link-redacted>")
+        self.assertIn("qasedak-route-test", result.test_marker)
+        self.assertFalse(Order.objects.exists())
+        self.assertFalse(VPNClient.objects.exists())
+        self.assertEqual(adapter.create_calls[0][0], "single")
+
+    def test_safe_live_service_multi_success_uses_inbounds_and_cleanup_multi_scope(self):
+        result, adapter = self.run_fake_live_test(mode="multi", inbounds=[self.inbound, self.second_inbound])
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.verified_inbound_count, 2)
+        self.assertEqual(result.direct_link_count, 2)
+        self.assertEqual(adapter.create_calls[0][0], "multi")
+        self.assertEqual([inbound.pk for inbound in adapter.create_calls[0][1].inbounds], [self.inbound.pk, self.second_inbound.pk])
+        self.assertTrue(all(call[2] for call in adapter.delete_calls))
+
+    def test_safe_live_service_rejects_mixed_panels_and_unsupported_marzban(self):
+        other_panel = Panel.objects.create(
+            store=self.store,
+            name="Other",
+            family=Panel.Family.XUI,
+            url="https://other.example.com",
+            username="admin",
+            password="secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+        )
+        other_inbound = self.create_inbound(9, panel=other_panel, remark="Other")
+
+        mixed, _adapter = self.run_fake_live_test(mode="multi", inbounds=[self.inbound, other_inbound])
+        self.assertEqual(mixed.status, "error")
+        self.assertIn("same panel", " ".join(mixed.errors))
+
+        self.panel.family = Panel.Family.MARZBAN
+        self.panel.save(update_fields=["family", "updated_at"])
+        marzban, _adapter = self.run_fake_live_test(mode="single")
+        self.assertEqual(marzban.status, "error")
+        self.assertTrue(any(step.error_code == "unsupported_panel_family" for step in marzban.steps))
+
+    def test_safe_live_service_rejects_unsupported_profile_for_multi(self):
+        self.panel.capability_profile = Panel.CapabilityProfile.MODERN_SINGLE_NODE
+        self.panel.save(update_fields=["capability_profile", "updated_at"])
+
+        result, _adapter = self.run_fake_live_test(mode="multi", inbounds=[self.inbound, self.second_inbound])
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("multi-inbound", " ".join(result.errors))
+
+    def test_safe_live_service_cleanup_runs_after_verify_failure(self):
+        from .admin_panel_center.routing_test_services import SafeRouteProvisioningTestService, XUIError
+
+        adapter = self.fake_live_adapter()
+        service = SafeRouteProvisioningTestService(adapter_factory=lambda panel: adapter)
+        with patch.object(service, "_verify_remote", side_effect=XUIError("verify failed 11111111-1111-4111-8111-111111111111")):
+            result = service.run(
+                SimpleNamespace(
+                    plan=self.plan,
+                    mode="single",
+                    panel=self.panel,
+                    inbound=self.inbound,
+                    inbounds=[],
+                )
+            )
+
+        self.assertEqual(result.status, "error")
+        self.assertTrue(result.cleanup_attempted)
+        self.assertTrue(result.cleanup_success)
+        self.assertGreaterEqual(len(adapter.delete_calls), 1)
+        self.assertNotIn("11111111-1111-4111-8111-111111111111", " ".join(result.errors))
+
+    def test_safe_live_service_cleanup_failure_is_reported_clearly(self):
+        adapter = self.fake_live_adapter(cleanup_removes=False)
+
+        result, _adapter = self.run_fake_live_test(mode="single", adapter=adapter)
+
+        self.assertEqual(result.status, "error")
+        self.assertTrue(result.cleanup_attempted)
+        self.assertFalse(result.cleanup_success)
+        self.assertEqual(result.remaining_remote_test_clients_count, 1)
+        self.assertIn("Search panel_id", result.cleanup.remediation)
+        self.assertIn(result.test_marker, result.cleanup.remediation)
+
+    def test_live_test_view_is_post_only_and_renders_safe_step_statuses(self):
+        from .admin_panel_center.routing_test_services import SafeProvisioningTestResult, SafeProvisioningTestStep
+
+        self.login_admin()
+        fake_result = SafeProvisioningTestResult(
+            status="success",
+            panel_id=self.panel.pk,
+            panel_name=self.panel.name,
+            panel_family="xui",
+            capability_profile=self.panel.capability_profile,
+            plan_id=self.plan.pk,
+            plan_title=self.plan.name,
+            selected_local_inbound_pks=[self.inbound.pk],
+            selected_remote_inbound_ids=[self.inbound.inbound_id],
+            expected_mode="single",
+            create_attempted=True,
+            create_success=True,
+            verified_inbound_count=1,
+            expected_inbound_count=1,
+            subscription_generated=True,
+            direct_link_count=1,
+            cleanup_attempted=True,
+            cleanup_success=True,
+            test_marker="qasedak-route-test-safe",
+            masked_client_name="qasedak-route-test-safe-<client-suffix-redacted>",
+            steps=[
+                SafeProvisioningTestStep("validation", "اعتبارسنجی مسیر", "success", "ok"),
+                SafeProvisioningTestStep("create", "ساخت روی پنل", "success", "ok"),
+            ],
+        )
+
+        get_response = self.client.get(
+            reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+            {"action": "live_test"},
+        )
+        self.assertEqual(get_response.status_code, 200)
+        self.assertNotContains(get_response, "Live test passed")
+
+        with patch("store.admin_panel_center.routing_views.run_safe_route_provisioning_test", return_value=fake_result) as live_mock:
+            response = self.client.post(
+                reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+                self.routing_payload(mode="single", inbound=self.inbound, action="live_test"),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        live_mock.assert_called_once()
+        self.assertContains(response, "Live test passed")
+        self.assertContains(response, "اعتبارسنجی مسیر")
+        self.assertContains(response, "ساخت روی پنل")
+        self.assertNotContains(response, "vless://")
+        self.assertNotContains(response, "panel-secret")
+
+    def test_existing_plan_route_admin_still_loads(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin:store_planinboundroute_changelist"))
+        plan_response = self.client.get(reverse("admin:store_plan_changelist"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(plan_response.status_code, 200)
+        self.assertContains(plan_response, reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]))
 
 
 @override_settings(SMSFORWARDER_WEBHOOK_TOKEN="", TELEGRAM_BOT_USERNAME="", TELEGRAM_PROXY_URL="")

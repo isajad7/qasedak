@@ -2525,7 +2525,7 @@ def _test_xui_setup_form(form, store):
         proxy_url=form.cleaned_data.get("proxy_url") or None,
         is_active=bool(form.cleaned_data.get("is_active")),
     )
-    service = XUIService(panel, timeout_seconds=8)
+    service = XUIService(panel, timeout_seconds=30)
     return service.authenticated_json("GET", "/panel/api/inbounds/list")
 
 

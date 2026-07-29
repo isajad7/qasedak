@@ -33,6 +33,7 @@ from store.models import (
     Store,
 )
 from store.renewal_reminder_services import get_active_clients_for_reminders, normalize_reminder_days
+from store.panels import get_safe_panel_adapter
 from store.xui_compat import discover_xui_capabilities
 
 
@@ -545,10 +546,12 @@ class Command(BaseCommand):
                 self.error(subject, "Panel URL is missing or invalid.")
             if (panel.username or "").strip() and (panel.password or "").strip():
                 self.ok(subject, "Panel username/password are configured.")
-                profile = discover_xui_capabilities(panel, live=False)
-                profile_label = profile.profile or "unknown"
-                version_label = profile.version or "-"
-                if profile_label == Panel.CapabilityProfile.UNKNOWN_SAFE:
+                report = get_safe_panel_adapter(panel).get_capability_report()
+                profile_label = report.capability_profile or "unknown"
+                version_label = report.detected_version or "-"
+                if not report.supported:
+                    self.warning(subject, f"Panel family={report.family} is unsupported: {'; '.join(report.errors or report.warnings)}")
+                elif profile_label == Panel.CapabilityProfile.UNKNOWN_SAFE:
                     self.warning(subject, "X-UI compatibility profile is unknown_safe; destructive operations are blocked.")
                 elif profile_label in {
                     Panel.CapabilityProfile.MODERN_SINGLE_NODE,
@@ -556,9 +559,11 @@ class Command(BaseCommand):
                 }:
                     self.ok(subject, "Modern 3X-UI paid flow uses deferred create-enabled provisioning.")
                 else:
-                    self.ok(subject, f"X-UI compatibility profile={profile_label} version={version_label}.")
-                if self.live_xui:
+                    self.ok(subject, f"Panel family={report.family} compatibility profile={profile_label} version={version_label}.")
+                if self.live_xui and report.family == "xui" and report.supported:
                     self.check_live_panel(panel, subject)
+                elif self.live_xui and report.family != "xui":
+                    self.warning(subject, f"Live X-UI check skipped for panel family={report.family}.")
             else:
                 self.error(subject, "Panel username/password are missing.")
 

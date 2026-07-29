@@ -1,0 +1,60 @@
+{% extends "admin/store/panel_center/_base_panel_center.html" %}
+
+{% block panel_breadcrumb %}&rsaquo; {{ panel.name }} &rsaquo; گزارش قابلیت{% endblock %}
+
+{% block panel_center_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+    <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+        <div class="tw-min-w-0">
+            {% include "admin/store/panel_center/_badge.html" with tone="blue" label="Capability Report" icon="fas fa-list-check" %}
+            <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">گزارش قابلیت {{ panel.name }}</h1>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+                خروجی استاندارد adapter، بدون نمایش secret یا لینک‌های حساس.
+            </p>
+        </div>
+        {% include "admin/store/panel_center/_actions.html" with actions=actions %}
+    </div>
+</section>
+
+<section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>قابلیت‌ها</h2></div>
+        <div class="tw-space-y-3">
+            {% for label, badge in capability_items %}
+                <div class="tw-model-row">
+                    <span>{{ label }}</span>
+                    {% include "admin/store/panel_center/_badge.html" with tone=badge.tone label=badge.label %}
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>پروفایل</h2></div>
+        <div class="tw-model-list">
+            <div class="tw-model-row"><span>family</span><strong>{{ report.family }}</strong></div>
+            <div class="tw-model-row"><span>detected_version</span><strong>{{ report.detected_version|default:"-" }}</strong></div>
+            <div class="tw-model-row"><span>capability_profile</span><strong>{{ report.capability_profile }}</strong></div>
+            <div class="tw-model-row"><span>supported_protocols</span><strong>{{ report_dict.supported_protocols|join:", " }}</strong></div>
+            <div class="tw-model-row"><span>unsupported_protocols</span><strong>{{ report_dict.unsupported_protocols|join:", " }}</strong></div>
+        </div>
+    </div>
+</section>
+
+<section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>هشدارها و خطاها</h2></div>
+        {% if report.warnings or report.errors %}
+            <ul class="tw-detail-list">
+                {% for warning in report.warnings %}<li>{{ warning }}</li>{% endfor %}
+                {% for error in report.errors %}<li>{{ error }}</li>{% endfor %}
+            </ul>
+        {% else %}
+            <div class="tw-empty-state">هشدار یا خطایی ثبت نشده است.</div>
+        {% endif %}
+    </div>
+    <details class="tw-admin-card tw-advanced-panel">
+        <summary><span>نمایش جزئیات فنی</span><small>safe metadata</small></summary>
+        <code class="tw-safe-command">{{ report_dict.metadata }}</code>
+    </details>
+</section>
+{% endblock %}

@@ -1,0 +1,20 @@
+{% extends "admin/store/panel_center/_base_panel_center.html" %}
+
+{% block panel_breadcrumb %}&rsaquo; <a href="{{ routing_index_url }}">تنظیم مسیر فروش</a> &rsaquo; {{ plan.name }}{% endblock %}
+
+{% block panel_center_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+    <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+        <div class="tw-min-w-0">
+            {% include "admin/store/panel_center/_badge.html" with tone="blue" label="Plan Routing" icon="fas fa-route" %}
+            <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">تنظیم مسیر فروش {{ plan.name }}</h1>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+                نوع تحویل، پنل و اینباندهای مقصد را انتخاب کنید. ذخیره route از سرویس موجود route assignment استفاده می‌کند.
+            </p>
+        </div>
+        <a href="{{ routing_index_url }}" class="tw-button tw-button-secondary">بازگشت</a>
+    </div>
+</section>
+
+{% include "admin/store/panel_center/plan_routing_form_body.html" %}
+{% endblock %}

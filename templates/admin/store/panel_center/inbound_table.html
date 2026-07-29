@@ -1,0 +1,71 @@
+<div class="tw-table-wrap tw-admin-card">
+    <table class="tw-catalog-table">
+        <thead>
+            <tr>
+                <th>PK</th>
+                <th>Remote ID</th>
+                <th>پروتکل</th>
+                <th>نام</th>
+                <th>Host / Port</th>
+                <th>Node</th>
+                <th>فروش</th>
+                <th>لینک</th>
+                <th>آخرین sync</th>
+                <th>هشدار</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in inbound_rows %}
+                <tr>
+                    <td>{{ row.inbound.pk }}</td>
+                    <td>{{ row.inbound.inbound_id }}</td>
+                    <td>{{ row.inbound.protocol }}</td>
+                    <td>
+                        <strong>{{ row.inbound.remark|default:"-" }}</strong>
+                    </td>
+                    <td>
+                        <code class="tw-safe-command">{{ row.inbound.server_ip }}:{{ row.inbound.port }}</code>
+                    </td>
+                    <td>
+                        {{ row.inbound.xui_node_name|default:row.inbound.xui_node_id|default:"local" }}
+                    </td>
+                    <td>
+                        {% if row.sellable %}
+                            {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="قابل فروش" %}
+                        {% else %}
+                            {% include "admin/store/panel_center/_badge.html" with tone="slate" label="غیرفعال/نامناسب" %}
+                        {% endif %}
+                    </td>
+                    <td>{{ row.link_support }}</td>
+                    <td>{{ row.inbound.last_synced_at|default:"-" }}</td>
+                    <td>
+                        {% if row.warnings %}
+                            <ul class="tw-detail-list">
+                                {% for warning in row.warnings %}<li>{{ warning }}</li>{% endfor %}
+                            </ul>
+                        {% else %}
+                            -
+                        {% endif %}
+                        {% if row.active_plan_routes %}
+                            <details class="tw-advanced-panel tw-mt-2">
+                                <summary><span>پلن‌های استفاده‌کننده</span><small>{{ row.active_plan_routes|length }}</small></summary>
+                                <div class="tw-model-list">
+                                    {% for route in row.active_plan_routes %}
+                                        <div class="tw-model-row">
+                                            <span>{{ route.plan.name }}</span>
+                                            <a href="{% url 'admin_store_panel_center_routing_detail' route.plan.pk %}" class="tw-mini-button">تنظیم مسیر</a>
+                                        </div>
+                                    {% endfor %}
+                                </div>
+                            </details>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% empty %}
+                <tr>
+                    <td colspan="10"><div class="tw-empty-state">اینباند local برای این پنل ثبت نشده است.</div></td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>

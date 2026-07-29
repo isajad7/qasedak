@@ -1,0 +1,76 @@
+{% extends "admin/store/panel_center/_base_panel_center.html" %}
+
+{% block panel_breadcrumb %}&rsaquo; تنظیم مسیر فروش{% endblock %}
+
+{% block panel_center_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+    <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+        <div class="tw-min-w-0">
+            {% include "admin/store/panel_center/_badge.html" with tone="blue" label="Routing Builder" icon="fas fa-route" %}
+            <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">تنظیم مسیر فروش پلن‌ها</h1>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+                route فروش را بدون درگیر شدن با جزئیات low-level مدل PlanInboundRoute تنظیم کنید.
+            </p>
+        </div>
+        <a href="{% url 'admin_store_panel_center' %}" class="tw-button tw-button-secondary">بازگشت به مرکز پنل</a>
+    </div>
+</section>
+
+<section class="tw-section">
+    <div class="tw-table-wrap tw-admin-card">
+        <table class="tw-catalog-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>پلن</th>
+                    <th>وضعیت</th>
+                    <th>حجم/مدت/قیمت</th>
+                    <th>حالت route</th>
+                    <th>Routeها</th>
+                    <th>پنل</th>
+                    <th>آمادگی</th>
+                    <th>اقدام</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in items %}
+                    <tr>
+                        <td>{{ item.plan.pk }}</td>
+                        <td>
+                            <strong>{{ item.plan.name }}</strong>
+                            <small>{{ item.plan.store|default:"بدون فروشگاه" }}</small>
+                        </td>
+                        <td>
+                            {% if item.plan.is_active %}
+                                {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="فعال" %}
+                            {% else %}
+                                {% include "admin/store/panel_center/_badge.html" with tone="slate" label="غیرفعال" %}
+                            {% endif %}
+                            {% if item.plan.is_public %}
+                                {% include "admin/store/panel_center/_badge.html" with tone="blue" label="عمومی" %}
+                            {% else %}
+                                {% include "admin/store/panel_center/_badge.html" with tone="slate" label="خصوصی" %}
+                            {% endif %}
+                        </td>
+                        <td>{{ item.plan.volume_gb }}GB / {{ item.plan.duration_days }} روز / {{ item.plan.price }} {{ item.plan.currency }}</td>
+                        <td>{{ item.mode }}</td>
+                        <td>{{ item.route_count }}</td>
+                        <td>
+                            {% if item.panel %}
+                                {{ item.panel.name }}
+                                <small>{{ item.report.family }} / {{ item.report.capability_profile }}</small>
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>{% include "admin/store/panel_center/_badge.html" with tone=item.status.tone label=item.status.label %}</td>
+                        <td><a href="{{ item.routing_url }}" class="tw-mini-button tw-mini-button-success">تنظیم مسیر</a></td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="9"><div class="tw-empty-state">پلنی برای نمایش وجود ندارد.</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

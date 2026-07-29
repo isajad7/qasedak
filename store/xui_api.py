@@ -37,8 +37,8 @@ from .xui_compat.errors import XUIAmbiguousScopeError, XUICompatibilityError, XU
 
 logger = logging.getLogger(__name__)
 
-PANEL_TIMEOUT_SECONDS = 10
-PANEL_LOGIN_TIMEOUT_SECONDS = (5, 7)
+PANEL_TIMEOUT_SECONDS = 30
+PANEL_LOGIN_TIMEOUT_SECONDS = (5, 30)
 PANEL_LOGIN_ATTEMPTS = 2
 CLIENT_STATS_CACHE_SECONDS = 60
 USAGE_SNAPSHOT_INTERVAL_SECONDS = 300
@@ -615,6 +615,7 @@ def _xui_remediation_hint(category):
     return {
         "http_403_csrf_required": "CSRF/login flow mismatch; use the 3X-UI 3.5 CSRF login flow and verify panel security settings.",
         "http_403": "Panel refused the request with HTTP 403; verify login/session permissions and panel security settings.",
+        "write_api_forbidden": "Panel refused an authenticated write request with HTTP 403 after CSRF refresh; verify write permissions, CSRF settings, and panel security rules.",
         "http_401": "Panel returned HTTP 401; verify panel username/password and account permissions.",
         "auth_failed": "Verify panel username/password and account permissions.",
         "two_factor_required": "Disable two-factor login for this panel account or use an automation account without 2FA.",
@@ -880,6 +881,7 @@ class XUIService:
         self.base_url = self._normalize_base_url(panel.url)
         self.session = configure_xui_session(requests.Session(), panel=panel)
         self._logged_in = False
+        self.csrf_token = ""
         if timeout_seconds is None:
             self.timeout_seconds = PANEL_TIMEOUT_SECONDS
             self.login_timeout = PANEL_LOGIN_TIMEOUT_SECONDS
@@ -1000,15 +1002,16 @@ class XUIService:
         )
         return self._ensure_success(response, "Could not add client to panel.")
 
-    def _post_modern_client_create(self, inbound, client_data):
+    def _post_modern_client_create(self, inbound, client_data, *, inbound_ids=None):
         if client_data.get("enable") is False:
             raise XUICompatibilityError(
                 "Official 3X-UI client API cannot safely create a disabled client; refusing create-inactive."
             )
+        inbound_ids = [int(value) for value in (inbound_ids or [inbound.inbound_id])]
         response = self.authenticated_json(
             "POST",
             "/panel/api/clients/add",
-            json={"client": client_data, "inboundIds": [int(inbound.inbound_id)]},
+            json={"client": client_data, "inboundIds": inbound_ids},
             headers={"Accept": "application/json"},
         )
         return self._ensure_success(response, "Could not add client to panel.")
@@ -1230,6 +1233,21 @@ class XUIService:
             headers["X-CSRF-Token"] = token
         return headers
 
+    def _unsafe_request_headers(self, headers=None):
+        merged = self._csrf_login_headers(self.csrf_token)
+        merged["Content-Type"] = "application/json"
+        merged.update(headers or {})
+        merged["X-Requested-With"] = "XMLHttpRequest"
+        merged["Accept"] = "application/json, text/plain, */*"
+        merged["Origin"] = self._origin()
+        merged["Referer"] = self._base_page_url()
+        if self.csrf_token:
+            merged["X-CSRF-Token"] = self.csrf_token
+        return merged
+
+    def _request_needs_csrf(self, method):
+        return str(method or "").upper() in {"POST", "PUT", "PATCH", "DELETE"}
+
     def _csrf_response_json(self, response, *, endpoint):
         if response.status_code != 200:
             self._raise_login_http_error(response, endpoint=endpoint)
@@ -1262,6 +1280,7 @@ class XUIService:
                 response_snippet=_safe_response_snippet(csrf_response, panel=self.panel),
                 remediation_hint=_xui_remediation_hint("unexpected_response"),
             )
+        self.csrf_token = token
 
         two_factor_response = self.session.post(
             self._url("getTwoFactorEnable"),
@@ -1309,6 +1328,36 @@ class XUIService:
             )
         return login_payload
 
+    def refresh_csrf_token(self):
+        self._login_request_with_retries(
+            lambda: self.session.get(
+                self._base_page_url(),
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "User-Agent": "Mozilla/5.0",
+                },
+                timeout=self.login_timeout,
+            )
+        )
+        csrf_response = self.session.get(
+            self._url("csrf-token"),
+            headers=self._csrf_login_headers(),
+            timeout=self.login_timeout,
+        )
+        csrf_payload = self._csrf_response_json(csrf_response, endpoint="csrf-token")
+        token = csrf_payload.get("obj") if csrf_payload.get("success") else ""
+        if not isinstance(token, str) or not token:
+            raise XUIError(
+                "Panel returned an invalid CSRF token response.",
+                category="unexpected_response",
+                http_status=csrf_response.status_code,
+                endpoint="csrf-token",
+                response_snippet=_safe_response_snippet(csrf_response, panel=self.panel),
+                remediation_hint=_xui_remediation_hint("unexpected_response"),
+            )
+        self.csrf_token = token
+        return token
+
     def login(self):
         if self._logged_in:
             return self.session
@@ -1324,14 +1373,27 @@ class XUIService:
     def request_json(self, method, path, **kwargs):
         if "timeout" not in kwargs:
             kwargs["timeout"] = self.timeout_seconds
-        response = self.session.request(method, self._url(path), **kwargs)
+        endpoint = str(path or "").lstrip("/")
+        unsafe = self._request_needs_csrf(method)
+        csrf_unsafe = bool(unsafe and (self.csrf_token or self._uses_modern_client_api()))
+        if csrf_unsafe:
+            if not self.csrf_token:
+                self.refresh_csrf_token()
+            kwargs["headers"] = self._unsafe_request_headers(kwargs.get("headers"))
+        response = self._login_request_with_retries(lambda: self.session.request(method, self._url(path), **kwargs))
+        if csrf_unsafe and response.status_code == 403:
+            self.refresh_csrf_token()
+            kwargs["headers"] = self._unsafe_request_headers(kwargs.get("headers"))
+            response = self._login_request_with_retries(lambda: self.session.request(method, self._url(path), **kwargs))
         if response.status_code != 200:
-            category = _xui_http_category(response.status_code, endpoint=str(path or "").lstrip("/"))
+            category = _xui_http_category(response.status_code, endpoint=endpoint)
+            if csrf_unsafe and response.status_code == 403:
+                category = "write_api_forbidden"
             raise XUIError(
                 f"Panel request failed with HTTP {response.status_code}.",
                 category=category,
                 http_status=response.status_code,
-                endpoint=str(path or "").lstrip("/"),
+                endpoint=endpoint,
                 response_snippet=_safe_response_snippet(response, panel=self.panel),
                 remediation_hint=_xui_remediation_hint(category),
             )
@@ -2171,6 +2233,104 @@ class XUIService:
             "raw": remote_client,
         }
 
+    def create_enabled_multi_inbound_client(
+        self,
+        *,
+        email_prefix,
+        total_gb,
+        duration_hours,
+        inbounds,
+        limit_ip=1,
+        client_uuid="",
+        sub_id="",
+        email="",
+    ):
+        inbounds = [inbound for inbound in (inbounds or []) if inbound]
+        if not inbounds:
+            raise XUIError("At least one inbound is required for multi-inbound create.")
+        panel_ids = {getattr(inbound, "panel_id", None) for inbound in inbounds}
+        if panel_ids != {getattr(self.panel, "pk", None)}:
+            raise XUIError("All bundle inbounds must belong to the same panel.")
+        for inbound in inbounds:
+            resolve_inbound_panel(inbound, self.panel, require_active=True)
+            self._assert_precise_scope(inbound, operation="create")
+        profile = self._compat_profile(live=False)
+        if profile.profile != PROFILE_MODERN_MULTI_NODE:
+            raise XUICompatibilityError("Multi-inbound create requires a modern multi-node panel.")
+
+        self.login()
+        client_uuid = str(client_uuid or uuid.uuid4())
+        sub_id = str(sub_id or "".join(random.choices(string.ascii_letters + string.digits, k=16)))
+        email = str(email or build_xui_client_email(email_prefix, client_uuid)).strip()
+        total_bytes = bytes_from_gb(total_gb)
+        expiry_time = int(time.time() * 1000) + (int(duration_hours) * 3_600_000)
+        client_data = {
+            "id": client_uuid,
+            "alterId": 0,
+            "email": email,
+            "limitIp": limit_ip,
+            "totalGB": total_bytes,
+            "expiryTime": expiry_time,
+            "enable": True,
+            "tgId": 0,
+            "subId": sub_id,
+        }
+        inbound_ids = [int(inbound.inbound_id) for inbound in inbounds]
+        self._post_modern_client_create(inbounds[0], client_data, inbound_ids=inbound_ids)
+
+        per_inbound = []
+        sub_link = ""
+        for inbound in inbounds:
+            inbound_data = self.get_inbound(inbound, use_cache=False)
+            target_client, target_stats, _matched, _clients, _stats = find_xui_client_and_stats(inbound_data, client_uuid)
+            if not target_client and not target_stats and email:
+                target_client, target_stats, _matched, _clients, _stats = find_xui_client_and_stats(inbound_data, email)
+            if not target_client and not target_stats:
+                raise XUIError("Client creation could not be verified on every bundle inbound.")
+            enabled_value = first_xui_value((target_client or {}).get("enable"), (target_stats or {}).get("enable"))
+            if enabled_value is not None and not xui_bool(enabled_value):
+                raise XUIError("Client was created but is not enabled on every bundle inbound.")
+            remote_client = {**client_data, **(target_client or {})}
+            hosts = self.get_hosts_for_inbound(inbound.inbound_id)
+            direct_link = self.build_direct_link(
+                inbound=inbound,
+                inbound_data=inbound_data,
+                client_uuid=client_uuid,
+                client_data=remote_client,
+                email=email,
+                hosts=hosts,
+            )
+            sub_link = sub_link or f"{self.build_sub_base_url(inbound_data)}/sub/{sub_id}"
+            per_inbound.append(
+                {
+                    "inbound_pk": getattr(inbound, "pk", None),
+                    "uuid": client_uuid,
+                    "email": email,
+                    "sub_id": sub_id,
+                    "sub_link": f"{self.build_sub_base_url(inbound_data)}/sub/{sub_id}",
+                    "direct_link": direct_link,
+                    "expires_at": parse_xui_datetime(expiry_time),
+                    "xui_node_id": getattr(inbound, "xui_node_id", "") or "",
+                    "remote_client_key": build_remote_client_key(self.panel, inbound, client_uuid),
+                    "remote_scope": {
+                        "panel_id": getattr(self.panel, "pk", None),
+                        "inbound_id": inbound.inbound_id,
+                        "node_id": getattr(inbound, "xui_node_id", "") or "",
+                        "inbound_remote_key": inbound_remote_key(inbound, panel=self.panel),
+                    },
+                    "raw": remote_client,
+                }
+            )
+
+        primary = per_inbound[0]
+        return {
+            **primary,
+            "sub_link": sub_link or primary.get("sub_link", ""),
+            "bundle_inbound_results": per_inbound,
+            "bundle_inbound_ids": inbound_ids,
+            "raw": {**client_data, "bundle_inbound_ids": inbound_ids},
+        }
+
     def update_client_enabled(self, order):
         resolve_inbound_panel(order.inbound, self.panel, require_active=True)
         self._assert_precise_scope(order.inbound, getattr(order, "uuid", ""), operation="enable")
@@ -2878,6 +3038,41 @@ def create_enabled_client_details(
     except Exception as exc:
         logger.warning(
             "Could not create enabled X-UI client: %s",
+            sanitize_xui_operational_text(exc, panel=panel),
+        )
+        return None
+
+
+def create_enabled_multi_inbound_client_details(
+    email_prefix,
+    total_gb,
+    duration_days,
+    panel,
+    inbounds,
+    limit_ip=2,
+    *,
+    client_uuid="",
+    sub_id="",
+    email="",
+):
+    try:
+        inbounds = [inbound for inbound in (inbounds or []) if inbound]
+        if not inbounds:
+            raise XUIError("At least one inbound is required.")
+        resolved_panel = resolve_inbound_panel(inbounds[0], panel, require_active=True)
+        return XUIService(resolved_panel).create_enabled_multi_inbound_client(
+            email_prefix=email_prefix,
+            total_gb=total_gb,
+            duration_hours=int(duration_days or 0) * 24,
+            inbounds=inbounds,
+            limit_ip=limit_ip,
+            client_uuid=client_uuid,
+            sub_id=sub_id,
+            email=email,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not create enabled multi-inbound X-UI client: %s",
             sanitize_xui_operational_text(exc, panel=panel),
         )
         return None

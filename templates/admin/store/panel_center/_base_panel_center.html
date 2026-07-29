@@ -1,0 +1,23 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin_tailwind.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin_store_panel_center' %}">مرکز اتصال پنل‌ها</a>
+    {% block panel_breadcrumb %}{% endblock %}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="tw-admin-home tw-bg-slate-50 tw-p-4 sm:tw-p-5 lg:tw-p-6" dir="rtl">
+    {% block panel_center_content %}{% endblock %}
+</div>
+{% endblock %}

@@ -4,7 +4,6 @@ from store.jalali import persian_digits
 from store.models import BotEventLog, BotUser
 
 from .config_delivery import config_send_result_count, send_config_links_message
-from .services_flow import client_config_links
 
 
 def format_customer_order_event(order, *, event_type, format_order_message_func):
@@ -40,9 +39,15 @@ def order_config_links(order):
     links = []
     clients = list(order.get_vpn_clients())
     if clients:
-        for index, vpn_client in enumerate(clients, start=1):
-            prefix = f"کانفیگ {persian_digits(index)}" if len(clients) > 1 else "کانفیگ"
-            for label, link in client_config_links(vpn_client):
+        groups = order_config_link_groups(order)
+        for index, group in enumerate(groups, start=1):
+            prefix = f"کانفیگ {persian_digits(index)}" if len(groups) > 1 else "کانفیگ"
+            for label, link in (
+                ("لینک اشتراک", group.get("subscription_link")),
+                ("لینک مستقیم", group.get("direct_link")),
+            ):
+                if not link:
+                    continue
                 links.append((f"{prefix} - {label}", link))
         return links
     if order.sub_link:
@@ -55,15 +60,39 @@ def order_config_links(order):
 def order_config_link_groups(order):
     clients = list(order.get_vpn_clients())
     if clients:
-        total = len(clients)
+        expanded = []
+        for vpn_client in clients:
+            bundle_results = (vpn_client.xui_raw or {}).get("bundle_inbound_results") or []
+            if bundle_results:
+                for result in bundle_results:
+                    expanded.append(
+                        {
+                            "subscription_link": result.get("sub_link") or vpn_client.sub_link,
+                            "direct_link": result.get("direct_link") or "",
+                        }
+                    )
+            else:
+                expanded.append(
+                    {
+                        "subscription_link": vpn_client.sub_link,
+                        "direct_link": vpn_client.direct_link,
+                    }
+                )
+        total = len(expanded)
         groups = []
-        for index, vpn_client in enumerate(clients, start=1):
+        seen_subscription_links = set()
+        for index, item in enumerate(expanded, start=1):
             label = f"کانفیگ {persian_digits(index)}" if total > 1 else ""
+            subscription_link = item["subscription_link"]
+            if subscription_link and subscription_link in seen_subscription_links:
+                subscription_link = ""
+            elif subscription_link:
+                seen_subscription_links.add(subscription_link)
             groups.append(
                 {
                     "label": label,
-                    "subscription_link": vpn_client.sub_link,
-                    "direct_link": vpn_client.direct_link,
+                    "subscription_link": subscription_link,
+                    "direct_link": item["direct_link"],
                 }
             )
         return groups

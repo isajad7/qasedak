@@ -357,6 +357,10 @@ def store_allows_global_inbound_fallback(store):
     return not store or bool(getattr(store, "allow_global_inbound_fallback", True))
 
 
+def plan_uses_multi_inbound_bundle(plan):
+    return bool(getattr(plan, "multi_inbound_bundle", False))
+
+
 def _route_queryset_for_store(route_qs, store):
     if not store:
         return route_qs.annotate(
@@ -401,6 +405,42 @@ def _first_valid_route_inbound(route_qs, store, *, required_slots=1, allow_moder
                 exc.messages[0],
             )
     return None
+
+
+def _valid_route_inbounds(route_qs, store, *, required_slots=1, allow_modern_deferred=False):
+    route_qs = route_qs.select_related(
+        "store",
+        "plan",
+        "operator",
+        "inbound",
+        "inbound__panel",
+    ).order_by("store_route_priority", "priority", "inbound__current_users", "id")
+    inbounds = []
+    seen = set()
+    for route in route_qs:
+        try:
+            inbound = validate_inbound_for_order(
+                route.inbound,
+                store,
+                required_slots=required_slots,
+                allow_modern_deferred=allow_modern_deferred,
+            )
+        except ValidationError as exc:
+            logger.warning(
+                "Skipping invalid plan inbound bundle route route_id=%s plan_id=%s operator_id=%s store_id=%s inbound_id=%s: %s",
+                route.pk,
+                route.plan_id,
+                route.operator_id,
+                getattr(store, "pk", None),
+                route.inbound_id,
+                exc.messages[0],
+            )
+            continue
+        if inbound.pk in seen:
+            continue
+        seen.add(inbound.pk)
+        inbounds.append(inbound)
+    return inbounds
 
 
 def select_inbound_for_plan(plan, store=None, operator=None, purpose="new_order", quantity=1, allow_modern_deferred=False):
@@ -471,6 +511,79 @@ def select_inbound_for_plan(plan, store=None, operator=None, purpose="new_order"
         purpose,
         required_slots,
     )
+    raise ValidationError(PLAN_INBOUND_ROUTE_MISSING_MESSAGE)
+
+
+def select_inbounds_for_plan(plan, store=None, operator=None, purpose="new_order", quantity=1, allow_modern_deferred=False):
+    if not plan_uses_multi_inbound_bundle(plan):
+        return [
+            select_inbound_for_plan(
+                plan,
+                store=store,
+                operator=operator,
+                purpose=purpose,
+                quantity=quantity,
+                allow_modern_deferred=allow_modern_deferred,
+            )
+        ]
+
+    allow_modern_deferred = True
+    required_slots = max(int(quantity or 1), 1)
+    effective_store = store or getattr(plan, "store", None)
+    if not store_allows_plan_inbound_routing(effective_store):
+        inbound = get_available_inbound(
+            effective_store,
+            required_slots=required_slots,
+            allow_modern_deferred=allow_modern_deferred,
+        )
+        return [inbound] if inbound else []
+
+    base_routes = PlanInboundRoute.objects.filter(
+        plan=plan,
+        is_active=True,
+        inbound__is_active=True,
+        inbound__available_for_new_orders=True,
+        inbound__panel_id__isnull=False,
+        inbound__panel__is_active=True,
+    )
+    base_routes = _route_queryset_for_store(base_routes, effective_store)
+    candidate_sets = []
+    if operator:
+        candidate_sets.append(base_routes.filter(operator=operator))
+    candidate_sets.append(base_routes.filter(operator__isnull=True))
+
+    for route_qs in candidate_sets:
+        inbounds = _valid_route_inbounds(
+            route_qs,
+            effective_store,
+            required_slots=required_slots,
+            allow_modern_deferred=allow_modern_deferred,
+        )
+        if inbounds:
+            panel_ids = {inbound.panel_id for inbound in inbounds}
+            if len(panel_ids) > 1:
+                raise ValidationError("همه اینباندهای bundle باید روی یک پنل باشند.")
+            panel = inbounds[0].panel
+            if getattr(panel, "capability_profile", "") != Panel.CapabilityProfile.MODERN_MULTI_NODE:
+                raise ValidationError("bundle چند اینباند فقط برای پنل modern multi-node مجاز است.")
+            logger.info(
+                "Selected multi-inbound bundle plan_id=%s operator_id=%s store_id=%s inbound_pks=%s purpose=%s quantity=%s",
+                getattr(plan, "pk", None),
+                getattr(operator, "pk", None),
+                getattr(effective_store, "pk", None),
+                [inbound.pk for inbound in inbounds],
+                purpose,
+                required_slots,
+            )
+            return inbounds
+
+    if store_allows_global_inbound_fallback(effective_store):
+        inbound = get_available_inbound(
+            effective_store,
+            required_slots=required_slots,
+            allow_modern_deferred=allow_modern_deferred,
+        )
+        return [inbound] if inbound else []
     raise ValidationError(PLAN_INBOUND_ROUTE_MISSING_MESSAGE)
 
 
@@ -961,15 +1074,20 @@ def create_manual_payment_order(
                 if discount_amount:
                     discount_source = Order.DiscountSource.WHOLESALE
 
+        selected_inbounds = []
         try:
-            inbound = inbound or select_inbound_for_plan(
-                plan,
-                store=store,
-                operator=operator,
-                purpose="manual_payment_order",
-                quantity=quantity,
-                allow_modern_deferred=True,
-            )
+            if inbound:
+                selected_inbounds = [inbound]
+            else:
+                selected_inbounds = select_inbounds_for_plan(
+                    plan,
+                    store=store,
+                    operator=operator,
+                    purpose="manual_payment_order",
+                    quantity=quantity,
+                    allow_modern_deferred=True,
+                )
+                inbound = selected_inbounds[0] if selected_inbounds else None
         except ValidationError as exc:
             release_discount_usage(reserved_discount)
             return ProvisionedOrderResult(False, exc.messages[0])
@@ -1005,6 +1123,12 @@ def create_manual_payment_order(
             )
             order_metadata["provisioning_strategy"] = provisioning_strategy
             order_metadata["provisioning_scope"] = provisioning_scope(inbound)
+            if plan_uses_multi_inbound_bundle(plan) and len(selected_inbounds) > 1:
+                order_metadata["multi_inbound_bundle"] = True
+                order_metadata["provisioning_scopes"] = [
+                    provisioning_scope(bundle_inbound) for bundle_inbound in selected_inbounds
+                ]
+                order_metadata["bundle_inbound_pks"] = [bundle_inbound.pk for bundle_inbound in selected_inbounds]
             if provisioning_strategy == STRATEGY_LEGACY_PRECREATE_INACTIVE:
                 client_result = create_inactive_client_details(
                     email_prefix=username,

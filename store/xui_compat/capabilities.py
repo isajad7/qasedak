@@ -1,7 +1,9 @@
 import re
 from dataclasses import asdict, dataclass, field
+import json
 
 from django.core.cache import cache
+from django.core.serializers.json import DjangoJSONEncoder
 from django.utils import timezone
 
 from .normalizers import normalize_inbound, normalize_node, redact_sensitive
@@ -75,6 +77,10 @@ def _extract_version(*payloads):
                     if value:
                         return str(value)
     return ""
+
+
+def _json_safe(value):
+    return json.loads(json.dumps(value, cls=DjangoJSONEncoder))
 
 
 def capabilities_for_profile(profile, version=""):
@@ -245,7 +251,7 @@ def discover_xui_capabilities(panel, *, live=False, service=None, write=False, u
         for inbound in inbounds[:100]
         if isinstance(inbound, dict)
     ]
-    metadata = {
+    metadata = _json_safe({
         "checked_at": timezone.now().isoformat(),
         "source": "live" if not live_failed else "live_failed",
         "node_count": len(nodes),
@@ -254,7 +260,7 @@ def discover_xui_capabilities(panel, *, live=False, service=None, write=False, u
         "nodes": redact_sensitive(normalized_nodes),
         "sample_inbounds": redact_sensitive(normalized_inbounds[:20]),
         "errors": errors[:20],
-    }
+    })
     result = XUICompatibilityProfile(
         profile=profile,
         version=version,

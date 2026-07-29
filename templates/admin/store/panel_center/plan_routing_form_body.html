@@ -1,0 +1,120 @@
+<section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>خلاصه پلن</h2></div>
+        <div class="tw-model-list">
+            <div class="tw-model-row"><span>عنوان</span><strong>{{ plan_summary.title }}</strong></div>
+            <div class="tw-model-row"><span>حجم</span><strong>{{ plan_summary.volume }}</strong></div>
+            <div class="tw-model-row"><span>مدت</span><strong>{{ plan_summary.duration }}</strong></div>
+            <div class="tw-model-row"><span>قیمت</span><strong>{{ plan_summary.price }}</strong></div>
+            <div class="tw-model-row"><span>تعداد دستگاه</span><strong>{{ plan_summary.device_limit }}</strong></div>
+            <div class="tw-model-row"><span>چندسرور فعلی</span><strong>{{ plan_summary.multi_inbound_bundle }}</strong></div>
+        </div>
+    </div>
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>Route فعلی</h2></div>
+        <div class="tw-model-list">
+            <div class="tw-model-row"><span>حالت</span><strong>{{ routing_summary.mode }}</strong></div>
+            <div class="tw-model-row"><span>تعداد route فعال</span><strong>{{ routing_summary.route_count }}</strong></div>
+            <div class="tw-model-row"><span>remote inbound ids</span><strong>{{ routing_summary.remote_inbound_ids|join:", " }}</strong></div>
+            <div class="tw-model-row"><span>پنل</span><strong>{% if routing_summary.panel %}{{ routing_summary.panel.name }}{% else %}-{% endif %}</strong></div>
+            <div class="tw-model-row"><span>آمادگی</span>{% include "admin/store/panel_center/_badge.html" with tone=routing_summary.status.tone label=routing_summary.status.label %}</div>
+        </div>
+    </div>
+</section>
+
+<section class="tw-section">
+    <form method="post" class="tw-admin-card tw-space-y-3">
+        {% csrf_token %}
+        {{ form.non_field_errors }}
+        <div class="tw-grid tw-gap-3 md:tw-grid-cols-2">
+            {% for field in form %}
+                <div class="tw-filter-field">
+                    <span>{{ field.label }}</span>
+                    {{ field }}
+                    {% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}
+                    {% for error in field.errors %}<small>{{ error }}</small>{% endfor %}
+                </div>
+            {% endfor %}
+        </div>
+        <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row">
+            <button type="submit" name="action" value="preview" class="tw-button tw-button-secondary">پیش‌نمایش ساخت</button>
+            <button type="submit" name="action" value="test" class="tw-button tw-button-secondary">تست ساخت آزمایشی</button>
+            <button type="submit" name="action" value="save" class="tw-button tw-button-primary">ذخیره مسیر</button>
+        </div>
+    </form>
+</section>
+
+<section class="tw-section">
+    <form method="post" class="tw-admin-card tw-border-rose-200 tw-bg-rose-50/40 tw-space-y-3">
+        {% csrf_token %}
+        {% for field in form %}
+            {% if field.name == "inbounds" %}
+                {% for value in field.value %}
+                    <input type="hidden" name="{{ field.name }}" value="{{ value }}">
+                {% endfor %}
+            {% else %}
+                <input type="hidden" name="{{ field.name }}" value="{{ field.value|default:'' }}">
+            {% endif %}
+        {% endfor %}
+        <div class="tw-section-heading">
+            <h2>تست ساخت واقعی کانفیگ</h2>
+        </div>
+        <p class="tw-m-0 tw-text-sm tw-leading-7 tw-text-slate-700">
+            یک کانفیگ تستی روی پنل ساخته می‌شود، بررسی می‌شود، سپس حذف می‌شود.
+        </p>
+        <button type="submit" name="action" value="live_test" class="tw-button tw-button-danger">اجرای تست واقعی و پاکسازی</button>
+    </form>
+</section>
+
+<section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>پنل‌های فعال</h2></div>
+        <div class="tw-model-list">
+            {% for option in panel_options %}
+                <div class="tw-model-row">
+                    <span>{{ option.label }}</span>
+                    {% if option.supported %}
+                        {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="قابل استفاده" %}
+                    {% else %}
+                        {% include "admin/store/panel_center/_badge.html" with tone="slate" label="unsupported" %}
+                    {% endif %}
+                </div>
+            {% empty %}
+                <div class="tw-empty-state">پنل فعالی پیدا نشد.</div>
+            {% endfor %}
+        </div>
+    </div>
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>اینباندهای پنل انتخاب‌شده</h2></div>
+        <div class="tw-model-list">
+            {% for option in inbound_options %}
+                <div class="tw-model-row">
+                    <span>
+                        #{{ option.inbound.pk }} / remote={{ option.inbound.inbound_id }} / {{ option.inbound.remark|default:"-" }}
+                        <small>{{ option.inbound.protocol }} / {{ option.inbound.xui_node_name|default:option.inbound.xui_node_id|default:"local" }}</small>
+                    </span>
+                    {% if option.usable %}
+                        {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="قابل انتخاب" %}
+                    {% else %}
+                        {% include "admin/store/panel_center/_badge.html" with tone="amber" label="نیازمند بررسی" %}
+                    {% endif %}
+                </div>
+                {% if option.active_plan_routes %}
+                    <small>پلن‌های استفاده‌کننده:
+                        {% for route in option.active_plan_routes %}
+                            <a href="{% url 'admin_store_panel_center_routing_detail' route.plan.pk %}">{{ route.plan.name }}</a>{% if not forloop.last %}, {% endif %}
+                        {% endfor %}
+                    </small>
+                {% endif %}
+            {% empty %}
+                <div class="tw-empty-state">برای نمایش اینباندها ابتدا پنل را انتخاب کنید.</div>
+            {% endfor %}
+        </div>
+    </div>
+</section>
+
+{% if result %}
+<section class="tw-section">
+    {% include "admin/store/panel_center/plan_routing_result_box.html" with result=result %}
+</section>
+{% endif %}

@@ -45,6 +45,19 @@ from store.admin_views import (
     support_review,
     support_workbench,
 )
+from store.admin_panel_center.views import (
+    panel_center_capabilities,
+    panel_center_detail,
+    panel_center_form,
+    panel_center_inbounds,
+    panel_center_index,
+    panel_center_sync,
+    panel_center_test,
+)
+from store.admin_panel_center.routing_views import (
+    routing_detail,
+    routing_index,
+)
 from store.admin_staff import (
     staff_access_center,
     staff_create,
@@ -112,6 +125,56 @@ urlpatterns = [
         'admin/store/dashboard/',
         admin.site.admin_view(owner_dashboard),
         name='admin_store_owner_dashboard',
+    ),
+    path(
+        'admin/store/panel-center/',
+        admin.site.admin_view(panel_center_index),
+        name='admin_store_panel_center',
+    ),
+    path(
+        'admin/store/panel-center/new/',
+        admin.site.admin_view(panel_center_form),
+        name='admin_store_panel_center_new',
+    ),
+    path(
+        'admin/store/panel-center/<int:panel_id>/',
+        admin.site.admin_view(panel_center_detail),
+        name='admin_store_panel_center_detail',
+    ),
+    path(
+        'admin/store/panel-center/<int:panel_id>/edit/',
+        admin.site.admin_view(panel_center_form),
+        name='admin_store_panel_center_edit',
+    ),
+    path(
+        'admin/store/panel-center/<int:panel_id>/capabilities/',
+        admin.site.admin_view(panel_center_capabilities),
+        name='admin_store_panel_center_capabilities',
+    ),
+    path(
+        'admin/store/panel-center/<int:panel_id>/inbounds/',
+        admin.site.admin_view(panel_center_inbounds),
+        name='admin_store_panel_center_inbounds',
+    ),
+    path(
+        'admin/store/panel-center/<int:panel_id>/test/',
+        admin.site.admin_view(panel_center_test),
+        name='admin_store_panel_center_test',
+    ),
+    path(
+        'admin/store/panel-center/<int:panel_id>/sync/',
+        admin.site.admin_view(panel_center_sync),
+        name='admin_store_panel_center_sync',
+    ),
+    path(
+        'admin/store/panel-center/routing/',
+        admin.site.admin_view(routing_index),
+        name='admin_store_panel_center_routing',
+    ),
+    path(
+        'admin/store/panel-center/routing/<int:plan_id>/',
+        admin.site.admin_view(routing_detail),
+        name='admin_store_panel_center_routing_detail',
     ),
     path(
         'admin/store/catalog/',

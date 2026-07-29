@@ -1542,6 +1542,14 @@ class Plan(TimeStampedModel):
         db_index=True,
         help_text=_("Generated internal plan for custom-volume purchases."),
     )
+    multi_inbound_bundle = models.BooleanField(
+        _("multi inbound bundle"),
+        default=False,
+        db_index=True,
+        help_text=_(
+            "When enabled for modern 3X-UI panels, all active plan routes are provisioned as one client attached to multiple inbounds."
+        ),
+    )
 
     class Meta:
         verbose_name = _("plan")
@@ -2454,6 +2462,11 @@ class ReferralRewardLedger(TimeStampedModel):
 
 
 class Panel(TimeStampedModel):
+    class Family(models.TextChoices):
+        XUI = "xui", _("X-UI / Sanaei")
+        MARZBAN = "marzban", _("Marzban")
+        UNKNOWN = "unknown", _("Unknown")
+
     class CapabilityProfile(models.TextChoices):
         LEGACY_SINGLE_NODE = "legacy_single_node", _("Legacy single-node")
         MODERN_SINGLE_NODE = "modern_single_node", _("Modern single-node")
@@ -2469,6 +2482,14 @@ class Panel(TimeStampedModel):
         blank=True,
     )
     name = models.CharField(_("name"), max_length=100)
+    family = models.CharField(
+        _("panel family"),
+        max_length=30,
+        choices=Family.choices,
+        default=Family.XUI,
+        db_index=True,
+        help_text=_("Panel API family. Existing Sanaei/3X-UI panels use X-UI."),
+    )
     url = models.URLField(_("URL"), help_text=_("Full panel URL without trailing slash."))
     username = models.CharField(_("username"), max_length=100)
     password = models.CharField(_("password"), max_length=100)

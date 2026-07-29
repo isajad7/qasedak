@@ -1622,6 +1622,8 @@ class SalesInboundChoiceField(forms.ModelChoiceField):
 class BulkPlanInboundRouteForm(forms.Form):
     PLAN_SELECTION_ALL_ACTIVE = "all_active"
     PLAN_SELECTION_MANUAL = "manual"
+    ROUTE_MODE_SINGLE = "single"
+    ROUTE_MODE_MULTI = "multi"
 
     store = forms.ModelChoiceField(
         label=_("Store"),
@@ -1629,11 +1631,29 @@ class BulkPlanInboundRouteForm(forms.Form):
         required=True,
         help_text=_("پلن‌ها و inboundها بر اساس این فروشگاه فیلتر می‌شوند."),
     )
+    route_mode = forms.ChoiceField(
+        label=_("Route mode"),
+        choices=(
+            (ROUTE_MODE_SINGLE, _("Single inbound")),
+            (ROUTE_MODE_MULTI, _("Multi-inbound bundle")),
+        ),
+        initial=ROUTE_MODE_SINGLE,
+        required=False,
+        widget=forms.RadioSelect,
+        help_text=_("Single برای پنل‌های معمولی فقط یک inbound را route می‌کند؛ Multi چند inbound از یک پنل modern multi-node می‌سازد."),
+    )
     inbound = SalesInboundChoiceField(
         label=_("Destination inbound"),
         queryset=Inbound.objects.none(),
-        required=True,
+        required=False,
         help_text=_("فقط inboundهای فعال، قابل فروش، غیر legacy و متصل به پنل فعال نمایش داده می‌شوند."),
+    )
+    bundle_inbounds = forms.ModelMultipleChoiceField(
+        label=_("Bundle inbounds"),
+        queryset=Inbound.objects.none(),
+        required=False,
+        widget=FilteredSelectMultiple(_("bundle inbounds"), is_stacked=False),
+        help_text=_("برای حالت Multi حداقل دو inbound از همان پنل modern multi-node انتخاب کن."),
     )
     operator = forms.ModelChoiceField(
         label=_("Operator"),
@@ -1695,7 +1715,9 @@ class BulkPlanInboundRouteForm(forms.Form):
         if not self.is_bound and not self.initial.get("store") and store:
             self.initial["store"] = store.pk
 
-        self.fields["inbound"].queryset = get_valid_sales_inbounds(store)
+        sales_inbounds = get_valid_sales_inbounds(store)
+        self.fields["inbound"].queryset = sales_inbounds
+        self.fields["bundle_inbounds"].queryset = sales_inbounds
         self.fields["operator"].queryset = self.active_operators(store)
         self.fields["plans"].queryset = get_bulk_route_target_plans(store=store, all_active=True)
 
@@ -1720,6 +1742,25 @@ class BulkPlanInboundRouteForm(forms.Form):
         cleaned_data = super().clean()
         if cleaned_data.get("plan_selection_mode") == self.PLAN_SELECTION_MANUAL and not cleaned_data.get("plans"):
             self.add_error("plans", _("برای انتخاب دستی، حداقل یک پلن فعال انتخاب کن."))
+        route_mode = cleaned_data.get("route_mode") or self.ROUTE_MODE_SINGLE
+        cleaned_data["route_mode"] = route_mode
+        if route_mode == self.ROUTE_MODE_MULTI:
+            bundle_inbounds = list(cleaned_data.get("bundle_inbounds") or [])
+            if len(bundle_inbounds) < 2:
+                self.add_error("bundle_inbounds", _("برای route چند اینباندی حداقل دو inbound انتخاب کن."))
+            panel_ids = {inbound.panel_id for inbound in bundle_inbounds}
+            if len(panel_ids) > 1:
+                self.add_error("bundle_inbounds", _("همه inboundهای bundle باید از یک پنل باشند."))
+            panel = bundle_inbounds[0].panel if bundle_inbounds else None
+            if panel and panel.capability_profile != Panel.CapabilityProfile.MODERN_MULTI_NODE:
+                self.add_error("bundle_inbounds", _("پنل bundle باید modern multi-node باشد."))
+            if cleaned_data.get("existing_strategy") not in {
+                BULK_ROUTE_STRATEGY_REPLACE_ACTIVE,
+                BULK_ROUTE_STRATEGY_UPDATE_EXISTING,
+            }:
+                self.add_error("existing_strategy", _("برای Multi فقط replace/update مجاز است."))
+        elif not cleaned_data.get("inbound"):
+            self.add_error("inbound", _("برای حالت Single یک inbound انتخاب کن."))
         return cleaned_data
 
     def service_kwargs(self):
@@ -1729,9 +1770,12 @@ class BulkPlanInboundRouteForm(forms.Form):
         if not all_active:
             selected_plan_ids = [plan.pk for plan in self.cleaned_data["plans"]]
 
+        route_mode = self.cleaned_data["route_mode"]
         return {
             "store": self.cleaned_data["store"],
             "inbound": self.cleaned_data["inbound"],
+            "inbounds": list(self.cleaned_data.get("bundle_inbounds") or []),
+            "multi_inbound_bundle": route_mode == self.ROUTE_MODE_MULTI,
             "operator": self.cleaned_data.get("operator"),
             "selected_plan_ids": selected_plan_ids,
             "all_active": all_active,
@@ -1820,8 +1864,10 @@ class PlanAdmin(ImportExportModelAdmin):
         "price_with_currency",
         "active_public_status",
         "custom_volume_badge",
+        "multi_inbound_bundle",
         "catalog_route_status",
         "catalog_inbound_destination",
+        "routing_builder_link",
         "quick_review_link",
     )
     list_filter = (
@@ -1829,6 +1875,7 @@ class PlanAdmin(ImportExportModelAdmin):
         "is_active",
         "is_public",
         "is_custom_volume",
+        "multi_inbound_bundle",
         "duration_days",
         "volume_gb",
         PlanRouteReadinessFilter,
@@ -1910,6 +1957,11 @@ class PlanAdmin(ImportExportModelAdmin):
     @admin.display(description=_("Review"))
     def quick_review_link(self, obj):
         return format_html('<a class="button" href="{}">{}</a>', catalog_plan_review_url(obj), _("Review"))
+
+    @admin.display(description=_("Routing builder"))
+    def routing_builder_link(self, obj):
+        url = reverse("admin_store_panel_center_routing_detail", args=[obj.pk])
+        return format_html('<a class="button" href="{}">{}</a>', url, _("تنظیم مسیر"))
 
     def get_queryset(self, request):
         return (
@@ -2128,6 +2180,7 @@ class PlanInboundRouteAdmin(ImportExportModelAdmin):
 
     def bulk_assign_initial(self, request):
         initial = {
+            "route_mode": BulkPlanInboundRouteForm.ROUTE_MODE_SINGLE,
             "plan_selection_mode": BulkPlanInboundRouteForm.PLAN_SELECTION_ALL_ACTIVE,
             "priority": 100,
             "weight": 1,
@@ -2276,10 +2329,11 @@ class PanelAdmin(ImportExportModelAdmin):
         "compatibility_profile_status",
         "credential_status",
         "uses_proxy",
+        "panel_center_link",
         "inbounds_link",
         "last_sync_at",
     )
-    list_filter = ("store", "is_active", "capability_profile")
+    list_filter = ("store", "family", "is_active", "capability_profile")
     search_fields = ("name", "url", "username", "proxy_url")
     date_hierarchy = "created_at"
     list_select_related = ("store",)
@@ -2287,6 +2341,7 @@ class PanelAdmin(ImportExportModelAdmin):
         "masked_url",
         "credential_status",
         "proxy_status",
+        "panel_center_link",
         "latest_health_details",
         "inbounds_link",
         "compatibility_metadata_summary",
@@ -2300,6 +2355,7 @@ class PanelAdmin(ImportExportModelAdmin):
                 "fields": (
                     "name",
                     "store",
+                    "family",
                     "url",
                     "username",
                     "password",
@@ -2318,7 +2374,7 @@ class PanelAdmin(ImportExportModelAdmin):
         (
             _("Operations"),
             {
-                "fields": ("inbounds_link", "latest_health_details", "last_sync_at", "created_at", "updated_at"),
+                "fields": ("panel_center_link", "inbounds_link", "latest_health_details", "last_sync_at", "created_at", "updated_at"),
             },
         ),
         (
@@ -2384,6 +2440,13 @@ class PanelAdmin(ImportExportModelAdmin):
         url = f"{reverse('admin:store_inbound_changelist')}?{urlencode({'panel__id__exact': obj.pk})}"
         label = _("%(count)s inbound(s)") % {"count": self.inbound_count(obj)}
         return format_html('<a class="button" href="{}">{}</a>', url, label)
+
+    @admin.display(description=_("Panel Center"))
+    def panel_center_link(self, obj):
+        if not obj or not obj.pk:
+            return _("Save first to open Panel Center.")
+        url = reverse("admin_store_panel_center_detail", args=[obj.pk])
+        return format_html('<a class="button" href="{}">{}</a>', url, _("مرکز اتصال پنل"))
 
     @admin.display(description=_("Proxy"), boolean=True)
     def uses_proxy(self, obj):
@@ -2460,15 +2523,26 @@ class PanelAdmin(ImportExportModelAdmin):
 
     @admin.display(description=_("Compatibility"), ordering="capability_profile")
     def compatibility_profile_status(self, obj):
-        profile = obj.capability_profile or _("Legacy/undetected")
+        from .panels import get_safe_panel_adapter
+
+        report = get_safe_panel_adapter(obj).get_capability_report()
+        profile = report.capability_profile or obj.capability_profile or _("Legacy/undetected")
         tone = {
             Panel.CapabilityProfile.LEGACY_SINGLE_NODE: "bg-success",
             Panel.CapabilityProfile.MODERN_SINGLE_NODE: "bg-warning text-dark",
             Panel.CapabilityProfile.MODERN_MULTI_NODE: "bg-warning text-dark",
             Panel.CapabilityProfile.UNKNOWN_SAFE: "bg-danger",
-        }.get(obj.capability_profile, "bg-secondary")
-        version = obj.detected_xui_version or "-"
-        return format_html('<span class="badge {}">{}</span> <span>{}</span>', tone, profile, version)
+        }.get(report.capability_profile or obj.capability_profile, "bg-secondary")
+        if not report.supported:
+            tone = "bg-secondary"
+        version = report.detected_version or obj.detected_xui_version or "-"
+        return format_html(
+            '<span class="badge {}">{}</span> <span>{}</span> <span class="small text-muted">{}</span>',
+            tone,
+            profile,
+            version,
+            report.family,
+        )
 
     @admin.display(description=_("Compatibility metadata"))
     def compatibility_metadata_summary(self, obj):

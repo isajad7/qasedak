@@ -1,8 +1,10 @@
 import hashlib
+import json
 import logging
 import uuid
 from dataclasses import dataclass
 
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.db.models import F, Q
 from django.utils import timezone
@@ -16,6 +18,7 @@ from .xui_api import (
     XUIService,
     bytes_from_gb,
     create_enabled_client_details,
+    create_enabled_multi_inbound_client_details,
     find_xui_client_and_stats,
     first_xui_value,
     parse_xui_datetime,
@@ -165,6 +168,48 @@ def resolve_frozen_order_inbound(order):
     raise XUIError("frozen_provisioning_scope_mismatch")
 
 
+def resolve_frozen_order_inbounds(order):
+    metadata = order.metadata or {}
+    scopes = metadata.get("provisioning_scopes") or []
+    if not metadata.get("multi_inbound_bundle") or not scopes:
+        inbound = resolve_frozen_order_inbound(order)
+        return [inbound] if inbound else []
+
+    inbounds = []
+    seen = set()
+    for scope in scopes:
+        inbound = None
+        inbound_pk = _scope_value(scope, "inbound_pk")
+        if inbound_pk:
+            inbound = Inbound.objects.select_related("panel").filter(pk=inbound_pk).first()
+        if not inbound or not _scope_matches_inbound(scope, inbound):
+            panel_id = _scope_value(scope, "panel_id")
+            xui_inbound_id = _scope_value(scope, "xui_inbound_id")
+            node_id = _scope_value(scope, "node_id")
+            matches = list(
+                Inbound.objects.select_related("panel")
+                .filter(panel_id=panel_id, inbound_id=xui_inbound_id, xui_node_id=node_id)
+                .order_by("pk")[:2]
+            )
+            inbound = matches[0] if len(matches) == 1 else None
+        if not inbound or not _scope_matches_inbound(scope, inbound):
+            raise XUIError("frozen_multi_provisioning_scope_mismatch")
+        if inbound.pk in seen:
+            continue
+        seen.add(inbound.pk)
+        inbounds.append(inbound)
+
+    if not inbounds:
+        raise XUIError("frozen_multi_provisioning_scope_empty")
+    panel_ids = {inbound.panel_id for inbound in inbounds}
+    if len(panel_ids) > 1:
+        raise XUIError("frozen_multi_provisioning_scope_cross_panel")
+    panel = inbounds[0].panel
+    if panel_profile(panel) != Panel.CapabilityProfile.MODERN_MULTI_NODE:
+        raise XUIError("frozen_multi_provisioning_requires_modern_multi_node")
+    return inbounds
+
+
 def freeze_order_provisioning_metadata(order, inbound, *, strategy):
     metadata = dict(order.metadata or {})
     metadata["provisioning_strategy"] = strategy
@@ -207,8 +252,54 @@ def order_identity(order, inbound, *, index=1):
     }
 
 
+def multi_inbound_order_identity(order, inbounds, *, index=1):
+    inbounds = list(inbounds or [])
+    if not inbounds:
+        raise XUIError("multi_inbound_identity_requires_inbounds")
+    panel = inbounds[0].panel
+    remote_keys = sorted(inbound_remote_key(inbound, panel=panel) for inbound in inbounds)
+    base = "|".join(
+        [
+            "qasedak",
+            "paid-multi-inbound-provisioning",
+            str(order.public_id),
+            str(order.order_tracking_code),
+            str(getattr(panel, "pk", "") or ""),
+            ",".join(remote_keys),
+            str(index),
+        ]
+    )
+    client_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, base))
+    sub_id = hashlib.sha256(f"sub:{base}".encode("utf-8")).hexdigest()[:16]
+    email_prefix = order.username or build_client_display_name(
+        order.customer,
+        order=order,
+        preferred_name=order.sender_card_name,
+        short_id=order.order_tracking_code,
+        metadata=order.metadata,
+    )
+    email = build_xui_client_email(email_prefix, client_uuid)
+    idempotency_key = hashlib.sha256(base.encode("utf-8")).hexdigest()
+    return {
+        "uuid": client_uuid,
+        "sub_id": sub_id,
+        "email": email,
+        "email_prefix": email_prefix,
+        "idempotency_key": idempotency_key,
+        "scope": {
+            "panel_id": getattr(panel, "pk", None),
+            "bundle_remote_keys": remote_keys,
+            "inbound_count": len(inbounds),
+        },
+    }
+
+
 def _safe_error(exc, panel=None):
     return sanitize_xui_operational_text(exc, panel=panel, max_length=700)
+
+
+def _json_safe_value(value):
+    return json.loads(json.dumps(value, cls=DjangoJSONEncoder))
 
 
 def _mark_provisioning_state(order, status, *, error="", provisioned_at=None, idempotency_key="", increment=False):
@@ -392,7 +483,7 @@ def _upsert_local_client(order, inbound, client_result):
         inbound,
         vpn_client.uuid,
     )
-    vpn_client.xui_raw = client_result.get("raw", vpn_client.xui_raw)
+    vpn_client.xui_raw = _json_safe_value(client_result.get("raw", vpn_client.xui_raw))
     vpn_client.mark_active(duration_days=order.plan.duration_days)
     if client_result.get("expires_at"):
         vpn_client.expires_at = client_result["expires_at"]
@@ -404,7 +495,8 @@ def _activate_modern_enabled_order_locked(order, *, actor=None, strategy=STRATEG
     from . import order_actions as order_actions_module
 
     try:
-        inbound = resolve_frozen_order_inbound(order)
+        inbounds = resolve_frozen_order_inbounds(order)
+        inbound = inbounds[0] if inbounds else None
     except Exception as exc:
         panel = getattr(getattr(order, "inbound", None), "panel", None)
         safe_error = _safe_error(exc, panel=panel)
@@ -419,8 +511,14 @@ def _activate_modern_enabled_order_locked(order, *, actor=None, strategy=STRATEG
     if not inbound or not inbound.panel_id:
         return ProvisioningResult(False, "سفارش route دقیق panel/inbound ندارد.", safe_error="missing_scope")
     panel = inbound.panel
-    identity = order_identity(order, inbound)
+    multi_bundle = bool((order.metadata or {}).get("multi_inbound_bundle") and len(inbounds) > 1)
+    identity = multi_inbound_order_identity(order, inbounds) if multi_bundle else order_identity(order, inbound)
     metadata = freeze_order_provisioning_metadata(order, inbound, strategy=strategy)
+    if multi_bundle:
+        metadata["multi_inbound_bundle"] = True
+        metadata["provisioning_scopes"] = [provisioning_scope(bundle_inbound) for bundle_inbound in inbounds]
+        metadata["bundle_inbound_pks"] = [bundle_inbound.pk for bundle_inbound in inbounds]
+        metadata["bundle_inbound_ids"] = [bundle_inbound.inbound_id for bundle_inbound in inbounds]
     order.inbound = inbound
     order.metadata = metadata
     order.is_paid = True
@@ -450,7 +548,61 @@ def _activate_modern_enabled_order_locked(order, *, actor=None, strategy=STRATEG
         clients = []
         reused_any_remote = False
         for index in range(1, order_actions_module.required_client_count(order) + 1):
-            indexed_identity = identity if index == 1 else order_identity(order, inbound, index=index)
+            indexed_identity = (
+                identity
+                if index == 1
+                else multi_inbound_order_identity(order, inbounds, index=index)
+                if multi_bundle
+                else order_identity(order, inbound, index=index)
+            )
+            if multi_bundle:
+                existing_results = [
+                    lookup_existing_remote_client(panel, bundle_inbound, indexed_identity)
+                    for bundle_inbound in inbounds
+                ]
+                existing_count = sum(1 for item in existing_results if item)
+                if existing_count and existing_count != len(inbounds):
+                    raise XUIError("partial_multi_inbound_remote_client_exists")
+                already_remote = existing_count == len(inbounds)
+                if already_remote:
+                    per_inbound_results = existing_results
+                else:
+                    client_result = create_enabled_multi_inbound_client_details(
+                        email_prefix=indexed_identity["email_prefix"],
+                        total_gb=order.plan.volume_gb,
+                        duration_days=order.plan.duration_days,
+                        panel=panel,
+                        inbounds=inbounds,
+                        limit_ip=order.plan.device_limit,
+                        client_uuid=indexed_identity["uuid"],
+                        sub_id=indexed_identity["sub_id"],
+                        email=indexed_identity["email"],
+                    )
+                    if not client_result:
+                        raise XUIError("remote_multi_inbound_create_failed")
+                    per_inbound_results = client_result.get("bundle_inbound_results") or []
+                if len(per_inbound_results) != len(inbounds):
+                    raise XUIError("remote_multi_inbound_verify_failed")
+                verified_results = []
+                for bundle_inbound, client_result in zip(inbounds, per_inbound_results):
+                    verified = lookup_existing_remote_client(panel, bundle_inbound, indexed_identity)
+                    if not verified:
+                        raise XUIError("remote_multi_inbound_verify_failed")
+                    verified_results.append({**client_result, **verified})
+                primary_result = {
+                    **verified_results[0],
+                    "bundle_inbound_results": verified_results,
+                    "raw": {
+                        **(verified_results[0].get("raw") or {}),
+                        "bundle_inbound_results": _json_safe_value(verified_results),
+                        "bundle_inbound_pks": [bundle_inbound.pk for bundle_inbound in inbounds],
+                    },
+                }
+                vpn_client, _created = _upsert_local_client(order, inbound, primary_result)
+                clients.append(vpn_client)
+                reused_any_remote = reused_any_remote or already_remote
+                continue
+
             client_result = lookup_existing_remote_client(panel, inbound, indexed_identity)
             already_remote = bool(client_result)
             if not client_result:

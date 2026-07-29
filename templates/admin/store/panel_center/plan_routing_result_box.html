@@ -1,0 +1,27 @@
+<div class="tw-action-item tw-tone-{% if result.ok %}emerald{% else %}rose{% endif %}">
+    <div class="tw-action-icon"><i class="fas fa-info" aria-hidden="true"></i></div>
+    <div class="tw-min-w-0 tw-flex-1">
+        <h3>{{ result.message }}</h3>
+        {% if result.errors %}
+            <ul class="tw-detail-list">{% for error in result.errors %}<li>{{ error }}</li>{% endfor %}</ul>
+        {% endif %}
+        {% if result.warnings %}
+            <ul class="tw-detail-list">{% for warning in result.warnings %}<li>{{ warning }}</li>{% endfor %}</ul>
+        {% endif %}
+        {% if result.details %}
+            <details class="tw-advanced-panel tw-mt-2">
+                <summary><span>نمایش جزئیات فنی</span><small>safe preview</small></summary>
+                <table class="tw-catalog-table">
+                    <tbody>
+                        {% for key, value in result.details.items %}
+                            <tr>
+                                <th scope="row">{{ key }}</th>
+                                <td>{{ value }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+        {% endif %}
+    </div>
+</div>

@@ -74,6 +74,9 @@
 
         <fieldset class="module aligned">
             <h2>تنظیم گروهی مسیر فروش پلن‌ها</h2>
+            <p class="help">
+                حالت Single برای هر پلن یک inbound فعال می‌گذارد. حالت Multi چند inbound از همان پنل modern multi-node را به یک bundle تبدیل می‌کند و برای ساخت لینک subscription چنداینباندی استفاده می‌شود.
+            </p>
             {% for field in form %}
                 <div class="form-row field-{{ field.name }}">
                     {{ field.errors }}

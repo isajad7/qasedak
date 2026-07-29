@@ -1,0 +1,102 @@
+{% extends "admin/store/panel_center/_base_panel_center.html" %}
+
+{% block panel_breadcrumb %}&rsaquo; <a href="{{ routing_index_url }}">تنظیم مسیر فروش</a> &rsaquo; تست ساخت واقعی{% endblock %}
+
+{% block panel_center_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+    <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+        <div class="tw-min-w-0">
+            {% if result.ok %}
+                {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="Live test passed" icon="fas fa-check" %}
+            {% elif result.status == "warning" %}
+                {% include "admin/store/panel_center/_badge.html" with tone="amber" label="Live test warning" icon="fas fa-triangle-exclamation" %}
+            {% else %}
+                {% include "admin/store/panel_center/_badge.html" with tone="rose" label="Live test failed" icon="fas fa-triangle-exclamation" %}
+            {% endif %}
+            <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">تست ساخت واقعی {{ plan.name }}</h1>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+                نتیجه فقط خلاصه امن را نمایش می‌دهد؛ لینک کامل، UUID و subId نمایش داده نمی‌شود.
+            </p>
+        </div>
+        <a href="{% url 'admin_store_panel_center_routing_detail' plan.pk %}" class="tw-button tw-button-secondary">بازگشت به تنظیم مسیر</a>
+    </div>
+</section>
+
+<section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>خلاصه تست</h2></div>
+        <div class="tw-model-list">
+            <div class="tw-model-row"><span>وضعیت</span><strong>{{ result.status }}</strong></div>
+            <div class="tw-model-row"><span>پنل</span><strong>#{{ result.panel_id }} / {{ result.panel_name }}</strong></div>
+            <div class="tw-model-row"><span>family/profile</span><strong>{{ result.panel_family }} / {{ result.capability_profile }}</strong></div>
+            <div class="tw-model-row"><span>پلن</span><strong>#{{ result.plan_id }} / {{ result.plan_title }}</strong></div>
+            <div class="tw-model-row"><span>حالت مورد انتظار</span><strong>{{ result.expected_mode }}</strong></div>
+            <div class="tw-model-row"><span>local inbound pks</span><strong>{{ result.selected_local_inbound_pks|join:", " }}</strong></div>
+            <div class="tw-model-row"><span>remote inbound ids</span><strong>{{ result.selected_remote_inbound_ids|join:", " }}</strong></div>
+            <div class="tw-model-row"><span>شناسه امن تست</span><strong>{{ result.test_marker }}</strong></div>
+        </div>
+    </div>
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>خروجی امن</h2></div>
+        <div class="tw-model-list">
+            <div class="tw-model-row"><span>ساخت انجام شد</span><strong>{{ result.create_attempted }} / {{ result.create_success }}</strong></div>
+            <div class="tw-model-row"><span>بررسی اینباند</span><strong>{{ result.verified_inbound_count }} / {{ result.expected_inbound_count }}</strong></div>
+            <div class="tw-model-row"><span>subscription</span><strong>{{ result.subscription_generated }}</strong></div>
+            <div class="tw-model-row"><span>direct links</span><strong>{{ result.direct_link_count }}</strong></div>
+            <div class="tw-model-row"><span>پاکسازی</span><strong>{{ result.cleanup_attempted }} / {{ result.cleanup_success }}</strong></div>
+            <div class="tw-model-row"><span>باقی‌مانده تست</span><strong>{{ result.remaining_remote_test_clients_count }}</strong></div>
+            <div class="tw-model-row"><span>نام کلاینت</span><strong>{{ result.masked_client_name }}</strong></div>
+        </div>
+    </div>
+</section>
+
+<section class="tw-section">
+    <div class="tw-grid tw-gap-3 lg:tw-grid-cols-5">
+        {% for step in result.steps %}
+            <article class="tw-action-item tw-tone-{% if step.status == 'success' %}emerald{% elif step.status == 'warning' %}amber{% elif step.status == 'error' %}rose{% else %}slate{% endif %}">
+                <div class="tw-action-icon"><i class="fas fa-circle-info" aria-hidden="true"></i></div>
+                <div class="tw-min-w-0 tw-flex-1">
+                    <h3>{{ step.title }}</h3>
+                    <p class="tw-m-0 tw-text-xs tw-font-bold">{{ step.status }}</p>
+                    {% if step.message %}<p class="tw-mt-1 tw-mb-0 tw-text-xs tw-leading-6">{{ step.message }}</p>{% endif %}
+                    {% if step.error_code %}<small>{{ step.error_code }}</small>{% endif %}
+                    {% if step.safe_details %}
+                        <details class="tw-advanced-panel tw-mt-2">
+                            <summary><span>جزئیات امن</span></summary>
+                            <table class="tw-catalog-table">
+                                <tbody>
+                                    {% for key, value in step.safe_details.items %}
+                                        <tr>
+                                            <th scope="row">{{ key }}</th>
+                                            <td>{{ value }}</td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </details>
+                    {% endif %}
+                </div>
+            </article>
+        {% endfor %}
+    </div>
+</section>
+
+{% if result.errors or result.warnings %}
+<section class="tw-section">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>هشدارها و خطاهای امن</h2></div>
+        {% if result.errors %}
+            <ul class="tw-detail-list">{% for error in result.errors %}<li>{{ error }}</li>{% endfor %}</ul>
+        {% endif %}
+        {% if result.warnings %}
+            <ul class="tw-detail-list">{% for warning in result.warnings %}<li>{{ warning }}</li>{% endfor %}</ul>
+        {% endif %}
+        {% if result.cleanup.remediation %}
+            <p class="tw-mt-3 tw-mb-0 tw-text-sm tw-leading-7 tw-text-rose-700">{{ result.cleanup.remediation }}</p>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
+{% include "admin/store/panel_center/plan_routing_form_body.html" %}
+{% endblock %}
