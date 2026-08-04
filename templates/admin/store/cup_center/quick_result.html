@@ -6,9 +6,23 @@
 <section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
     <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
         <div>
-            {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="Quick Sub Ready" icon="fas fa-check" %}
+            {% if result.status == "partial_success" %}
+                {% include "admin/store/panel_center/_badge.html" with tone="amber" label="Quick Sub Partial" icon="fas fa-triangle-exclamation" %}
+            {% elif result.status == "failed" %}
+                {% include "admin/store/panel_center/_badge.html" with tone="rose" label="Quick Sub Failed" icon="fas fa-circle-xmark" %}
+            {% else %}
+                {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="Quick Sub Ready" icon="fas fa-check" %}
+            {% endif %}
             <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">{{ result.title }}</h1>
-            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">Cup ساخته شد و لینک اشتراک آماده است.</p>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+                {% if result.status == "partial_success" %}
+                    بخشی از پنل‌ها با موفقیت ساخته شدند و خطاهای باقی‌مانده پایین آمده است.
+                {% elif result.status == "failed" %}
+                    Cup ساخته شد اما هیچ لینک موفقی ذخیره نشد.
+                {% else %}
+                    Cup ساخته شد و لینک اشتراک آماده است.
+                {% endif %}
+            </p>
         </div>
         <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row lg:tw-shrink-0">
             <a href="{{ detail_url }}" class="tw-button tw-button-secondary">Open Cup detail</a>
@@ -22,10 +36,14 @@
     <div class="tw-admin-card">
         <div class="tw-section-heading tw-mb-4"><h2>خلاصه</h2></div>
         <div class="cup-summary-grid">
+            <div class="cup-stat"><span>Status</span><strong>{{ result.status }}</strong></div>
             <div class="cup-stat"><span>Cup ID</span><strong>#{{ cup.pk }}</strong></div>
             <div class="cup-stat"><span>Item count</span><strong>{{ result.item_count }}</strong></div>
+            <div class="cup-stat"><span>Config links</span><strong>{{ result.config_link_count }}</strong></div>
+            <div class="cup-stat"><span>Selected panels</span><strong>{{ result.selected_panels_count }}</strong></div>
+            <div class="cup-stat"><span>Selected inbounds</span><strong>{{ result.selected_inbounds_count }}</strong></div>
+            <div class="cup-stat"><span>Remote groups</span><strong>{{ result.created_remote_client_groups_count }}</strong></div>
             <div class="cup-stat"><span>Protocols</span><strong>{{ result.protocols|join:", "|default:"-" }}</strong></div>
-            <div class="cup-stat"><span>Email</span><strong>{{ result.email_masked|default:"-" }}</strong></div>
         </div>
     </div>
 
@@ -39,13 +57,75 @@
     </div>
 </section>
 
+{% if result.errors or result.warnings %}
+<section class="tw-section">
+    <div class="tw-admin-card tw-space-y-2">
+        <div class="tw-section-heading"><h2>هشدارها و خطاها</h2></div>
+        {% for error in result.errors %}
+            <div class="cup-warning">{{ error }}</div>
+        {% endfor %}
+        {% for warning in result.warnings %}
+            <div class="cup-warning">{{ warning }}</div>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+<section class="tw-section">
+    <div class="tw-table-wrap tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>نتیجه هر Panel</h2></div>
+        <table class="tw-catalog-table">
+            <thead>
+                <tr>
+                    <th>Panel</th>
+                    <th>Family</th>
+                    <th>Capability</th>
+                    <th>Health</th>
+                    <th>Selected inbounds</th>
+                    <th>Create success</th>
+                    <th>Link count</th>
+                    <th>Warnings / Errors</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for panel in result.panel_results %}
+                    <tr>
+                        <td>{{ panel.panel_name }}</td>
+                        <td>{{ panel.family }}</td>
+                        <td>{{ panel.capability_profile }}</td>
+                        <td>{{ panel.health_status }}</td>
+                        <td>
+                            {% for inbound in panel.selected_inbounds %}
+                                <div>#{{ inbound.id }} / remote #{{ inbound.remote_inbound_id }} / {{ inbound.protocol }}</div>
+                            {% empty %}
+                                -
+                            {% endfor %}
+                        </td>
+                        <td>{% if panel.success %}yes{% else %}no{% endif %}</td>
+                        <td>{{ panel.link_count }}</td>
+                        <td>
+                            {% for error in panel.errors %}<div>{{ error }}</div>{% endfor %}
+                            {% for warning in panel.warnings %}<div>{{ warning }}</div>{% endfor %}
+                            {% if not panel.errors and not panel.warnings %}-{% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="8"><div class="tw-empty-state">نتیجه پنلی برای نمایش نیست.</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
 <section class="tw-section">
     <div class="tw-table-wrap tw-admin-card">
         <div class="tw-section-heading tw-mb-4"><h2>Inboundهای انتخاب‌شده</h2></div>
         <table class="tw-catalog-table">
             <thead>
                 <tr>
+                    <th>Panel</th>
                     <th>Inbound</th>
+                    <th>Remote ID</th>
                     <th>Protocol</th>
                     <th>Host</th>
                     <th>Port</th>
@@ -55,14 +135,16 @@
             <tbody>
                 {% for inbound in result.selected_inbounds %}
                     <tr>
+                        <td>{{ inbound.panel_name|default:"-" }}</td>
                         <td>{{ inbound.label }}</td>
+                        <td>#{{ inbound.remote_inbound_id|default:"-" }}</td>
                         <td>{{ inbound.protocol }}</td>
                         <td>{{ inbound.host }}</td>
                         <td>{{ inbound.port }}</td>
                         <td>{{ inbound.remark }}</td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="5"><div class="tw-empty-state">Inbound انتخاب‌شده‌ای برای نمایش نیست.</div></td></tr>
+                    <tr><td colspan="7"><div class="tw-empty-state">Inbound انتخاب‌شده‌ای برای نمایش نیست.</div></td></tr>
                 {% endfor %}
             </tbody>
         </table>

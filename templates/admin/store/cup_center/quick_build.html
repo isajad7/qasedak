@@ -8,14 +8,14 @@
         <div>
             {% include "admin/store/panel_center/_badge.html" with tone="amber" label="Quick Subscription Builder" icon="fas fa-wand-magic-sparkles" %}
             <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">ساخت سریع لینک اشتراک</h1>
-            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">Panel و inboundها را انتخاب کن تا یک Cup و یک لینک /sub ساخته شود.</p>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">Inboundها را از یک یا چند Panel انتخاب کن تا همه لینک‌های ساخته‌شده داخل یک Cup و یک لینک /sub قرار بگیرند.</p>
         </div>
         <a href="{{ cup_center_url }}" class="tw-button tw-button-secondary">بازگشت به Cup Center</a>
     </div>
 </section>
 
 <section class="tw-section">
-    <div class="cup-warning">این عملیات کانفیگ واقعی روی پنل می‌سازد.</div>
+    <div class="cup-warning">این عملیات روی هر پنل انتخاب‌شده کانفیگ واقعی می‌سازد و همه لینک‌ها را داخل یک Cup قرار می‌دهد.</div>
 </section>
 
 <section class="tw-section">
@@ -27,11 +27,6 @@
                 {{ form.title.errors }}
                 {{ form.title.label_tag }}
                 {{ form.title }}
-            </div>
-            <div class="cup-form-field">
-                {{ form.panel.errors }}
-                {{ form.panel.label_tag }}
-                {{ form.panel }}
             </div>
             <div class="cup-form-field">
                 {{ form.volume_gb.errors }}
@@ -60,37 +55,57 @@
             <div class="cup-form-field cup-form-wide">
                 {{ form.inbounds.errors }}
                 <label>{{ form.inbounds.label }}</label>
-                <div class="tw-table-wrap">
-                    <table class="tw-catalog-table" id="quick-build-inbounds">
-                        <thead>
-                            <tr>
-                                <th>انتخاب</th>
-                                <th>Panel</th>
-                                <th>Inbound</th>
-                                <th>Protocol</th>
-                                <th>Host</th>
-                                <th>Port</th>
-                                <th>Remark</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for row in inbound_rows %}
-                                <tr data-panel-id="{{ row.panel_id }}">
-                                    <td><input type="checkbox" name="inbounds" value="{{ row.inbound.pk }}"></td>
-                                    <td>{{ row.panel.name }}</td>
-                                    <td>#{{ row.inbound.inbound_id }}</td>
-                                    <td>{{ row.protocol }}</td>
-                                    <td>{{ row.host }}</td>
-                                    <td>{{ row.port }}</td>
-                                    <td>{{ row.remark }}</td>
-                                </tr>
-                            {% empty %}
-                                <tr><td colspan="7"><div class="tw-empty-state">Inbound فعال و قابل فروش برای ساخت سریع پیدا نشد.</div></td></tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
+                <div class="tw-grid tw-gap-4" id="quick-build-panel-groups">
+                    {% for group in panel_groups %}
+                        <section class="tw-admin-card tw-space-y-3">
+                            <div class="tw-flex tw-flex-col tw-gap-3 lg:tw-flex-row lg:tw-items-start lg:tw-justify-between">
+                                <div>
+                                    <h2 class="tw-m-0 tw-text-base tw-font-black tw-text-slate-950">{{ group.panel_name }}</h2>
+                                    <div class="tw-mt-2 tw-flex tw-flex-wrap tw-gap-2 tw-text-xs tw-font-bold tw-text-slate-600">
+                                        <span>Family: {{ group.family_display }}</span>
+                                        <span>Capability: {{ group.capability_profile_display }}</span>
+                                        <span>Version: {{ group.detected_version }}</span>
+                                        <span>Health: {{ group.health_status }}</span>
+                                    </div>
+                                </div>
+                                <button type="button" class="tw-button tw-button-secondary" data-panel-select="{{ group.panel_id }}">انتخاب همه</button>
+                            </div>
+                            <div class="tw-table-wrap">
+                                <table class="tw-catalog-table">
+                                    <thead>
+                                        <tr>
+                                            <th>انتخاب</th>
+                                            <th>Inbound PK</th>
+                                            <th>Remote ID</th>
+                                            <th>Protocol</th>
+                                            <th>Host</th>
+                                            <th>Port</th>
+                                            <th>Remark / Node</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for row in group.inbounds %}
+                                            <tr>
+                                                <td>
+                                                    <input type="checkbox" name="inbounds" value="{{ row.id }}" data-panel-id="{{ group.panel_id }}"{% if row.id in selected_inbound_ids %} checked{% endif %}>
+                                                </td>
+                                                <td>#{{ row.id }}</td>
+                                                <td>#{{ row.remote_inbound_id }}</td>
+                                                <td>{{ row.protocol }}</td>
+                                                <td>{{ row.host }}</td>
+                                                <td>{{ row.port }}</td>
+                                                <td>{{ row.remark }}</td>
+                                            </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+                    {% empty %}
+                        <div class="tw-empty-state">Inbound فعال، قابل فروش و پشتیبانی‌شده برای ساخت سریع پیدا نشد.</div>
+                    {% endfor %}
                 </div>
-                <span class="cup-help">برای multi-inbound، Panel باید قابلیت modern multi-node داشته باشد.</span>
+                <span class="cup-help">برای چند inbound روی یک Panel، همان Panel باید قابلیت modern multi-node داشته باشد. انتخاب inbound از چند Panel به صورت گروه‌های جدا ساخته و داخل یک Cup جمع می‌شود.</span>
             </div>
         </div>
         <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row">
@@ -101,24 +116,14 @@
 </section>
 
 <script>
-document.addEventListener("DOMContentLoaded", function () {
-    const panel = document.getElementById("id_panel");
-    const rows = Array.from(document.querySelectorAll("#quick-build-inbounds tbody tr[data-panel-id]"));
-    function filterRows() {
-        const selected = panel ? panel.value : "";
-        rows.forEach(function (row) {
-            const visible = !selected || row.getAttribute("data-panel-id") === selected;
-            row.style.display = visible ? "" : "none";
-            if (!visible) {
-                const checkbox = row.querySelector("input[type=checkbox]");
-                if (checkbox) checkbox.checked = false;
-            }
-        });
-    }
-    if (panel) {
-        panel.addEventListener("change", filterRows);
-        filterRows();
-    }
+document.addEventListener("click", function (event) {
+    const button = event.target.closest("[data-panel-select]");
+    if (!button) return;
+    const panelId = button.getAttribute("data-panel-select");
+    const boxes = Array.from(document.querySelectorAll('input[name="inbounds"][data-panel-id="' + panelId + '"]'));
+    const shouldCheck = boxes.some(function (box) { return !box.checked; });
+    boxes.forEach(function (box) { box.checked = shouldCheck; });
+    button.textContent = shouldCheck ? "لغو انتخاب همه" : "انتخاب همه";
 });
 </script>
 {% endblock %}

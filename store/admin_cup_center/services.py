@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Count, Max, Q
+from django.db.models import Count, Max, Prefetch, Q
 from django.utils import timezone
 
 from store.config_lookup import mask_identifier
@@ -63,6 +63,24 @@ class PanelConfigResult:
 
 
 @dataclass
+class QuickPanelBuildResult:
+    panel_id: int | None
+    panel_name: str
+    family: str
+    capability_profile: str
+    detected_version: str
+    health_status: str
+    selected_inbounds: list[dict]
+    group_index: int
+    success: bool = False
+    create_success: bool = False
+    create_mode: str = ""
+    link_count: int = 0
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass
 class QuickBuildResult:
     cup: SubscriptionCup
     config_links: list[ConfigLink]
@@ -71,6 +89,14 @@ class QuickBuildResult:
     masked_subscription_url: str
     protocols: list[str]
     email_masked: str = ""
+    status: str = "success"
+    selected_panels_count: int = 0
+    selected_inbounds_count: int = 0
+    created_remote_client_groups_count: int = 0
+    config_link_count: int = 0
+    panel_results: list[dict] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
     @property
     def item_count(self):
@@ -151,20 +177,80 @@ def supported_inbound_queryset():
     )
 
 
-def inbound_selection_rows():
-    rows = []
-    for inbound in supported_inbound_queryset():
-        rows.append(
+def _panel_health_status(panel):
+    try:
+        return getattr(panel.health_status, "status", "") or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _inbound_summary(inbound):
+    panel = getattr(inbound, "panel", None)
+    return {
+        "id": inbound.pk,
+        "label": str(inbound),
+        "panel_id": getattr(panel, "pk", None) or inbound.panel_id,
+        "panel_name": getattr(panel, "name", "") or "-",
+        "remote_inbound_id": inbound.inbound_id,
+        "protocol": inbound.protocol,
+        "host": inbound.server_ip or "-",
+        "port": inbound.port or "-",
+        "remark": inbound.remark or f"Inbound {inbound.inbound_id}",
+    }
+
+
+def quick_builder_panel_groups():
+    inbound_queryset = (
+        Inbound.objects.filter(
+            is_active=True,
+            available_for_new_orders=True,
+            protocol__in=SUPPORTED_INBOUND_PROTOCOLS,
+        )
+        .order_by("inbound_id", "pk")
+    )
+    panels = (
+        Panel.objects.filter(is_active=True)
+        .select_related("health_status")
+        .prefetch_related(Prefetch("inbounds", queryset=inbound_queryset, to_attr="quick_builder_inbounds"))
+        .order_by("name", "pk")
+    )
+    groups = []
+    for panel in panels:
+        inbounds = list(getattr(panel, "quick_builder_inbounds", []) or [])
+        if not inbounds:
+            continue
+        groups.append(
             {
-                "inbound": inbound,
-                "panel": inbound.panel,
-                "panel_id": inbound.panel_id,
-                "protocol": inbound.protocol,
-                "host": inbound.server_ip or "-",
-                "port": inbound.port or "-",
-                "remark": inbound.remark or f"Inbound {inbound.inbound_id}",
+                "panel": panel,
+                "panel_id": panel.pk,
+                "panel_name": panel.name,
+                "family": panel.family or "-",
+                "family_display": panel.get_family_display() if panel.family else "-",
+                "capability_profile": panel.capability_profile or "-",
+                "capability_profile_display": panel.get_capability_profile_display() if panel.capability_profile else "-",
+                "detected_version": panel.detected_xui_version or "-",
+                "health_status": _panel_health_status(panel),
+                "inbounds": [_inbound_summary(inbound) | {"inbound": inbound} for inbound in inbounds],
             }
         )
+    return groups
+
+
+def inbound_selection_rows():
+    rows = []
+    for group in quick_builder_panel_groups():
+        for row in group["inbounds"]:
+            rows.append(
+                {
+                    "inbound": row["inbound"],
+                    "panel": group["panel"],
+                    "panel_id": group["panel_id"],
+                    "protocol": row["protocol"],
+                    "host": row["host"],
+                    "port": row["port"],
+                    "remark": row["remark"],
+                }
+            )
     return rows
 
 
@@ -417,10 +503,17 @@ def create_panel_config_into_cup(cup, panel, inbound, options, *, adapter=None):
     )
 
 
-def _validate_quick_build_scope(panel, inbounds, report=None):
+def _group_quick_build_inbounds(inbounds):
+    grouped = {}
+    for inbound in inbounds:
+        grouped.setdefault(inbound.panel_id, {"panel": inbound.panel, "inbounds": []})
+        grouped[inbound.panel_id]["inbounds"].append(inbound)
+    return list(grouped.values())
+
+
+def _validate_quick_build_panel_group(panel, inbounds, report=None):
     if not isinstance(panel, Panel) or not getattr(panel, "is_active", False):
         raise CupCenterValidationError("Panel فعال و معتبر انتخاب نشده است.")
-    inbounds = list(inbounds or [])
     if not inbounds:
         raise CupCenterValidationError("حداقل یک inbound انتخاب کنید.")
 
@@ -429,23 +522,43 @@ def _validate_quick_build_scope(panel, inbounds, report=None):
         if not isinstance(inbound, Inbound):
             raise CupCenterValidationError("Inbound انتخاب‌شده معتبر نیست.")
         if inbound.panel_id != panel.pk:
-            raise CupCenterValidationError("همه inboundها باید به Panel انتخاب‌شده وصل باشند.")
+            raise CupCenterValidationError("Inbound انتخاب‌شده به Panel خودش وصل نیست.")
+        if not inbound.panel.is_active:
+            raise CupCenterValidationError("Panel یکی از inboundها فعال نیست.")
         if not inbound.is_active or not inbound.available_for_new_orders:
             raise CupCenterValidationError("Inbound انتخاب‌شده فعال یا قابل فروش نیست.")
         if inbound.protocol not in SUPPORTED_INBOUND_PROTOCOLS:
             raise CupCenterValidationError("Protocol یکی از inboundها پشتیبانی نمی‌شود.")
         remote_id = str(inbound.inbound_id)
         if remote_id in seen_remote_ids:
-            raise CupCenterValidationError("Inbound ID تکراری برای ساخت remote مجاز نیست.")
+            raise CupCenterValidationError("Inbound ID تکراری داخل یک Panel برای ساخت remote مجاز نیست.")
         seen_remote_ids.add(remote_id)
 
     if report is not None:
         if not getattr(report, "supported", True) or not getattr(report, "supports_create_client", False):
             raise CupCenterValidationError(_report_create_error(report))
         if len(inbounds) > 1 and not getattr(report, "supports_multi_inbound_create", False):
-            raise CupCenterValidationError("این پنل برای انتخاب چند inbound در یک Sub پشتیبانی نمی‌شود.")
+            raise CupCenterValidationError("این پنل برای انتخاب چند inbound در یک گروه پشتیبانی نمی‌شود.")
     elif len(inbounds) > 1:
         raise CupCenterValidationError("قابلیت ساخت چند inbound برای این پنل قابل تایید نیست.")
+
+
+def _validated_quick_build_groups(inbounds, adapter_factory):
+    inbounds = list(inbounds or [])
+    if not inbounds:
+        raise CupCenterValidationError("حداقل یک inbound انتخاب کنید.")
+    groups = _group_quick_build_inbounds(inbounds)
+    for group in groups:
+        panel = group["panel"]
+        adapter = adapter_factory(panel)
+        try:
+            report = adapter.get_capability_report()
+        except Exception as exc:
+            raise CupCenterValidationError(_safe_panel_error(exc, panel=panel)) from exc
+        _validate_quick_build_panel_group(panel, group["inbounds"], report=report)
+        group["adapter"] = adapter
+        group["report"] = report
+    return groups
 
 
 def _direct_link_entries_from_remote(remote_result, inbounds):
@@ -477,6 +590,55 @@ def _remote_create_for_quick_build(panel, inbounds, options, adapter):
         raise CupCenterRemoteCreateError(_safe_panel_error(exc, panel=panel)) from exc
 
 
+def _quick_panel_result(panel, inbounds, group_index):
+    return QuickPanelBuildResult(
+        panel_id=getattr(panel, "pk", None),
+        panel_name=getattr(panel, "name", "") or "-",
+        family=getattr(panel, "family", "") or "-",
+        capability_profile=getattr(panel, "capability_profile", "") or "-",
+        detected_version=getattr(panel, "detected_xui_version", "") or "-",
+        health_status=_panel_health_status(panel),
+        selected_inbounds=[_inbound_summary(inbound) for inbound in inbounds],
+        group_index=group_index,
+    )
+
+
+def _safe_quick_panel_result_dict(result):
+    return {
+        "panel_id": result.panel_id,
+        "panel_name": result.panel_name,
+        "family": result.family,
+        "capability_profile": result.capability_profile,
+        "detected_version": result.detected_version,
+        "health_status": result.health_status,
+        "selected_inbounds": result.selected_inbounds,
+        "group_index": result.group_index,
+        "success": result.success,
+        "create_success": result.create_success,
+        "create_mode": result.create_mode,
+        "link_count": result.link_count,
+        "warnings": result.warnings,
+        "errors": result.errors,
+    }
+
+
+def _quick_config_link_metadata(entry_remote, *, panel, inbound, group_index):
+    base = _redacted_panel_config_metadata(entry_remote, panel=panel, inbound=inbound)
+    return {
+        **base,
+        "source": "quick_builder_multi_panel",
+        "generated_by": "quick_builder_multi_panel",
+        "panel_id": getattr(panel, "pk", None),
+        "panel_name": getattr(panel, "name", "") or "",
+        "inbound_pk": getattr(inbound, "pk", None),
+        "remote_inbound_id": getattr(inbound, "inbound_id", None),
+        "protocol": getattr(inbound, "protocol", "") or "",
+        "host": getattr(inbound, "server_ip", "") or "",
+        "port": getattr(inbound, "port", "") or "",
+        "group_index": group_index,
+    }
+
+
 def _traffic_limit_bytes_from_gb(value):
     try:
         return int((value or Decimal("0")) * Decimal(1024 ** 3))
@@ -484,93 +646,134 @@ def _traffic_limit_bytes_from_gb(value):
         return 0
 
 
-def quick_build_subscription_cup(request_data, admin_user=None, *, adapter=None, request=None):
-    panel = request_data.get("panel")
+def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, adapter_factory=None, request=None):
     inbounds = list(request_data.get("inbounds") or [])
-    adapter = adapter or get_safe_panel_adapter(panel)
-    try:
-        report = adapter.get_capability_report()
-    except Exception as exc:
-        raise CupCenterValidationError(_safe_panel_error(exc, panel=panel)) from exc
-    _validate_quick_build_scope(panel, inbounds, report=report)
+    adapter_factory = adapter_factory or get_safe_panel_adapter
+    groups = _validated_quick_build_groups(inbounds, adapter_factory)
+    selected_inbounds = [_inbound_summary(inbound) for inbound in inbounds]
+    panel_results = []
+    config_links = []
+    cup_items = []
+    created_remote_client_groups_count = 0
+    position = 1
 
-    remote_result = _remote_create_for_quick_build(panel, inbounds, request_data, adapter)
-    entries = _direct_link_entries_from_remote(remote_result, inbounds)
-    missing_links = [entry for entry in entries if not entry["direct_link"]]
-    if missing_links:
-        raise CupCenterRemoteCreateError("پنل client را ساخت اما همه لینک‌های مستقیم قابل ذخیره را برنگرداند.")
+    with transaction.atomic():
+        cup = SubscriptionCup.objects.create(
+            title=str(request_data.get("title") or "").strip(),
+            status=SubscriptionCup.Status.ACTIVE,
+            expires_at=request_data.get("expires_at"),
+            traffic_limit_bytes=_traffic_limit_bytes_from_gb(request_data.get("volume_gb")),
+            device_limit=int(request_data.get("device_limit") or 2),
+            metadata={
+                "source": "quick_subscription_builder_multi_panel",
+                "generated_by": "quick_builder_multi_panel",
+                "panel_ids": [group["panel"].pk for group in groups],
+                "inbound_pks": [inbound.pk for inbound in inbounds],
+                "volume_gb": str(request_data.get("volume_gb") or ""),
+                "duration_days": int(request_data.get("duration_days") or 30),
+                "admin_user_id": getattr(admin_user, "pk", None),
+                "remote_created": False,
+                "created_at": timezone.now().isoformat(),
+            },
+        )
 
-    try:
-        with transaction.atomic():
-            cup = SubscriptionCup.objects.create(
-                title=str(request_data.get("title") or "").strip(),
-                status=SubscriptionCup.Status.ACTIVE,
-                expires_at=request_data.get("expires_at"),
-                traffic_limit_bytes=_traffic_limit_bytes_from_gb(request_data.get("volume_gb")),
-                device_limit=int(request_data.get("device_limit") or 2),
-                metadata={
-                    "source": "quick_subscription_builder",
-                    "panel_id": panel.pk,
-                    "inbound_pks": [inbound.pk for inbound in inbounds],
-                    "volume_gb": str(request_data.get("volume_gb") or ""),
-                    "duration_days": int(request_data.get("duration_days") or 30),
-                    "admin_user_id": getattr(admin_user, "pk", None),
-                    "remote_created": True,
-                    "email_masked": mask_identifier((remote_result or {}).get("email")),
-                    "created_at": timezone.now().isoformat(),
-                },
-            )
-            config_links = []
-            cup_items = []
-            for position, entry in enumerate(entries, start=1):
-                inbound = entry["inbound"]
-                entry_remote = entry["remote_result"]
-                config_link = create_config_link_from_raw(
-                    entry["direct_link"],
-                    source_type=ConfigLink.SourceType.PANEL_GENERATED,
-                    source_panel=panel,
-                    source_inbound=inbound,
-                    metadata={**_redacted_panel_config_metadata(entry_remote, panel=panel, inbound=inbound), "cup_id": cup.pk},
-                )
-                cup_item = CupItem.objects.create(
-                    cup=cup,
-                    config_link=config_link,
-                    position=position,
-                    is_active=True,
-                    added_reason="quick_builder",
-                    metadata={
-                        "source": "quick_subscription_builder",
-                        "panel_id": panel.pk,
-                        "inbound_pk": inbound.pk,
-                    },
-                )
-                config_links.append(config_link)
-                cup_items.append(cup_item)
-    except Exception as exc:
-        raise CupCenterRemoteSaveError(
-            "کانفیگ واقعی روی پنل ساخته شد، اما ذخیره local Cup/ConfigLink ناموفق بود. لینک‌ها را از پنل بازیابی و به صورت manual اضافه کنید."
-        ) from exc
+    for group_index, group in enumerate(groups, start=1):
+        panel = group["panel"]
+        group_inbounds = group["inbounds"]
+        adapter = group["adapter"]
+        result = _quick_panel_result(panel, group_inbounds, group_index)
+        result.create_mode = "multi_inbound" if len(group_inbounds) > 1 else "single_inbound"
+        try:
+            remote_result = _remote_create_for_quick_build(panel, group_inbounds, request_data, adapter)
+            result.create_success = True
+            entries = _direct_link_entries_from_remote(remote_result, group_inbounds)
+            missing_links = [entry for entry in entries if not entry["direct_link"]]
+            if missing_links:
+                raise CupCenterRemoteCreateError("پنل client را ساخت اما همه لینک‌های مستقیم قابل ذخیره را برنگرداند.")
+
+            with transaction.atomic():
+                for entry in entries:
+                    inbound = entry["inbound"]
+                    entry_remote = entry["remote_result"]
+                    config_link = create_config_link_from_raw(
+                        entry["direct_link"],
+                        source_type=ConfigLink.SourceType.PANEL_GENERATED,
+                        source_panel=panel,
+                        source_inbound=inbound,
+                        metadata={**_quick_config_link_metadata(entry_remote, panel=panel, inbound=inbound, group_index=group_index), "cup_id": cup.pk},
+                    )
+                    cup_item = CupItem.objects.create(
+                        cup=cup,
+                        config_link=config_link,
+                        position=position,
+                        is_active=True,
+                        added_reason="quick_builder",
+                        metadata={
+                            "source": "quick_builder_multi_panel",
+                            "generated_by": "quick_builder_multi_panel",
+                            "panel_id": panel.pk,
+                            "inbound_pk": inbound.pk,
+                            "group_index": group_index,
+                        },
+                    )
+                    config_links.append(config_link)
+                    cup_items.append(cup_item)
+                    position += 1
+            result.success = True
+            result.link_count = len(entries)
+            created_remote_client_groups_count += 1
+        except (CupCenterRemoteCreateError, CupCenterRemoteSaveError) as exc:
+            result.errors.append(str(exc))
+        except Exception as exc:
+            result.errors.append(_safe_panel_error(exc, panel=panel))
+        panel_results.append(_safe_quick_panel_result_dict(result))
+
+    errors = [error for panel_result in panel_results for error in panel_result.get("errors", [])]
+    warnings = [warning for panel_result in panel_results for warning in panel_result.get("warnings", [])]
+    if errors and config_links:
+        status = "partial_success"
+    elif errors:
+        status = "failed"
+    else:
+        status = "success"
+
+    SubscriptionCup.objects.filter(pk=cup.pk).update(
+        metadata={
+            **(cup.metadata or {}),
+            "remote_created": bool(config_links),
+            "status": status,
+            "selected_panel_count": len(groups),
+            "selected_inbound_count": len(inbounds),
+            "created_remote_client_groups_count": created_remote_client_groups_count,
+            "config_link_count": len(config_links),
+            "panel_results": panel_results,
+            "updated_at": timezone.now().isoformat(),
+        }
+    )
+    cup.refresh_from_db()
 
     urls = subscription_url_summary(cup, request=request)
     return QuickBuildResult(
         cup=cup,
         config_links=config_links,
         cup_items=cup_items,
-        selected_inbounds=[
-            {
-                "id": inbound.pk,
-                "label": str(inbound),
-                "protocol": inbound.protocol,
-                "host": inbound.server_ip or "-",
-                "port": inbound.port or "-",
-                "remark": inbound.remark or f"Inbound {inbound.inbound_id}",
-            }
-            for inbound in inbounds
-        ],
+        selected_inbounds=selected_inbounds,
         masked_subscription_url=urls["masked_url"],
         protocols=cup_protocols(cup),
-        email_masked=mask_identifier((remote_result or {}).get("email")),
+        status=status,
+        selected_panels_count=len(groups),
+        selected_inbounds_count=len(inbounds),
+        created_remote_client_groups_count=created_remote_client_groups_count,
+        config_link_count=len(config_links),
+        panel_results=panel_results,
+        warnings=warnings,
+        errors=errors,
     )
+
+
+def quick_build_subscription_cup(request_data, admin_user=None, *, adapter=None, request=None):
+    adapter_factory = (lambda panel: adapter) if adapter is not None else get_safe_panel_adapter
+    return quick_build_multi_panel_subscription_cup(request_data, admin_user=admin_user, adapter_factory=adapter_factory, request=request)
 
 
 def render_cup_preview(cup):

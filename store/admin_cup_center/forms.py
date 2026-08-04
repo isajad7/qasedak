@@ -142,7 +142,6 @@ class PanelConfigIntoCupForm(CupCenterFormMixin, forms.Form):
 
 class QuickSubscriptionBuilderForm(CupCenterFormMixin, forms.Form):
     title = forms.CharField(label="عنوان", max_length=255)
-    panel = forms.ModelChoiceField(label="Panel", queryset=Panel.objects.none())
     inbounds = forms.ModelMultipleChoiceField(
         label="Inboundها",
         queryset=Inbound.objects.none(),
@@ -162,15 +161,9 @@ class QuickSubscriptionBuilderForm(CupCenterFormMixin, forms.Form):
         super().__init__(*args, **kwargs)
         timestamp = timezone.now().strftime("%Y%m%d%H%M%S")
         self.fields["title"].initial = f"Quick Sub {timestamp}"
-        self.fields["panel"].queryset = Panel.objects.filter(is_active=True).order_by("name", "pk")
         self.fields["inbounds"].queryset = (
             Inbound.objects.select_related("panel")
-            .filter(
-                is_active=True,
-                available_for_new_orders=True,
-                panel__is_active=True,
-                protocol__in=SUPPORTED_INBOUND_PROTOCOLS,
-            )
+            .all()
             .order_by("panel__name", "inbound_id", "pk")
         )
         self.fields["volume_gb"].initial = Decimal("10")
@@ -188,13 +181,7 @@ class QuickSubscriptionBuilderForm(CupCenterFormMixin, forms.Form):
 
     def clean(self):
         cleaned = super().clean()
-        panel = cleaned.get("panel")
         inbounds = list(cleaned.get("inbounds") or [])
         if not inbounds:
             self.add_error("inbounds", "حداقل یک inbound انتخاب کنید.")
-            return cleaned
-        if panel:
-            mismatched = [inbound for inbound in inbounds if inbound.panel_id != panel.pk]
-            if mismatched:
-                self.add_error("inbounds", "همه inboundها باید به Panel انتخاب‌شده وصل باشند.")
         return cleaned

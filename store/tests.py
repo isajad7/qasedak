@@ -293,6 +293,28 @@ class SubscriptionCupMVPTests(TestCase):
         user.user_permissions.add(*permissions)
         return user
 
+    def quick_builder_adapter(self, *, multi=False, direct_link=None, bundle_results=None, fail_single=False):
+        adapter = Mock()
+        adapter.get_capability_report.return_value = SimpleNamespace(
+            supported=True,
+            supports_create_client=True,
+            supports_multi_inbound_create=multi,
+            errors=(),
+            warnings=(),
+        )
+        if fail_single:
+            adapter.create_enabled_client.side_effect = Exception("panel timeout")
+        else:
+            adapter.create_enabled_client.return_value = {
+                "email": "quick-client@example.test",
+                "direct_link": direct_link or self.direct_link(90),
+            }
+        adapter.create_enabled_multi_inbound_client.return_value = {
+            "email": "quick-client@example.test",
+            "bundle_inbound_results": bundle_results or [{"direct_link": direct_link or self.direct_link(91), "email": "quick-client@example.test"}],
+        }
+        return adapter
+
     def test_config_link_parser_detects_supported_protocols_and_unknown(self):
         from .subscription_cups import parse_config_link
 
@@ -649,6 +671,41 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertContains(response, self.inbound.remark)
         self.assertNotIn(hidden.remark, body)
 
+    def test_quick_builder_page_groups_multiple_panels_and_inbounds(self):
+        other_panel = Panel.objects.create(
+            store=self.store,
+            name="Panel B",
+            url="https://panel-b.example.com",
+            username="admin",
+            password="panel-secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.MODERN_MULTI_NODE,
+            detected_xui_version="3.4.0",
+        )
+        PanelHealthStatus.objects.create(panel=other_panel, status=PanelHealthStatus.Status.OK)
+        other_inbound = Inbound.objects.create(
+            panel=other_panel,
+            inbound_id=5,
+            remark="Panel B inbound",
+            protocol=Inbound.Protocol.TROJAN,
+            server_ip="panel-b.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(reverse("admin_store_cup_center_quick_build"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.panel.name)
+        self.assertContains(response, other_panel.name)
+        self.assertContains(response, other_inbound.remark)
+        self.assertContains(response, "Modern multi-node")
+        self.assertContains(response, "3.4.0")
+        self.assertContains(response, "Health: ok")
+
     def test_quick_builder_validation_requires_inbound(self):
         self.client.force_login(self.admin_user)
 
@@ -669,7 +726,127 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertContains(response, "حداقل یک inbound انتخاب کنید")
         self.assertFalse(SubscriptionCup.objects.filter(title="No inbound").exists())
 
-    def test_quick_builder_validation_rejects_mixed_panel_inbounds(self):
+    def test_quick_builder_rejects_unsupported_inbound_protocol(self):
+        unsupported_inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=66,
+            remark="Unsupported protocol inbound",
+            protocol="ss",
+            server_ip="ss.example.com",
+            port="8388",
+            config_params="{}",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        adapter = self.quick_builder_adapter()
+        self.client.force_login(self.admin_user)
+
+        get_response = self.client.get(reverse("admin_store_cup_center_quick_build"))
+        self.assertNotContains(get_response, unsupported_inbound.remark)
+
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter", return_value=adapter):
+            response = self.client.post(
+                reverse("admin_store_cup_center_quick_build"),
+                {
+                    "title": "Unsupported protocol",
+                    "inbounds": [unsupported_inbound.pk],
+                    "volume_gb": "10",
+                    "duration_days": "30",
+                    "device_limit": "2",
+                    "remark_prefix": "qasedak-cup-unsupported-protocol",
+                    "confirm_remote_create": "on",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Protocol")
+        adapter.create_enabled_client.assert_not_called()
+        self.assertFalse(SubscriptionCup.objects.filter(title="Unsupported protocol").exists())
+
+    def test_quick_builder_rejects_duplicate_remote_inbound_id_inside_same_panel(self):
+        duplicate_inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=self.inbound.inbound_id,
+            xui_node_id="node-beta",
+            remark="Duplicate remote ID",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="duplicate.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        adapter = self.quick_builder_adapter(multi=True)
+        self.client.force_login(self.admin_user)
+
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter", return_value=adapter):
+            response = self.client.post(
+                reverse("admin_store_cup_center_quick_build"),
+                {
+                    "title": "Duplicate remote",
+                    "inbounds": [self.inbound.pk, duplicate_inbound.pk],
+                    "volume_gb": "10",
+                    "duration_days": "30",
+                    "device_limit": "2",
+                    "remark_prefix": "qasedak-cup-duplicate",
+                    "confirm_remote_create": "on",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "تکراری")
+        adapter.create_enabled_multi_inbound_client.assert_not_called()
+        self.assertFalse(SubscriptionCup.objects.filter(title="Duplicate remote").exists())
+
+    def test_quick_builder_allows_same_remote_inbound_id_across_panels(self):
+        other_panel = Panel.objects.create(
+            store=self.store,
+            name="Panel with same remote id",
+            url="https://same-id.example.com",
+            username="admin",
+            password="panel-secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.MODERN_SINGLE_NODE,
+        )
+        other_inbound = Inbound.objects.create(
+            panel=other_panel,
+            inbound_id=self.inbound.inbound_id,
+            remark="Same remote ID on other panel",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="same-id.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        first_link = self.direct_link(61, host="same-a.example.com")
+        second_link = self.direct_link(62, host="same-b.example.com")
+        first_adapter = self.quick_builder_adapter(direct_link=first_link)
+        second_adapter = self.quick_builder_adapter(direct_link=second_link)
+        adapters = {self.panel.pk: first_adapter, other_panel.pk: second_adapter}
+        self.client.force_login(self.admin_user)
+
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter", side_effect=lambda panel: adapters[panel.pk]):
+            response = self.client.post(
+                reverse("admin_store_cup_center_quick_build"),
+                {
+                    "title": "Same remote cross panel",
+                    "inbounds": [self.inbound.pk, other_inbound.pk],
+                    "volume_gb": "10",
+                    "duration_days": "30",
+                    "device_limit": "2",
+                    "remark_prefix": "qasedak-cup-same-remote",
+                    "confirm_remote_create": "on",
+                },
+            )
+
+        cup = SubscriptionCup.objects.get(title="Same remote cross panel")
+        self.assertRedirects(response, reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        self.assertEqual(ConfigLink.objects.filter(cup_items__cup=cup).count(), 2)
+        first_adapter.create_enabled_client.assert_called_once()
+        second_adapter.create_enabled_client.assert_called_once()
+
+    def test_quick_builder_multi_panel_selection_creates_one_cup(self):
         other_panel = Panel.objects.create(
             store=self.store,
             name="Other Panel",
@@ -690,25 +867,113 @@ class SubscriptionCupMVPTests(TestCase):
             is_active=True,
             available_for_new_orders=True,
         )
+        before_order_count = Order.objects.count()
+        before_client_count = VPNClient.objects.count()
+        first_link = self.direct_link(51, host="panel-a.example.com")
+        second_link = self.direct_link(52, host="panel-b.example.com")
+        first_adapter = self.quick_builder_adapter(direct_link=first_link)
+        second_adapter = self.quick_builder_adapter(direct_link=second_link)
+        adapters = {self.panel.pk: first_adapter, other_panel.pk: second_adapter}
         self.client.force_login(self.admin_user)
 
-        response = self.client.post(
-            reverse("admin_store_cup_center_quick_build"),
-            {
-                "title": "Mixed",
-                "panel": self.panel.pk,
-                "inbounds": [self.inbound.pk, other_inbound.pk],
-                "volume_gb": "10",
-                "duration_days": "30",
-                "device_limit": "2",
-                "remark_prefix": "qasedak-cup-mixed",
-                "confirm_remote_create": "on",
-            },
-        )
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter", side_effect=lambda panel: adapters[panel.pk]), patch(
+            "store.telegram_bot.client.BotClient"
+        ) as bot_client:
+            response = self.client.post(
+                reverse("admin_store_cup_center_quick_build"),
+                {
+                    "title": "Mixed panels",
+                    "panel": self.panel.pk,
+                    "inbounds": [self.inbound.pk, other_inbound.pk],
+                    "volume_gb": "10",
+                    "duration_days": "30",
+                    "device_limit": "2",
+                    "remark_prefix": "qasedak-cup-mixed",
+                    "confirm_remote_create": "on",
+                },
+            )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "همه inboundها باید به Panel انتخاب‌شده وصل باشند")
-        self.assertFalse(SubscriptionCup.objects.filter(title="Mixed").exists())
+        cup = SubscriptionCup.objects.get(title="Mixed panels")
+        self.assertRedirects(response, reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        self.assertEqual(Order.objects.count(), before_order_count)
+        self.assertEqual(VPNClient.objects.count(), before_client_count)
+        self.assertEqual(ConfigLink.objects.filter(cup_items__cup=cup).count(), 2)
+        self.assertEqual(cup.items.count(), 2)
+        first_adapter.create_enabled_client.assert_called_once()
+        second_adapter.create_enabled_client.assert_called_once()
+        bot_client.assert_not_called()
+
+        result_response = self.client.get(reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        result_body = result_response.content.decode("utf-8")
+        self.assertContains(result_response, "success")
+        self.assertContains(result_response, "Other Panel")
+        self.assertNotIn(first_link, result_body)
+        self.assertNotIn(second_link, result_body)
+
+        raw_response = self.client.get(reverse("subscription_cup", args=[cup.token]), {"format": "raw"})
+        self.assertCountEqual(raw_response.content.decode("utf-8").splitlines(), [first_link, second_link])
+        encoded_response = self.client.get(reverse("subscription_cup", args=[cup.token]))
+        decoded = base64.b64decode(encoded_response.content).decode("utf-8")
+        self.assertCountEqual(decoded.splitlines(), [first_link, second_link])
+
+    def test_quick_builder_partial_success_keeps_successful_panel_links(self):
+        other_panel = Panel.objects.create(
+            store=self.store,
+            name="Failing Panel",
+            url="https://failing-panel.example.com",
+            username="admin",
+            password="panel-secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.MODERN_SINGLE_NODE,
+        )
+        other_inbound = Inbound.objects.create(
+            panel=other_panel,
+            inbound_id=7,
+            remark="Failing inbound",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="failing.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        first_link = self.direct_link(71, host="partial-success.example.com")
+        first_adapter = self.quick_builder_adapter(direct_link=first_link)
+        failing_adapter = self.quick_builder_adapter(fail_single=True)
+        adapters = {self.panel.pk: first_adapter, other_panel.pk: failing_adapter}
+        self.client.force_login(self.admin_user)
+
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter", side_effect=lambda panel: adapters[panel.pk]):
+            response = self.client.post(
+                reverse("admin_store_cup_center_quick_build"),
+                {
+                    "title": "Partial quick",
+                    "inbounds": [self.inbound.pk, other_inbound.pk],
+                    "volume_gb": "10",
+                    "duration_days": "30",
+                    "device_limit": "2",
+                    "remark_prefix": "qasedak-cup-partial",
+                    "confirm_remote_create": "on",
+                },
+            )
+
+        cup = SubscriptionCup.objects.get(title="Partial quick")
+        self.assertRedirects(response, reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        self.assertEqual(cup.metadata["status"], "partial_success")
+        self.assertEqual(ConfigLink.objects.filter(cup_items__cup=cup).count(), 1)
+        self.assertEqual(cup.items.count(), 1)
+        first_adapter.create_enabled_client.assert_called_once()
+        failing_adapter.create_enabled_client.assert_called_once()
+
+        result_response = self.client.get(reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        result_body = result_response.content.decode("utf-8")
+        self.assertContains(result_response, "partial_success")
+        self.assertContains(result_response, "Failing Panel")
+        self.assertContains(result_response, "panel timeout")
+        self.assertNotIn(first_link, result_body)
+
+        raw_response = self.client.get(reverse("subscription_cup", args=[cup.token]), {"format": "raw"})
+        self.assertEqual(raw_response.content.decode("utf-8"), first_link)
 
     def test_quick_builder_rejects_unsupported_panel_family(self):
         unsupported_panel = Panel.objects.create(

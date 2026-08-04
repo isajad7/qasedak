@@ -18,8 +18,8 @@ from store.admin_cup_center.services import (
     cup_item_rows,
     cup_list_items,
     cup_queryset,
-    inbound_selection_rows,
     mask_link_for_display,
+    quick_builder_panel_groups,
     quick_build_subscription_cup,
     rebuild_cup_from_source,
     render_cup_preview,
@@ -81,10 +81,18 @@ def _store_quick_result(request, result):
         "cup_id": result.cup.pk,
         "title": result.cup.title,
         "item_count": result.item_count,
+        "status": result.status,
         "protocols": result.protocols,
         "selected_inbounds": result.selected_inbounds,
+        "selected_panels_count": result.selected_panels_count,
+        "selected_inbounds_count": result.selected_inbounds_count,
+        "created_remote_client_groups_count": result.created_remote_client_groups_count,
+        "config_link_count": result.config_link_count,
+        "panel_results": result.panel_results,
         "masked_subscription_url": result.masked_subscription_url,
         "email_masked": result.email_masked,
+        "warnings": result.warnings,
+        "errors": result.errors,
     }
 
 
@@ -100,7 +108,12 @@ def cup_center_quick_build(request):
             try:
                 result = quick_build_subscription_cup(form.cleaned_data, admin_user=request.user, request=request)
                 _store_quick_result(request, result)
-                messages.success(request, "لینک اشتراک سریع ساخته شد.")
+                if result.status == "partial_success":
+                    messages.warning(request, "Cup ساخته شد، اما بعضی پنل‌ها ناموفق بودند.")
+                elif result.status == "failed":
+                    messages.error(request, "Cup ساخته شد، اما هیچ لینک موفقی ذخیره نشد.")
+                else:
+                    messages.success(request, "لینک اشتراک سریع ساخته شد.")
                 return redirect("admin_store_cup_center_quick_result", result.cup.pk)
             except (CupCenterValidationError, CupCenterRemoteCreateError, CupCenterRemoteSaveError) as exc:
                 form.add_error(None, str(exc))
@@ -109,7 +122,8 @@ def cup_center_quick_build(request):
     context = {
         **_base_context(request, "ساخت سریع لینک اشتراک"),
         "form": form,
-        "inbound_rows": inbound_selection_rows(),
+        "panel_groups": quick_builder_panel_groups(),
+        "selected_inbound_ids": {int(value) for value in request.POST.getlist("inbounds") if str(value).isdigit()},
         "cancel_url": reverse("admin_store_cup_center"),
     }
     return TemplateResponse(request, "admin/store/cup_center/quick_build.html", context)
@@ -124,6 +138,8 @@ def cup_center_quick_result(request, cup_id):
         {
             "id": row["source_inbound"].pk if row["source_inbound"] else "",
             "label": str(row["source_inbound"] or "-"),
+            "panel_name": str(row["source_panel"] or "-"),
+            "remote_inbound_id": getattr(row["source_inbound"], "inbound_id", "") if row["source_inbound"] else "",
             "protocol": row["protocol"],
             "host": row["host"],
             "port": row["port"],
@@ -131,16 +147,25 @@ def cup_center_quick_result(request, cup_id):
         }
         for row in item_rows
     ]
+    fallback_panel_results = cup.metadata.get("panel_results") if isinstance(cup.metadata, dict) else None
     context = {
         **_base_context(request, "نتیجه ساخت سریع لینک اشتراک", cup=cup),
         "subscription": subscription_url_summary(cup, request=request),
         "result": {
             "title": session_result.get("title") or cup.title,
             "item_count": session_result.get("item_count") or len(item_rows),
+            "status": session_result.get("status") or (cup.metadata.get("status") if isinstance(cup.metadata, dict) else "") or "success",
             "protocols": session_result.get("protocols") or render_cup_preview(cup)["protocols"],
             "selected_inbounds": selected_inbounds,
+            "selected_panels_count": session_result.get("selected_panels_count") or (cup.metadata.get("selected_panel_count") if isinstance(cup.metadata, dict) else "") or "-",
+            "selected_inbounds_count": session_result.get("selected_inbounds_count") or (cup.metadata.get("selected_inbound_count") if isinstance(cup.metadata, dict) else "") or len(selected_inbounds),
+            "created_remote_client_groups_count": session_result.get("created_remote_client_groups_count") or (cup.metadata.get("created_remote_client_groups_count") if isinstance(cup.metadata, dict) else "") or 0,
+            "config_link_count": session_result.get("config_link_count") or (cup.metadata.get("config_link_count") if isinstance(cup.metadata, dict) else "") or len(item_rows),
+            "panel_results": session_result.get("panel_results") or fallback_panel_results or [],
             "masked_subscription_url": session_result.get("masked_subscription_url") or subscription_url_summary(cup, request=request)["masked_url"],
             "email_masked": session_result.get("email_masked") or "",
+            "warnings": session_result.get("warnings") or [],
+            "errors": session_result.get("errors") or [],
         },
         "detail_url": reverse("admin_store_cup_center_detail", args=[cup.pk]),
         "preview_url": reverse("admin_store_cup_center_preview", args=[cup.pk]),
