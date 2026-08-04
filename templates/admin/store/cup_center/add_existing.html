@@ -1,0 +1,88 @@
+{% extends "admin/store/cup_center/_base_cup_center.html" %}
+
+{% block cup_breadcrumb %}&rsaquo; افزودن لینک موجود{% endblock %}
+
+{% block cup_center_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+    <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+        <div>
+            {% include "admin/store/panel_center/_badge.html" with tone="blue" label="Existing ConfigLinks" icon="fas fa-check-square" %}
+            <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">افزودن ConfigLinkهای موجود به Cup #{{ cup.pk }}</h1>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">چند لینک را انتخاب کن؛ duplicate برای MVP مجاز است و فقط warning می‌گیرد.</p>
+        </div>
+        <a href="{{ detail_url }}" class="tw-button tw-button-secondary">بازگشت به Cup</a>
+    </div>
+</section>
+
+<section class="tw-section">
+    <form method="get" class="tw-admin-card tw-catalog-filter-bar">
+        <label class="tw-filter-field tw-filter-search"><span>{{ form.q.label }}</span>{{ form.q }}</label>
+        <label class="tw-filter-field"><span>{{ form.protocol.label }}</span>{{ form.protocol }}</label>
+        <label class="tw-filter-field"><span>{{ form.source_type.label }}</span>{{ form.source_type }}</label>
+        <label class="tw-filter-field"><span>{{ form.panel.label }}</span>{{ form.panel }}</label>
+        <label class="tw-filter-field"><span>{{ form.inbound.label }}</span>{{ form.inbound }}</label>
+        <div class="tw-filter-actions">
+            <button type="submit" class="tw-button tw-button-primary">فیلتر</button>
+            <a href="{% url 'admin_store_cup_center_add_existing' cup.pk %}" class="tw-button tw-button-secondary">پاک کردن</a>
+        </div>
+    </form>
+</section>
+
+{% if result %}
+<section class="tw-section">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>نتیجه</h2></div>
+        <div class="cup-summary-grid">
+            <div class="cup-stat"><span>Requested</span><strong>{{ result.requested_count }}</strong></div>
+            <div class="cup-stat"><span>Found</span><strong>{{ result.found_count }}</strong></div>
+            <div class="cup-stat"><span>Added</span><strong>{{ result.added_count }}</strong></div>
+            <div class="cup-stat"><span>Duplicate warnings</span><strong>{{ result.duplicate_count }}</strong></div>
+        </div>
+    </div>
+</section>
+{% endif %}
+
+<section class="tw-section">
+    <form method="post" class="tw-table-wrap tw-admin-card">
+        {% csrf_token %}
+        <div class="tw-section-heading tw-mb-4">
+            <h2>ConfigLinkها</h2>
+            <button type="submit" class="tw-button tw-button-primary">افزودن انتخاب‌شده‌ها</button>
+        </div>
+        <table class="tw-catalog-table">
+            <thead>
+                <tr>
+                    <th>انتخاب</th>
+                    <th>Protocol</th>
+                    <th>Host</th>
+                    <th>Port</th>
+                    <th>Remark</th>
+                    <th>Source</th>
+                    <th>Masked preview</th>
+                    <th>Duplicate</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                    <tr>
+                        <td><input type="checkbox" name="config_link_ids" value="{{ row.link.pk }}"></td>
+                        <td>{{ row.link.protocol }}</td>
+                        <td>{{ row.link.host|default:"-" }}</td>
+                        <td>{{ row.link.port|default:"-" }}</td>
+                        <td>{{ row.link.remark|default:"-" }}</td>
+                        <td>{{ row.link.source_type }}<small>{{ row.link.source_panel|default:"-" }}</small><small>{{ row.link.source_inbound|default:"-" }}</small></td>
+                        <td><code class="tw-safe-command">{{ row.masked_link }}</code></td>
+                        <td>
+                            {% if row.already_exists %}
+                                {% include "admin/store/panel_center/_badge.html" with tone="amber" label="already in Cup" %}
+                            {% else %}-{% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="8"><div class="tw-empty-state">ConfigLink مطابق فیلتر پیدا نشد.</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </form>
+</section>
+{% endblock %}

@@ -4400,6 +4400,7 @@ class SubscriptionCupAdmin(ImportExportModelAdmin):
         "status_badge",
         "item_count",
         "masked_subscription_url",
+        "cup_center_link",
         "expires_at",
         "created_at",
     )
@@ -4419,6 +4420,7 @@ class SubscriptionCupAdmin(ImportExportModelAdmin):
         "token",
         "subscription_url",
         "masked_subscription_url",
+        "cup_center_link",
         "item_count",
         "metadata_safe_summary",
         "created_at",
@@ -4434,6 +4436,7 @@ class SubscriptionCupAdmin(ImportExportModelAdmin):
                     "token",
                     "subscription_url",
                     "masked_subscription_url",
+                    "cup_center_link",
                     "item_count",
                     "created_at",
                     "updated_at",
@@ -4512,6 +4515,13 @@ class SubscriptionCupAdmin(ImportExportModelAdmin):
             return "-"
         url = build_subscription_cup_url(obj)
         return format_html('<code dir="ltr">{}</code>', mask_subscription_url(url, obj.token))
+
+    @admin.display(description=_("Cup Center"))
+    def cup_center_link(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        url = reverse("admin_store_cup_center_detail", args=[obj.pk])
+        return format_html('<a class="button" href="{}">{}</a>', url, _("Manage Cup"))
 
     @admin.display(description=_("Safe metadata summary"))
     def metadata_safe_summary(self, obj):

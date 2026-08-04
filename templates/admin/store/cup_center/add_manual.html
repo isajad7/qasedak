@@ -1,0 +1,57 @@
+{% extends "admin/store/cup_center/_base_cup_center.html" %}
+
+{% block cup_breadcrumb %}&rsaquo; لینک دستی{% endblock %}
+
+{% block cup_center_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+    <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+        <div>
+            {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="Manual Links" icon="fas fa-paste" %}
+            <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">Paste لینک دستی برای Cup #{{ cup.pk }}</h1>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">هر خط یک لینک vless/vmess/trojan/ss باشد. لینک کامل در نتیجه نمایش داده نمی‌شود.</p>
+        </div>
+        <a href="{{ detail_url }}" class="tw-button tw-button-secondary">بازگشت به Cup</a>
+    </div>
+</section>
+
+{% if result %}
+<section class="tw-section">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>نتیجه import</h2></div>
+        <div class="cup-summary-grid">
+            <div class="cup-stat"><span>Created</span><strong>{{ result.created_count }}</strong></div>
+            <div class="cup-stat"><span>Added</span><strong>{{ result.added_count }}</strong></div>
+            <div class="cup-stat"><span>Skipped empty</span><strong>{{ result.skipped_empty_count }}</strong></div>
+            <div class="cup-stat"><span>Skipped invalid</span><strong>{{ result.skipped_invalid_count }}</strong></div>
+        </div>
+        {% if result.warnings %}
+            <div class="tw-mt-2 tw-space-y-3">
+                {% for warning in result.warnings %}
+                    <div class="cup-warning">{{ warning }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
+<section class="tw-section">
+    <form method="post" class="tw-admin-card tw-space-y-3" novalidate>
+        {% csrf_token %}
+        {{ form.non_field_errors }}
+        <div class="cup-form-grid">
+            {% for field in form.visible_fields %}
+                <div class="cup-form-field cup-form-wide">
+                    {{ field.errors }}
+                    {{ field.label_tag }}
+                    {{ field }}
+                </div>
+            {% endfor %}
+        </div>
+        <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row">
+            <button type="submit" class="tw-button tw-button-primary">Parse و افزودن</button>
+            <a href="{{ detail_url }}" class="tw-button tw-button-secondary">انصراف</a>
+        </div>
+    </form>
+</section>
+{% endblock %}

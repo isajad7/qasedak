@@ -1,0 +1,97 @@
+{% extends "admin/store/cup_center/_base_cup_center.html" %}
+
+{% block cup_center_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+    <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+        <div class="tw-min-w-0">
+            {% include "admin/store/panel_center/_badge.html" with tone="blue" label="Subscription Cup Manager" icon="fas fa-link" %}
+            <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">مدیریت لینک‌های اشتراک</h1>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+                ساخت Cup دستی، اضافه کردن ConfigLinkهای موجود، لینک دستی و ساخت کانفیگ واقعی از Panel/Inbound.
+            </p>
+        </div>
+        <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row lg:tw-shrink-0">
+            {% if perms.store.add_subscriptioncup %}<a href="{{ quick_build_url }}" class="tw-button tw-button-primary">ساخت سریع لینک اشتراک از اینباندها</a>{% endif %}
+            {% if perms.store.add_subscriptioncup %}<a href="{{ new_cup_url }}" class="tw-button tw-button-primary">ساخت Cup دستی</a>{% endif %}
+            <a href="{{ subscription_cup_admin_url }}" class="tw-button tw-button-secondary">مدل SubscriptionCup</a>
+        </div>
+    </div>
+</section>
+
+<section class="tw-section">
+    <form method="get" class="tw-admin-card tw-catalog-filter-bar">
+        <label class="tw-filter-field tw-filter-search">
+            <span>جستجو در title</span>
+            <input type="search" name="q" value="{{ query }}" placeholder="Cup title">
+        </label>
+        <label class="tw-filter-field">
+            <span>Status</span>
+            <select name="status">
+                <option value="">همه</option>
+                {% for value, label in status_choices %}
+                    <option value="{{ value }}" {% if status == value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <div class="tw-filter-actions">
+            <button type="submit" class="tw-button tw-button-primary">اعمال</button>
+            <a href="{{ cup_center_url }}" class="tw-button tw-button-secondary">پاک کردن</a>
+        </div>
+    </form>
+</section>
+
+<section class="tw-section">
+    <div class="tw-table-wrap tw-admin-card">
+        <table class="tw-catalog-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>عنوان</th>
+                    <th>Order / User</th>
+                    <th>Status</th>
+                    <th>Items</th>
+                    <th>Expires</th>
+                    <th>Created</th>
+                    <th>Subscription URL</th>
+                    <th>اقدام‌ها</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in items %}
+                    <tr>
+                        <td>#{{ item.cup.pk }}</td>
+                        <td><strong>{{ item.cup.title|default:"بدون عنوان" }}</strong><small>Plan: {{ item.cup.plan|default:"-" }}</small></td>
+                        <td>
+                            {% if item.cup.order %}<a href="{% url 'admin:store_order_change' item.cup.order.pk %}">{{ item.cup.order.order_tracking_code }}</a>{% else %}-{% endif %}
+                            <small>{{ item.cup.customer|default:"بدون مشتری" }}</small>
+                        </td>
+                        <td>{% include "admin/store/panel_center/_badge.html" with tone=item.status_tone label=item.cup.get_status_display %}</td>
+                        <td>{{ item.active_item_count }} فعال<small>{{ item.inactive_item_count }} غیرفعال</small></td>
+                        <td>{{ item.cup.expires_at|date:"Y-m-d H:i"|default:"-" }}</td>
+                        <td>{{ item.cup.created_at|date:"Y-m-d H:i" }}</td>
+                        <td><code class="tw-safe-command">{{ item.subscription.masked_url }}</code></td>
+                        <td>
+                            <div class="tw-row-actions">
+                                <a href="{{ item.detail_url }}" class="tw-mini-button">مشاهده</a>
+                                <button type="button" class="tw-mini-button" data-cup-copy="{{ item.subscription.url }}" data-cup-copy-label="Copy URL">Copy URL</button>
+                                <a href="{{ item.preview_url }}" class="tw-mini-button">Preview</a>
+                                <a href="{{ item.add_existing_url }}" class="tw-mini-button">لینک موجود</a>
+                                <a href="{{ item.add_manual_url }}" class="tw-mini-button">لینک دستی</a>
+                                <a href="{{ item.create_from_inbound_url }}" class="tw-mini-button tw-mini-button-warning">از inbound</a>
+                                {% if perms.store.change_subscriptioncup %}
+                                    <form method="post" action="{{ item.rebuild_url }}">
+                                        {% csrf_token %}
+                                        <button type="submit" class="tw-mini-button">Rebuild</button>
+                                    </form>
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="9"><div class="tw-empty-state">هنوز Cup ساخته نشده است.</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

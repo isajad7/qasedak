@@ -1,0 +1,56 @@
+{% extends "admin/store/cup_center/_base_cup_center.html" %}
+
+{% block cup_breadcrumb %}&rsaquo; preview{% endblock %}
+
+{% block cup_center_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+    <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+        <div>
+            {% include "admin/store/panel_center/_badge.html" with tone="blue" label="Safe Preview" icon="fas fa-eye" %}
+            <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">Preview Cup #{{ cup.pk }}</h1>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">Raw preview به صورت masked نمایش داده می‌شود؛ لینک کامل کانفیگ اینجا render نمی‌شود.</p>
+        </div>
+        <a href="{{ detail_url }}" class="tw-button tw-button-secondary">بازگشت به Cup</a>
+    </div>
+</section>
+
+<section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>Endpoint status</h2></div>
+        <div class="cup-summary-grid">
+            <div class="cup-stat"><span>Status</span><strong>{{ preview.endpoint_status }}</strong></div>
+            <div class="cup-stat"><span>Active</span><strong>{{ preview.active_count }}</strong></div>
+            <div class="cup-stat"><span>Inactive</span><strong>{{ preview.inactive_count }}</strong></div>
+            <div class="cup-stat"><span>Base64 length</span><strong>{{ preview.base64_length }}</strong></div>
+        </div>
+        <code class="tw-safe-command">{{ subscription.masked_url }}</code>
+        <code class="tw-safe-command">{{ subscription.masked_raw_url }}</code>
+    </div>
+
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>Protocols</h2></div>
+        <div class="tw-model-list">
+            {% for protocol, count in preview.protocol_counts.items %}
+                <div class="tw-model-row"><span>{{ protocol }}</span><strong>{{ count }}</strong></div>
+            {% empty %}
+                <div class="tw-empty-state">هیچ لینک فعالی برای preview وجود ندارد.</div>
+            {% endfor %}
+        </div>
+    </div>
+</section>
+
+<section class="tw-section">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>Raw output masked preview</h2></div>
+        {% if preview.masked_lines %}
+            <div class="tw-space-y-3">
+                {% for line in preview.masked_lines %}
+                    <code class="tw-safe-command">{{ line }}</code>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="tw-empty-state">Preview خالی است یا Cup قابل دسترسی نیست.</div>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

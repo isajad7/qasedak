@@ -1,0 +1,127 @@
+{% extends "admin/store/cup_center/_base_cup_center.html" %}
+
+{% block cup_center_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+    <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+        <div class="tw-min-w-0">
+            {% include "admin/store/panel_center/_badge.html" with tone="blue" label="Cup Detail" icon="fas fa-list" %}
+            <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">Cup #{{ cup.pk }} · {{ cup.title|default:"بدون عنوان" }}</h1>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">مدیریت لینک‌های داخل Cup بدون نمایش لینک کامل کانفیگ.</p>
+        </div>
+        <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row lg:tw-shrink-0">
+            <a href="{{ preview_url }}" class="tw-button tw-button-secondary">Preview</a>
+            <a href="{{ change_url }}" class="tw-button tw-button-secondary">فرم Django Admin</a>
+            <a href="{{ cup_center_url }}" class="tw-button tw-button-secondary">بازگشت</a>
+        </div>
+    </div>
+</section>
+
+<section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>خلاصه Cup</h2></div>
+        <div class="cup-summary-grid">
+            <div class="cup-stat"><span>Status</span><strong>{{ cup.get_status_display }}</strong></div>
+            <div class="cup-stat"><span>Active items</span><strong>{{ active_item_count }}</strong></div>
+            <div class="cup-stat"><span>Inactive items</span><strong>{{ inactive_item_count }}</strong></div>
+            <div class="cup-stat"><span>Expires</span><strong>{{ cup.expires_at|date:"Y-m-d"|default:"-" }}</strong></div>
+        </div>
+        <div class="tw-model-list tw-mt-2">
+            <div class="tw-model-row"><span>Order</span><strong>{% if cup.order %}<a href="{% url 'admin:store_order_change' cup.order.pk %}">{{ cup.order.order_tracking_code }}</a>{% else %}-{% endif %}</strong></div>
+            <div class="tw-model-row"><span>Customer</span><strong>{{ cup.customer|default:"-" }}</strong></div>
+            <div class="tw-model-row"><span>Plan</span><strong>{{ cup.plan|default:"-" }}</strong></div>
+            <div class="tw-model-row"><span>VPNClient</span><strong>{{ cup.vpn_client|default:"-" }}</strong></div>
+        </div>
+    </div>
+
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>Subscription URL</h2></div>
+        <code class="tw-safe-command">{{ subscription.masked_url }}</code>
+        <code class="tw-safe-command">{{ subscription.masked_raw_url }}</code>
+        <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row tw-mt-2">
+            <button type="button" class="tw-button tw-button-primary" data-cup-copy="{{ subscription.url }}" data-cup-copy-label="Copy URL">Copy URL</button>
+            <button type="button" class="tw-button tw-button-secondary" data-cup-copy="{{ subscription.raw_url }}" data-cup-copy-label="Copy raw URL">Copy raw URL</button>
+        </div>
+        <div class="tw-model-list tw-mt-2">
+            <div class="tw-model-row"><span>Base64 endpoint</span><strong dir="ltr">{{ subscription.path }}</strong></div>
+            <div class="tw-model-row"><span>Raw endpoint</span><strong dir="ltr">{{ subscription.raw_path }}</strong></div>
+        </div>
+        {% if perms.store.change_subscriptioncup %}
+            <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row tw-mt-2">
+                <form method="post" class="tw-m-0">{% csrf_token %}<button type="submit" name="action" value="enable_cup" class="tw-button tw-button-secondary">فعال کردن Cup</button></form>
+                <form method="post" class="tw-m-0">{% csrf_token %}<button type="submit" name="action" value="disable_cup" class="tw-button tw-button-secondary">غیرفعال کردن Cup</button></form>
+                <form method="post" action="{{ rebuild_url }}" class="tw-m-0">{% csrf_token %}<button type="submit" class="tw-button tw-button-secondary">Rebuild</button></form>
+            </div>
+        {% endif %}
+    </div>
+</section>
+
+<section class="tw-section">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4">
+            <h2>افزودن لینک</h2>
+        </div>
+        <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row">
+            <a href="{{ add_existing_url }}" class="tw-button tw-button-secondary">افزودن ConfigLink موجود</a>
+            <a href="{{ add_manual_url }}" class="tw-button tw-button-secondary">Paste لینک دستی</a>
+            <a href="{{ create_from_inbound_url }}" class="tw-button tw-button-primary">ساخت از Panel/Inbound</a>
+        </div>
+    </div>
+</section>
+
+<section class="tw-section">
+    <div class="tw-table-wrap tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>لینک‌های داخل Cup</h2></div>
+        <table class="tw-catalog-table">
+            <thead>
+                <tr>
+                    <th>Position</th>
+                    <th>Protocol</th>
+                    <th>Host</th>
+                    <th>Port</th>
+                    <th>Remark</th>
+                    <th>Source</th>
+                    <th>Status</th>
+                    <th>Masked preview</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in item_rows %}
+                    <tr>
+                        <td>{{ row.item.position }}</td>
+                        <td>{{ row.protocol }}</td>
+                        <td>{{ row.host }}</td>
+                        <td>{{ row.port }}</td>
+                        <td>{{ row.remark }}</td>
+                        <td>
+                            {{ row.source_type }}
+                            <small>{{ row.source_panel|default:"-" }}</small>
+                            <small>{{ row.source_inbound|default:"-" }}</small>
+                        </td>
+                        <td>
+                            {% if row.is_effective_active %}
+                                {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="فعال" %}
+                            {% else %}
+                                {% include "admin/store/panel_center/_badge.html" with tone="slate" label="غیرفعال" %}
+                            {% endif %}
+                        </td>
+                        <td><code class="tw-safe-command">{{ row.masked_link }}</code></td>
+                        <td>
+                            {% if perms.store.change_subscriptioncup %}
+                                <div class="tw-row-actions">
+                                    <form method="post">{% csrf_token %}<input type="hidden" name="item_id" value="{{ row.item.pk }}"><button type="submit" name="action" value="enable_item" class="tw-mini-button tw-mini-button-success">فعال</button></form>
+                                    <form method="post">{% csrf_token %}<input type="hidden" name="item_id" value="{{ row.item.pk }}"><button type="submit" name="action" value="disable_item" class="tw-mini-button tw-mini-button-warning">غیرفعال</button></form>
+                                    <form method="post">{% csrf_token %}<input type="hidden" name="item_id" value="{{ row.item.pk }}"><button type="submit" name="action" value="move_item_up" class="tw-mini-button">بالا</button></form>
+                                    <form method="post">{% csrf_token %}<input type="hidden" name="item_id" value="{{ row.item.pk }}"><button type="submit" name="action" value="move_item_down" class="tw-mini-button">پایین</button></form>
+                                </div>
+                            {% else %}-{% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="9"><div class="tw-empty-state">هنوز لینکی داخل این Cup نیست.</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

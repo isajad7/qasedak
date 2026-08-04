@@ -58,6 +58,18 @@ from store.admin_panel_center.routing_views import (
     routing_detail,
     routing_index,
 )
+from store.admin_cup_center.views import (
+    cup_center_add_existing,
+    cup_center_add_manual,
+    cup_center_create_from_inbound,
+    cup_center_detail,
+    cup_center_index,
+    cup_center_new,
+    cup_center_preview,
+    cup_center_quick_build,
+    cup_center_quick_result,
+    cup_center_rebuild,
+)
 from store.admin_staff import (
     staff_access_center,
     staff_create,
@@ -130,6 +142,96 @@ urlpatterns = [
         'admin/store/panel-center/',
         admin.site.admin_view(panel_center_index),
         name='admin_store_panel_center',
+    ),
+    path(
+        'admin/store/cup-center/',
+        admin.site.admin_view(cup_center_index),
+        name='admin_store_cup_center',
+    ),
+    path(
+        'admin/store/cup-center',
+        admin.site.admin_view(cup_center_index),
+    ),
+    path(
+        'admin/store/cup-center/new/',
+        admin.site.admin_view(cup_center_new),
+        name='admin_store_cup_center_new',
+    ),
+    path(
+        'admin/store/cup-center/new',
+        admin.site.admin_view(cup_center_new),
+    ),
+    path(
+        'admin/store/cup-center/quick-build/',
+        admin.site.admin_view(cup_center_quick_build),
+        name='admin_store_cup_center_quick_build',
+    ),
+    path(
+        'admin/store/cup-center/quick-build',
+        admin.site.admin_view(cup_center_quick_build),
+    ),
+    path(
+        'admin/store/cup-center/quick-build/<int:cup_id>/result/',
+        admin.site.admin_view(cup_center_quick_result),
+        name='admin_store_cup_center_quick_result',
+    ),
+    path(
+        'admin/store/cup-center/quick-build/<int:cup_id>/result',
+        admin.site.admin_view(cup_center_quick_result),
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/',
+        admin.site.admin_view(cup_center_detail),
+        name='admin_store_cup_center_detail',
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>',
+        admin.site.admin_view(cup_center_detail),
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/add-existing-links/',
+        admin.site.admin_view(cup_center_add_existing),
+        name='admin_store_cup_center_add_existing',
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/add-existing-links',
+        admin.site.admin_view(cup_center_add_existing),
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/add-manual-links/',
+        admin.site.admin_view(cup_center_add_manual),
+        name='admin_store_cup_center_add_manual',
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/add-manual-links',
+        admin.site.admin_view(cup_center_add_manual),
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/create-from-inbound/',
+        admin.site.admin_view(cup_center_create_from_inbound),
+        name='admin_store_cup_center_create_from_inbound',
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/create-from-inbound',
+        admin.site.admin_view(cup_center_create_from_inbound),
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/preview/',
+        admin.site.admin_view(cup_center_preview),
+        name='admin_store_cup_center_preview',
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/preview',
+        admin.site.admin_view(cup_center_preview),
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/rebuild/',
+        admin.site.admin_view(cup_center_rebuild),
+        name='admin_store_cup_center_rebuild',
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/rebuild',
+        admin.site.admin_view(cup_center_rebuild),
     ),
     path(
         'admin/store/panel-center/new/',

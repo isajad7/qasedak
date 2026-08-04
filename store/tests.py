@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 import requests
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Permission
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
@@ -227,6 +228,11 @@ class SubscriptionCupMVPTests(TestCase):
             direct_link=self.direct_link(1),
         )
         self.vpn_client = self.create_vpn_client(order=self.order, direct_link=self.order.direct_link)
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="cup-admin",
+            email="cup-admin@example.com",
+            password="secret",
+        )
 
     def direct_link(self, index, protocol="vless", host=None):
         host = host or f"node-{index}.example.com"
@@ -276,6 +282,16 @@ class SubscriptionCupMVPTests(TestCase):
             )
             CupItem.objects.create(cup=cup, config_link=config_link, position=position)
         return cup
+
+    def create_staff_user_with_perms(self, *codenames):
+        user = get_user_model().objects.create_user(
+            username=f"cup-staff-{get_user_model().objects.count()}",
+            password="secret",
+            is_staff=True,
+        )
+        permissions = Permission.objects.filter(content_type__app_label="store", codename__in=codenames)
+        user.user_permissions.add(*permissions)
+        return user
 
     def test_config_link_parser_detects_supported_protocols_and_unknown(self):
         from .subscription_cups import parse_config_link
@@ -436,6 +452,419 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertNotIn(cup.token, summary)
         self.assertNotIn("vless://", summary)
         self.assertNotIn(self.vpn_client.direct_link, summary)
+
+    def test_cup_center_access_staff_allowed_and_non_staff_blocked(self):
+        staff = self.create_staff_user_with_perms("view_subscriptioncup")
+        self.client.force_login(staff)
+
+        response = self.client.get(reverse("admin_store_cup_center"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "مدیریت لینک‌های اشتراک")
+
+        regular_user = get_user_model().objects.create_user(username="cup-regular", password="secret")
+        self.client.force_login(regular_user)
+        response = self.client.get(reverse("admin_store_cup_center"))
+        self.assertNotEqual(response.status_code, 200)
+
+    def test_cup_center_manual_cup_creation_and_empty_detail(self):
+        self.client.force_login(self.admin_user)
+
+        response = self.client.post(
+            reverse("admin_store_cup_center_new"),
+            {
+                "title": "Manual Cup",
+                "customer": self.customer.pk,
+                "order": self.order.pk,
+                "plan": self.plan.pk,
+                "status": SubscriptionCup.Status.ACTIVE,
+                "expires_at": "",
+                "metadata": "{}",
+            },
+        )
+
+        cup = SubscriptionCup.objects.get(title="Manual Cup")
+        self.assertRedirects(response, reverse("admin_store_cup_center_detail", args=[cup.pk]))
+        detail = self.client.get(reverse("admin_store_cup_center_detail", args=[cup.pk]))
+        self.assertContains(detail, "هنوز لینکی داخل این Cup نیست.")
+        self.assertContains(detail, "Active items")
+
+    def test_cup_center_detail_shows_counts_and_masked_config_preview(self):
+        cup = self.create_cup_with_links(self.direct_link(31))
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(reverse("admin_store_cup_center_detail", args=[cup.pk]))
+        body = response.content.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "vless://&lt;hidden&gt;")
+        self.assertContains(response, "Active items")
+        self.assertNotIn("vless://aaaaaaaa", body)
+
+    def test_cup_center_add_existing_config_links_allows_duplicate_items(self):
+        from .subscription_cups import create_config_link_from_raw
+
+        cup = SubscriptionCup.objects.create(customer=self.customer, order=self.order, plan=self.plan)
+        config_link = create_config_link_from_raw(
+            self.direct_link(32),
+            source_type=ConfigLink.SourceType.MANUAL,
+        )
+        CupItem.objects.create(cup=cup, config_link=config_link, position=1)
+        self.client.force_login(self.admin_user)
+
+        response = self.client.post(
+            reverse("admin_store_cup_center_add_existing", args=[cup.pk]),
+            {"config_link_ids": [str(config_link.pk)]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(cup.items.filter(config_link=config_link).count(), 2)
+        self.assertContains(response, "Duplicate warnings")
+
+    def test_cup_center_add_manual_links_parses_multiple_and_skips_unknown(self):
+        cup = SubscriptionCup.objects.create(customer=self.customer, order=self.order, plan=self.plan)
+        raw_links = "\n".join(
+            [
+                self.direct_link(33),
+                "trojan://password@manual.example.com:443#Manual",
+                "not-a-config-link",
+            ]
+        )
+        self.client.force_login(self.admin_user)
+
+        response = self.client.post(
+            reverse("admin_store_cup_center_add_manual", args=[cup.pk]),
+            {"raw_links": raw_links},
+        )
+        body = response.content.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(cup.items.count(), 2)
+        self.assertEqual(ConfigLink.objects.filter(cup_items__cup=cup, source_type=ConfigLink.SourceType.MANUAL).count(), 2)
+        self.assertContains(response, "Skipped invalid")
+        self.assertNotIn("vless://aaaaaaaa", body)
+        self.assertNotIn("trojan://password", body)
+
+    def test_subscription_endpoint_omits_inactive_cup_items(self):
+        cup = self.create_cup_with_links(self.direct_link(34), self.direct_link(35))
+        inactive_item = cup.items.order_by("position").last()
+        inactive_item.is_active = False
+        inactive_item.save(update_fields=["is_active", "updated_at"])
+
+        response = self.client.get(reverse("subscription_cup", args=[cup.token]), {"format": "raw"})
+        body = response.content.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Client-34", body)
+        self.assertNotIn("Client-35", body)
+
+    def test_cup_center_create_from_inbound_get_does_not_create_remote_client(self):
+        cup = SubscriptionCup.objects.create(customer=self.customer, order=self.order, plan=self.plan)
+        self.client.force_login(self.admin_user)
+
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter") as adapter_factory:
+            response = self.client.get(reverse("admin_store_cup_center_create_from_inbound", args=[cup.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        adapter_factory.assert_not_called()
+
+    def test_cup_center_create_from_inbound_posts_remote_client_without_order_or_telegram(self):
+        cup = SubscriptionCup.objects.create(customer=self.customer, order=self.order, plan=self.plan)
+        before_order_count = Order.objects.count()
+        before_client_count = VPNClient.objects.count()
+        adapter = Mock()
+        adapter.get_capability_report.return_value = SimpleNamespace(supports_create_client=True, errors=(), warnings=())
+        adapter.create_enabled_client.return_value = {
+            "email": "cup-client@example.test",
+            "sub_link": "https://panel.example.com/sub/generated-sub",
+            "direct_link": self.direct_link(36),
+        }
+        self.client.force_login(self.admin_user)
+
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter", return_value=adapter), patch(
+            "store.telegram_bot.client.BotClient"
+        ) as bot_client:
+            response = self.client.post(
+                reverse("admin_store_cup_center_create_from_inbound", args=[cup.pk]),
+                {
+                    "panel": self.panel.pk,
+                    "inbound": self.inbound.pk,
+                    "total_gb": "1",
+                    "duration_days": "30",
+                    "device_limit": "2",
+                    "email_prefix": f"qasedak-cup-{cup.pk}-test",
+                    "confirm_remote_create": "on",
+                },
+            )
+
+        self.assertRedirects(response, reverse("admin_store_cup_center_detail", args=[cup.pk]))
+        self.assertEqual(Order.objects.count(), before_order_count)
+        self.assertEqual(VPNClient.objects.count(), before_client_count)
+        self.assertEqual(ConfigLink.objects.filter(cup_items__cup=cup, source_type=ConfigLink.SourceType.PANEL_GENERATED).count(), 1)
+        self.assertEqual(cup.items.count(), 1)
+        adapter.create_enabled_client.assert_called_once()
+        bot_client.assert_not_called()
+
+    def test_manual_cup_form_does_not_load_order_customer_dropdowns(self):
+        from .admin_cup_center.forms import ManualCupForm
+
+        form = ManualCupForm()
+
+        self.assertNotIn("order", form.fields)
+        self.assertNotIn("customer", form.fields)
+        self.assertNotIn("plan", form.fields)
+
+    def test_quick_builder_page_loads_for_admin_and_blocks_non_staff(self):
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(reverse("admin_store_cup_center_quick_build"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "ساخت سریع لینک اشتراک")
+        self.assertContains(response, self.panel.name)
+        self.assertContains(response, self.inbound.remark)
+
+        regular_user = get_user_model().objects.create_user(username="quick-regular", password="secret")
+        self.client.force_login(regular_user)
+        response = self.client.get(reverse("admin_store_cup_center_quick_build"))
+        self.assertNotEqual(response.status_code, 200)
+
+    def test_quick_builder_shows_only_active_sellable_supported_inbounds(self):
+        hidden = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=44,
+            remark="Hidden unavailable inbound",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="hidden.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+            available_for_new_orders=False,
+        )
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(reverse("admin_store_cup_center_quick_build"))
+        body = response.content.decode("utf-8")
+
+        self.assertContains(response, self.inbound.remark)
+        self.assertNotIn(hidden.remark, body)
+
+    def test_quick_builder_validation_requires_inbound(self):
+        self.client.force_login(self.admin_user)
+
+        response = self.client.post(
+            reverse("admin_store_cup_center_quick_build"),
+            {
+                "title": "No inbound",
+                "panel": self.panel.pk,
+                "volume_gb": "10",
+                "duration_days": "30",
+                "device_limit": "2",
+                "remark_prefix": "qasedak-cup-no-inbound",
+                "confirm_remote_create": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "حداقل یک inbound انتخاب کنید")
+        self.assertFalse(SubscriptionCup.objects.filter(title="No inbound").exists())
+
+    def test_quick_builder_validation_rejects_mixed_panel_inbounds(self):
+        other_panel = Panel.objects.create(
+            store=self.store,
+            name="Other Panel",
+            url="https://other-panel.example.com",
+            username="admin",
+            password="panel-secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.MODERN_SINGLE_NODE,
+        )
+        other_inbound = Inbound.objects.create(
+            panel=other_panel,
+            inbound_id=2,
+            remark="Other",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="other.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        self.client.force_login(self.admin_user)
+
+        response = self.client.post(
+            reverse("admin_store_cup_center_quick_build"),
+            {
+                "title": "Mixed",
+                "panel": self.panel.pk,
+                "inbounds": [self.inbound.pk, other_inbound.pk],
+                "volume_gb": "10",
+                "duration_days": "30",
+                "device_limit": "2",
+                "remark_prefix": "qasedak-cup-mixed",
+                "confirm_remote_create": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "همه inboundها باید به Panel انتخاب‌شده وصل باشند")
+        self.assertFalse(SubscriptionCup.objects.filter(title="Mixed").exists())
+
+    def test_quick_builder_rejects_unsupported_panel_family(self):
+        unsupported_panel = Panel.objects.create(
+            store=self.store,
+            name="Unsupported Panel",
+            family=Panel.Family.UNKNOWN,
+            url="https://unsupported.example.com",
+            username="admin",
+            password="panel-secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.UNKNOWN_SAFE,
+        )
+        unsupported_inbound = Inbound.objects.create(
+            panel=unsupported_panel,
+            inbound_id=1,
+            remark="Unsupported inbound",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="unsupported.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        self.client.force_login(self.admin_user)
+
+        response = self.client.post(
+            reverse("admin_store_cup_center_quick_build"),
+            {
+                "title": "Unsupported quick",
+                "panel": unsupported_panel.pk,
+                "inbounds": [unsupported_inbound.pk],
+                "volume_gb": "10",
+                "duration_days": "30",
+                "device_limit": "2",
+                "remark_prefix": "qasedak-cup-unsupported",
+                "confirm_remote_create": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "پشتیبانی")
+        self.assertFalse(SubscriptionCup.objects.filter(title="Unsupported quick").exists())
+
+    def test_quick_builder_rejects_legacy_multi_selection(self):
+        second_inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=2,
+            remark="Second",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="second.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        adapter = Mock()
+        adapter.get_capability_report.return_value = SimpleNamespace(
+            supported=True,
+            supports_create_client=True,
+            supports_multi_inbound_create=False,
+            errors=(),
+            warnings=(),
+        )
+        self.client.force_login(self.admin_user)
+
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter", return_value=adapter):
+            response = self.client.post(
+                reverse("admin_store_cup_center_quick_build"),
+                {
+                    "title": "Legacy multi",
+                    "panel": self.panel.pk,
+                    "inbounds": [self.inbound.pk, second_inbound.pk],
+                    "volume_gb": "10",
+                    "duration_days": "30",
+                    "device_limit": "2",
+                    "remark_prefix": "qasedak-cup-legacy-multi",
+                    "confirm_remote_create": "on",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "چند inbound")
+        adapter.create_enabled_multi_inbound_client.assert_not_called()
+        self.assertFalse(SubscriptionCup.objects.filter(title="Legacy multi").exists())
+
+    def test_quick_builder_modern_multi_creates_cup_without_order_vpnclient_or_telegram(self):
+        second_inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=2,
+            remark="Second modern",
+            protocol=Inbound.Protocol.TROJAN,
+            server_ip="second-modern.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+            available_for_new_orders=True,
+        )
+        before_order_count = Order.objects.count()
+        before_client_count = VPNClient.objects.count()
+        first_link = self.direct_link(41, host="first-modern.example.com")
+        second_link = "trojan://password@second-modern.example.com:443#Second"
+        adapter = Mock()
+        adapter.get_capability_report.return_value = SimpleNamespace(
+            supported=True,
+            supports_create_client=True,
+            supports_multi_inbound_create=True,
+            errors=(),
+            warnings=(),
+        )
+        adapter.create_enabled_multi_inbound_client.return_value = {
+            "email": "quick-client@example.test",
+            "bundle_inbound_results": [
+                {"direct_link": first_link, "email": "quick-client@example.test"},
+                {"direct_link": second_link, "email": "quick-client@example.test"},
+            ],
+        }
+        self.client.force_login(self.admin_user)
+
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter", return_value=adapter), patch(
+            "store.telegram_bot.client.BotClient"
+        ) as bot_client:
+            response = self.client.post(
+                reverse("admin_store_cup_center_quick_build"),
+                {
+                    "title": "Quick modern multi",
+                    "panel": self.panel.pk,
+                    "inbounds": [self.inbound.pk, second_inbound.pk],
+                    "volume_gb": "10",
+                    "duration_days": "30",
+                    "device_limit": "2",
+                    "remark_prefix": "qasedak-cup-modern-multi",
+                    "confirm_remote_create": "on",
+                },
+            )
+
+        cup = SubscriptionCup.objects.get(title="Quick modern multi")
+        self.assertRedirects(response, reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        self.assertEqual(Order.objects.count(), before_order_count)
+        self.assertEqual(VPNClient.objects.count(), before_client_count)
+        self.assertEqual(ConfigLink.objects.filter(cup_items__cup=cup).count(), 2)
+        self.assertEqual(cup.items.count(), 2)
+        adapter.create_enabled_multi_inbound_client.assert_called_once()
+        request_arg = adapter.create_enabled_multi_inbound_client.call_args.args[0]
+        self.assertEqual([inbound.inbound_id for inbound in request_arg.inbounds], [self.inbound.inbound_id, second_inbound.inbound_id])
+        bot_client.assert_not_called()
+
+        result_response = self.client.get(reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        result_body = result_response.content.decode("utf-8")
+        self.assertContains(result_response, "Quick modern multi")
+        self.assertContains(result_response, "vless")
+        self.assertContains(result_response, "trojan")
+        self.assertNotIn(first_link, result_body)
+        self.assertNotIn(second_link, result_body)
+
+        raw_response = self.client.get(reverse("subscription_cup", args=[cup.token]), {"format": "raw"})
+        self.assertEqual(raw_response.content.decode("utf-8"), "\n".join([first_link, second_link]))
 
 
 class TelegramProxyTests(TestCase):
