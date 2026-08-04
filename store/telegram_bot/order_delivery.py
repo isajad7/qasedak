@@ -2,6 +2,11 @@ from django.db.models import Q
 
 from store.jalali import persian_digits
 from store.models import BotEventLog, BotUser
+from store.subscription_cups import (
+    build_subscription_cup_url,
+    get_subscription_cup_for_order,
+    get_subscription_cup_for_vpn_client,
+)
 
 from .config_delivery import config_send_result_count, send_config_links_message
 
@@ -45,6 +50,7 @@ def order_config_links(order):
             for label, link in (
                 ("لینک اشتراک", group.get("subscription_link")),
                 ("لینک مستقیم", group.get("direct_link")),
+                ("لینک اشتراک فروشگاه", group.get("project_subscription_link")),
             ):
                 if not link:
                     continue
@@ -54,6 +60,9 @@ def order_config_links(order):
         links.append(("کانفیگ - لینک اشتراک", order.sub_link))
     if order.direct_link:
         links.append(("کانفیگ - لینک مستقیم", order.direct_link))
+    cup = get_subscription_cup_for_order(order)
+    if cup:
+        links.append(("کانفیگ - لینک اشتراک فروشگاه", build_subscription_cup_url(cup, store=order.store)))
     return links
 
 
@@ -62,13 +71,16 @@ def order_config_link_groups(order):
     if clients:
         expanded = []
         for vpn_client in clients:
+            cup = get_subscription_cup_for_vpn_client(vpn_client)
+            project_subscription_link = build_subscription_cup_url(cup, store=order.store) if cup else ""
             bundle_results = (vpn_client.xui_raw or {}).get("bundle_inbound_results") or []
             if bundle_results:
-                for result in bundle_results:
+                for index, result in enumerate(bundle_results, start=1):
                     expanded.append(
                         {
                             "subscription_link": result.get("sub_link") or vpn_client.sub_link,
                             "direct_link": result.get("direct_link") or "",
+                            "project_subscription_link": project_subscription_link if index == 1 else "",
                         }
                     )
             else:
@@ -76,11 +88,13 @@ def order_config_link_groups(order):
                     {
                         "subscription_link": vpn_client.sub_link,
                         "direct_link": vpn_client.direct_link,
+                        "project_subscription_link": project_subscription_link,
                     }
                 )
         total = len(expanded)
         groups = []
         seen_subscription_links = set()
+        seen_project_subscription_links = set()
         for index, item in enumerate(expanded, start=1):
             label = f"کانفیگ {persian_digits(index)}" if total > 1 else ""
             subscription_link = item["subscription_link"]
@@ -88,16 +102,30 @@ def order_config_link_groups(order):
                 subscription_link = ""
             elif subscription_link:
                 seen_subscription_links.add(subscription_link)
+            project_subscription_link = item.get("project_subscription_link") or ""
+            if project_subscription_link and project_subscription_link in seen_project_subscription_links:
+                project_subscription_link = ""
+            elif project_subscription_link:
+                seen_project_subscription_links.add(project_subscription_link)
             groups.append(
                 {
                     "label": label,
                     "subscription_link": subscription_link,
                     "direct_link": item["direct_link"],
+                    "project_subscription_link": project_subscription_link,
                 }
             )
         return groups
     if order.sub_link or order.direct_link:
-        return [{"label": "", "subscription_link": order.sub_link, "direct_link": order.direct_link}]
+        cup = get_subscription_cup_for_order(order)
+        return [
+            {
+                "label": "",
+                "subscription_link": order.sub_link,
+                "direct_link": order.direct_link,
+                "project_subscription_link": build_subscription_cup_url(cup, store=order.store) if cup else "",
+            }
+        ]
     return []
 
 
@@ -147,6 +175,16 @@ def send_customer_order_event_message(
             detail_lines=approved_order_detail_lines(order, config_label=group["label"]),
         )
         sent += config_send_result_count(result)
+        project_subscription_link = group.get("project_subscription_link") or ""
+        if project_subscription_link and project_subscription_link != group["subscription_link"]:
+            project_result = send_config_links_message(
+                client,
+                chat_id,
+                subscription_link=project_subscription_link,
+                title="✅ لینک اشتراک فروشگاه شما آماده شد",
+                detail_lines=approved_order_detail_lines(order, config_label=group["label"]),
+            )
+            sent += config_send_result_count(project_result)
     return sent
 
 

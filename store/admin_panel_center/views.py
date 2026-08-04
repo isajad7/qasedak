@@ -51,7 +51,32 @@ def panel_center_form(request, panel_id=None):
         form = PanelCenterForm(request.POST, instance=panel)
         if form.is_valid():
             saved = form.save()
-            messages.success(request, "پنل ذخیره شد.")
+            if saved.family == Panel.Family.XUI and saved.is_active:
+                result = sync_panel_inbounds(saved, create_missing=True, available_for_new_orders=True, active_only=True)
+                if result.ok:
+                    created = int(result.details.get("created") or 0)
+                    updated = int(result.details.get("updated") or 0)
+                    messages.success(request, f"پنل ذخیره شد و اینباندها همگام شدند. جدید: {created}، به‌روزرسانی: {updated}.")
+                    request.session["panel_center_last_result"] = {
+                        "ok": result.ok,
+                        "title": result.title,
+                        "message": result.message,
+                        "details": result.details,
+                        "warnings": result.warnings,
+                        "errors": result.errors,
+                    }
+                else:
+                    messages.warning(request, f"پنل ذخیره شد، اما دریافت اینباندها ناموفق بود: {result.message}")
+                    request.session["panel_center_last_result"] = {
+                        "ok": result.ok,
+                        "title": result.title,
+                        "message": result.message,
+                        "details": result.details,
+                        "warnings": result.warnings,
+                        "errors": result.errors,
+                    }
+            else:
+                messages.success(request, "پنل ذخیره شد.")
             return redirect("admin_store_panel_center_detail", saved.pk)
     else:
         form = PanelCenterForm(instance=panel)

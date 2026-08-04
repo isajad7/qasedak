@@ -867,6 +867,18 @@ def approve_and_provision_order(order, actor=None, source=None, notify=True):
 
     if result.ok:
         try:
+            from .subscription_cups import rebuild_subscription_cups_for_order
+
+            result.subscription_cups = rebuild_subscription_cups_for_order(
+                order,
+                force_active=True,
+                added_reason="provisioning",
+            )
+        except Exception:
+            result.subscription_cups = []
+            logger.exception("Could not rebuild subscription cups for order_id=%s tracking=%s", order.pk, order.order_tracking_code)
+
+        try:
             create_referral_reward_for_order(order)
         except Exception:
             logger.exception("Could not create referral GB reward for order_id=%s", order.pk)

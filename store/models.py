@@ -1,5 +1,6 @@
 import random
 import re
+import secrets
 import string
 import uuid
 from datetime import datetime, time, timedelta
@@ -28,6 +29,10 @@ def generate_public_id():
 
 def generate_bot_webhook_secret():
     return uuid.uuid4().hex
+
+
+def generate_subscription_cup_token():
+    return secrets.token_urlsafe(24).rstrip("=")
 
 
 def generate_short_code(prefix="", length=8):
@@ -3631,6 +3636,195 @@ class VPNClient(TimeStampedModel):
             self.last_online_at = stats["last_online_at"]
         self.last_synced_at = timezone.now()
         self.xui_raw = stats.get("raw", {})
+
+
+class ConfigLink(TimeStampedModel):
+    class Protocol(models.TextChoices):
+        VLESS = "vless", _("VLESS")
+        VMESS = "vmess", _("VMess")
+        TROJAN = "trojan", _("Trojan")
+        SS = "ss", _("Shadowsocks")
+        UNKNOWN = "unknown", _("Unknown")
+
+    class SourceType(models.TextChoices):
+        PANEL_GENERATED = "panel_generated", _("Panel generated")
+        MANUAL = "manual", _("Manual")
+        IMPORTED_SUBSCRIPTION = "imported_subscription", _("Imported subscription")
+        UNKNOWN = "unknown", _("Unknown")
+
+    raw_link = models.TextField(_("raw link"))
+    normalized_link = models.TextField(_("normalized link"), blank=True)
+    normalized_hash = models.CharField(_("normalized hash"), max_length=64, blank=True, db_index=True)
+    protocol = models.CharField(
+        _("protocol"),
+        max_length=20,
+        choices=Protocol.choices,
+        default=Protocol.UNKNOWN,
+        db_index=True,
+    )
+    remark = models.CharField(_("remark"), max_length=255, blank=True)
+    host = models.CharField(_("host"), max_length=255, blank=True)
+    port = models.PositiveIntegerField(_("port"), null=True, blank=True)
+    source_type = models.CharField(
+        _("source type"),
+        max_length=30,
+        choices=SourceType.choices,
+        default=SourceType.UNKNOWN,
+        db_index=True,
+    )
+    source_panel = models.ForeignKey(
+        Panel,
+        verbose_name=_("source panel"),
+        on_delete=models.SET_NULL,
+        related_name="config_links",
+        null=True,
+        blank=True,
+    )
+    source_inbound = models.ForeignKey(
+        Inbound,
+        verbose_name=_("source inbound"),
+        on_delete=models.SET_NULL,
+        related_name="config_links",
+        null=True,
+        blank=True,
+    )
+    vpn_client = models.ForeignKey(
+        VPNClient,
+        verbose_name=_("VPN client"),
+        on_delete=models.SET_NULL,
+        related_name="config_links",
+        null=True,
+        blank=True,
+    )
+    is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("config link")
+        verbose_name_plural = _("config links")
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["protocol", "is_active"]),
+            models.Index(fields=["source_type", "created_at"]),
+            models.Index(fields=["vpn_client", "is_active"]),
+        ]
+
+    def __str__(self):
+        suffix = self.normalized_hash[-8:] if self.normalized_hash else str(self.pk or "-")
+        return f"{self.protocol}:{suffix}"
+
+
+class SubscriptionCup(TimeStampedModel):
+    class Status(models.TextChoices):
+        ACTIVE = "active", _("Active")
+        DISABLED = "disabled", _("Disabled")
+        EXPIRED = "expired", _("Expired")
+
+    customer = models.ForeignKey(
+        Customer,
+        verbose_name=_("customer"),
+        on_delete=models.SET_NULL,
+        related_name="subscription_cups",
+        null=True,
+        blank=True,
+    )
+    order = models.ForeignKey(
+        Order,
+        verbose_name=_("order"),
+        on_delete=models.SET_NULL,
+        related_name="subscription_cups",
+        null=True,
+        blank=True,
+    )
+    plan = models.ForeignKey(
+        Plan,
+        verbose_name=_("plan"),
+        on_delete=models.SET_NULL,
+        related_name="subscription_cups",
+        null=True,
+        blank=True,
+    )
+    vpn_client = models.ForeignKey(
+        VPNClient,
+        verbose_name=_("VPN client"),
+        on_delete=models.SET_NULL,
+        related_name="subscription_cups",
+        null=True,
+        blank=True,
+    )
+    token = models.CharField(
+        _("token"),
+        max_length=64,
+        default=generate_subscription_cup_token,
+        unique=True,
+        editable=False,
+    )
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    expires_at = models.DateTimeField(_("expires at"), null=True, blank=True, db_index=True)
+    traffic_limit_bytes = models.PositiveBigIntegerField(_("traffic limit bytes"), default=0, blank=True)
+    device_limit = models.PositiveIntegerField(_("device limit"), null=True, blank=True)
+    title = models.CharField(_("title"), max_length=255, blank=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("subscription cup")
+        verbose_name_plural = _("subscription cups")
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["customer", "status"]),
+            models.Index(fields=["order", "status"]),
+            models.Index(fields=["vpn_client", "status"]),
+            models.Index(fields=["status", "expires_at"]),
+        ]
+
+    def __str__(self):
+        label = self.title or self.vpn_client_id or self.order_id or self.customer_id or self.pk or "-"
+        return f"Cup {label} - {self.get_status_display()}"
+
+    @property
+    def is_expired(self):
+        return bool(self.expires_at and self.expires_at <= timezone.now())
+
+    @property
+    def is_accessible(self):
+        return self.status == self.Status.ACTIVE and not self.is_expired
+
+
+class CupItem(TimeStampedModel):
+    cup = models.ForeignKey(
+        SubscriptionCup,
+        verbose_name=_("subscription cup"),
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    config_link = models.ForeignKey(
+        ConfigLink,
+        verbose_name=_("config link"),
+        on_delete=models.CASCADE,
+        related_name="cup_items",
+    )
+    position = models.PositiveIntegerField(_("position"), default=0, db_index=True)
+    is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    added_reason = models.CharField(_("added reason"), max_length=100, blank=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("cup item")
+        verbose_name_plural = _("cup items")
+        ordering = ["position", "id"]
+        indexes = [
+            models.Index(fields=["cup", "is_active", "position"]),
+            models.Index(fields=["config_link", "is_active"]),
+        ]
+
+    def __str__(self):
+        return f"{self.cup_id}:{self.position}:{self.config_link_id}"
 
 
 class VPNClientActionLog(TimeStampedModel):

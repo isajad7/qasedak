@@ -49,6 +49,8 @@ from .models import (
     BotUser,
     BroadcastMessage,
     BroadcastRecipient,
+    ConfigLink,
+    CupItem,
     Customer,
     CustomerAnalyticsReport,
     CustomerReward,
@@ -78,6 +80,7 @@ from .models import (
     normalize_payment_digits,
     SupportConversation,
     SupportMessage,
+    SubscriptionCup,
     VPNClient,
     VPNClientActionLog,
     VPNClientReminderLog,
@@ -149,6 +152,7 @@ from .plan_route_services import (
     normalize_plan_ids,
     preview_bulk_plan_routes,
 )
+from .subscription_cups import apply_config_link_parse, build_subscription_cup_url, mask_subscription_url
 from .xui_api import mask_xui_value, sync_inbound_data
 
 
@@ -4254,6 +4258,309 @@ class VPNClientAdmin(ImportExportModelAdmin):
     @admin.display(description=_("Last reminder"), ordering="admin_last_reminder_sent_at")
     def last_reminder_sent_at(self, obj):
         return getattr(obj, "admin_last_reminder_sent_at", None) or "-"
+
+
+@admin.register(ConfigLink)
+class ConfigLinkAdmin(ImportExportModelAdmin):
+    list_display = (
+        "id",
+        "protocol",
+        "masked_raw_link",
+        "remark",
+        "host",
+        "port",
+        "source_type",
+        "source_panel",
+        "source_inbound",
+        "vpn_client",
+        "is_active",
+        "created_at",
+    )
+    list_filter = ("protocol", "source_type", "is_active", "source_panel", "source_inbound", "created_at")
+    search_fields = (
+        "raw_link",
+        "normalized_hash",
+        "remark",
+        "host",
+        "vpn_client__username",
+        "vpn_client__xui_email",
+        "vpn_client__order__order_tracking_code",
+    )
+    autocomplete_fields = ("source_panel", "source_inbound", "vpn_client")
+    readonly_fields = (
+        "normalized_link",
+        "normalized_hash",
+        "protocol",
+        "remark",
+        "host",
+        "port",
+        "masked_raw_link",
+        "created_at",
+        "updated_at",
+    )
+    fieldsets = (
+        (
+            _("Link"),
+            {
+                "fields": (
+                    "raw_link",
+                    "masked_raw_link",
+                    "protocol",
+                    "remark",
+                    "host",
+                    "port",
+                    "is_active",
+                )
+            },
+        ),
+        (
+            _("Source"),
+            {
+                "fields": (
+                    "source_type",
+                    "source_panel",
+                    "source_inbound",
+                    "vpn_client",
+                )
+            },
+        ),
+        (
+            _("Metadata"),
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "normalized_link",
+                    "normalized_hash",
+                    "metadata",
+                    "created_at",
+                    "updated_at",
+                ),
+            },
+        ),
+    )
+
+    @admin.display(description=_("Config link"))
+    def masked_raw_link(self, obj):
+        if not obj or not obj.raw_link:
+            return "-"
+        suffix = (obj.normalized_hash or "")[-8:] or str(obj.pk or "-")
+        return _("Config link saved (hidden), hash ending %(suffix)s") % {"suffix": suffix}
+
+    def save_model(self, request, obj, form, change):
+        apply_config_link_parse(
+            obj,
+            obj.raw_link,
+            source_type=obj.source_type,
+            source_panel=obj.source_panel,
+            source_inbound=obj.source_inbound,
+            vpn_client=obj.vpn_client,
+            metadata=obj.metadata,
+        )
+        super().save_model(request, obj, form, change)
+
+
+class SubscriptionCupItemInline(admin.TabularInline):
+    model = CupItem
+    extra = 0
+    show_change_link = True
+    autocomplete_fields = ("config_link",)
+    fields = (
+        "position",
+        "is_active",
+        "added_reason",
+        "config_link",
+        "config_link_protocol",
+        "masked_config_link",
+        "created_at",
+    )
+    readonly_fields = ("config_link_protocol", "masked_config_link", "created_at")
+
+    @admin.display(description=_("Protocol"))
+    def config_link_protocol(self, obj):
+        return getattr(getattr(obj, "config_link", None), "protocol", "") or "-"
+
+    @admin.display(description=_("Config"))
+    def masked_config_link(self, obj):
+        config_link = getattr(obj, "config_link", None)
+        if not config_link:
+            return "-"
+        suffix = (config_link.normalized_hash or "")[-8:] or str(config_link.pk or "-")
+        return _("Config link saved (hidden), hash ending %(suffix)s") % {"suffix": suffix}
+
+
+@admin.register(SubscriptionCup)
+class SubscriptionCupAdmin(ImportExportModelAdmin):
+    inlines = (SubscriptionCupItemInline,)
+    list_display = (
+        "id",
+        "title",
+        "customer",
+        "order",
+        "vpn_client",
+        "status_badge",
+        "item_count",
+        "masked_subscription_url",
+        "expires_at",
+        "created_at",
+    )
+    list_filter = ("status", "created_at", "expires_at", "plan")
+    search_fields = (
+        "title",
+        "token",
+        "order__order_tracking_code",
+        "vpn_client__username",
+        "vpn_client__xui_email",
+        "customer__display_name",
+        "customer__username",
+        "customer__phone_number",
+    )
+    autocomplete_fields = ("customer", "order", "plan", "vpn_client")
+    readonly_fields = (
+        "token",
+        "subscription_url",
+        "masked_subscription_url",
+        "item_count",
+        "metadata_safe_summary",
+        "created_at",
+        "updated_at",
+    )
+    fieldsets = (
+        (
+            _("Summary"),
+            {
+                "fields": (
+                    "title",
+                    "status",
+                    "token",
+                    "subscription_url",
+                    "masked_subscription_url",
+                    "item_count",
+                    "created_at",
+                    "updated_at",
+                )
+            },
+        ),
+        (
+            _("Owner"),
+            {
+                "fields": (
+                    "customer",
+                    "order",
+                    "plan",
+                    "vpn_client",
+                )
+            },
+        ),
+        (
+            _("Limits"),
+            {
+                "fields": (
+                    "expires_at",
+                    "traffic_limit_bytes",
+                    "device_limit",
+                )
+            },
+        ),
+        (
+            _("Metadata"),
+            {
+                "classes": ("collapse",),
+                "fields": ("metadata_safe_summary",),
+            },
+        ),
+    )
+
+    def get_queryset(self, request):
+        return (
+            super()
+            .get_queryset(request)
+            .select_related("customer", "order", "plan", "vpn_client")
+            .annotate(admin_item_count=Count("items", filter=Q(items__is_active=True), distinct=True))
+        )
+
+    def qadmin_badge(self, label, tone="secondary"):
+        css_class = {
+            "success": "bg-success",
+            "warning": "bg-warning text-dark",
+            "danger": "bg-danger",
+            "secondary": "bg-secondary",
+        }.get(tone, "bg-secondary")
+        return format_html('<span class="badge {}">{}</span>', css_class, label)
+
+    @admin.display(description=_("Status"), ordering="status")
+    def status_badge(self, obj):
+        if obj.status == SubscriptionCup.Status.ACTIVE and not obj.is_expired:
+            return self.qadmin_badge(_("Active"), "success")
+        if obj.status == SubscriptionCup.Status.DISABLED:
+            return self.qadmin_badge(_("Disabled"), "danger")
+        return self.qadmin_badge(_("Expired"), "warning")
+
+    @admin.display(description=_("Items"), ordering="admin_item_count")
+    def item_count(self, obj):
+        count = getattr(obj, "admin_item_count", None)
+        return count if count is not None else obj.items.filter(is_active=True).count()
+
+    @admin.display(description=_("Subscription URL"))
+    def subscription_url(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        return format_html('<code dir="ltr">{}</code>', build_subscription_cup_url(obj))
+
+    @admin.display(description=_("Masked URL"))
+    def masked_subscription_url(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        url = build_subscription_cup_url(obj)
+        return format_html('<code dir="ltr">{}</code>', mask_subscription_url(url, obj.token))
+
+    @admin.display(description=_("Safe metadata summary"))
+    def metadata_safe_summary(self, obj):
+        metadata = obj.metadata or {}
+        rows = [
+            ("external_panel_subscription_link_saved", metadata.get("external_panel_subscription_link_saved")),
+            ("last_rebuilt_at", metadata.get("last_rebuilt_at")),
+        ]
+        rows = [(key, value) for key, value in rows if value not in (None, "", False)]
+        if not rows:
+            return "-"
+        return format_html_join("", "<div><strong>{}</strong>: {}</div>", rows)
+
+
+@admin.register(CupItem)
+class CupItemAdmin(ImportExportModelAdmin):
+    list_display = (
+        "id",
+        "cup",
+        "position",
+        "config_link_protocol",
+        "masked_config_link",
+        "is_active",
+        "added_reason",
+        "created_at",
+    )
+    list_filter = ("is_active", "config_link__protocol", "added_reason", "created_at")
+    search_fields = (
+        "cup__token",
+        "cup__title",
+        "config_link__normalized_hash",
+        "config_link__remark",
+        "config_link__host",
+    )
+    autocomplete_fields = ("cup", "config_link")
+    readonly_fields = ("config_link_protocol", "masked_config_link", "created_at", "updated_at")
+    list_select_related = ("cup", "config_link")
+
+    @admin.display(description=_("Protocol"), ordering="config_link__protocol")
+    def config_link_protocol(self, obj):
+        return getattr(getattr(obj, "config_link", None), "protocol", "") or "-"
+
+    @admin.display(description=_("Config"))
+    def masked_config_link(self, obj):
+        config_link = getattr(obj, "config_link", None)
+        if not config_link:
+            return "-"
+        suffix = (config_link.normalized_hash or "")[-8:] or str(config_link.pk or "-")
+        return _("Config link saved (hidden), hash ending %(suffix)s") % {"suffix": suffix}
 
 
 @admin.register(VPNClientActionLog)

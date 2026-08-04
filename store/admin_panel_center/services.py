@@ -158,7 +158,7 @@ def build_test_connection_result(panel):
     )
 
 
-def sync_panel_inbounds(panel):
+def sync_panel_inbounds(panel, *, create_missing=True, available_for_new_orders=True, active_only=True):
     adapter = get_safe_panel_adapter(panel)
     if getattr(adapter, "family", "") != Panel.Family.XUI:
         report = adapter.get_capability_report()
@@ -170,8 +170,22 @@ def sync_panel_inbounds(panel):
     try:
         profile = discover_xui_capabilities(panel, live=True, service=service, write=True, use_cache=False)
         remote_inbounds, remote_nodes = command.fetch_topology(service, panel)
+        if active_only:
+            remote_inbounds = [item for item in remote_inbounds if item.get("active") is not False]
         planned = command.plan_updates(panel, remote_inbounds)
         updated = command.apply_updates(planned)
+        created = 0
+        if create_missing:
+            created = command.create_missing_inbounds(
+                panel,
+                planned,
+                available_for_new_orders=available_for_new_orders,
+                active_only=active_only,
+            )
+            if created:
+                planned = command.plan_updates(panel, remote_inbounds)
+        panel.last_sync_at = timezone.now()
+        panel.save(update_fields=["last_sync_at", "updated_at"])
     except Exception as exc:
         safe_error = sanitize_xui_operational_text(exc, panel=panel)
         return PanelActionResult(False, "همگام‌سازی ناموفق بود", safe_error, errors=[safe_error])
@@ -192,7 +206,7 @@ def sync_panel_inbounds(panel):
             "version": profile.version or "-",
             "remote_inbounds": len(remote_inbounds),
             "remote_nodes": len(remote_nodes),
-            "created": 0,
+            "created": created,
             "updated": updated,
             "skipped": len(skipped),
             "unsupported_protocols": unsupported_protocols,

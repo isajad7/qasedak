@@ -41,28 +41,15 @@
             <button type="submit" name="action" value="test" class="tw-button tw-button-secondary">تست ساخت آزمایشی</button>
             <button type="submit" name="action" value="save" class="tw-button tw-button-primary">ذخیره مسیر</button>
         </div>
-    </form>
-</section>
-
-<section class="tw-section">
-    <form method="post" class="tw-admin-card tw-border-rose-200 tw-bg-rose-50/40 tw-space-y-3">
-        {% csrf_token %}
-        {% for field in form %}
-            {% if field.name == "inbounds" %}
-                {% for value in field.value %}
-                    <input type="hidden" name="{{ field.name }}" value="{{ value }}">
-                {% endfor %}
-            {% else %}
-                <input type="hidden" name="{{ field.name }}" value="{{ field.value|default:'' }}">
-            {% endif %}
-        {% endfor %}
-        <div class="tw-section-heading">
+        <div class="tw-mt-5 tw-rounded-xl tw-border tw-border-rose-200 tw-bg-rose-50/70 tw-p-4 tw-space-y-3">
+            <div class="tw-section-heading">
             <h2>تست ساخت واقعی کانفیگ</h2>
+            </div>
+            <p class="tw-m-0 tw-text-sm tw-leading-7 tw-text-slate-700">
+                یک کانفیگ تستی روی پنل و اینباندهای انتخاب‌شده ساخته می‌شود، بررسی می‌شود، سپس حذف می‌شود.
+            </p>
+            <button type="submit" name="action" value="live_test" class="tw-button tw-button-danger">اجرای تست واقعی و پاکسازی</button>
         </div>
-        <p class="tw-m-0 tw-text-sm tw-leading-7 tw-text-slate-700">
-            یک کانفیگ تستی روی پنل ساخته می‌شود، بررسی می‌شود، سپس حذف می‌شود.
-        </p>
-        <button type="submit" name="action" value="live_test" class="tw-button tw-button-danger">اجرای تست واقعی و پاکسازی</button>
     </form>
 </section>
 

@@ -9,7 +9,7 @@ from django.core.exceptions import SuspiciousFileOperation, ValidationError
 from django.core.signing import BadSignature
 from django.db import models, transaction
 from django.db.models import F
-from django.http import Http404, JsonResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -23,6 +23,7 @@ from .models import (
     Store,
     SupportConversation,
     SupportMessage,
+    SubscriptionCup,
     VPNClient,
     parse_payment_time,
 )
@@ -63,6 +64,7 @@ from .referral_services import (
     redeem_referral_rewards,
 )
 from .setup_readiness import SETUP_NOT_READY_MESSAGE, store_is_sellable
+from .subscription_cups import render_subscription_cup
 from .telegram_link_services import (
     generate_web_telegram_link,
     get_customer_telegram_link_status,
@@ -79,6 +81,25 @@ ORDER_TRACKING_RECOVERY_WINDOW = timedelta(minutes=15)
 SUPPORT_MESSAGE_MAX_LENGTH = 2000
 SUPPORT_CONTACT_MAX_LENGTH = 120
 logger = logging.getLogger(__name__)
+
+
+@require_GET
+def subscription_cup(request, token):
+    cup = get_object_or_404(SubscriptionCup, token=token)
+    if not cup.is_accessible:
+        return HttpResponse(
+            "Subscription is not active.\n",
+            status=403,
+            content_type="text/plain; charset=utf-8",
+        )
+
+    output_format = str(request.GET.get("format") or "base64").strip().lower()
+    if output_format not in {"base64", "raw"}:
+        output_format = "base64"
+    return HttpResponse(
+        render_subscription_cup(cup, output_format=output_format),
+        content_type="text/plain; charset=utf-8",
+    )
 
 
 def get_current_store():

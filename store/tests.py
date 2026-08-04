@@ -47,6 +47,8 @@ from .models import (
     BotUser,
     BroadcastMessage,
     BroadcastRecipient,
+    ConfigLink,
+    CupItem,
     Customer,
     DailyAdminReportLog,
     DiscountCode,
@@ -74,6 +76,7 @@ from .models import (
     Store,
     SupportConversation,
     SupportMessage,
+    SubscriptionCup,
     VPNClient,
     VPNClientActionLog,
     VPNClientReminderLog,
@@ -172,6 +175,267 @@ def image_bytes(image_format="PNG"):
     output = BytesIO()
     Image.new("RGB", (1, 1), color="white").save(output, format=image_format)
     return output.getvalue()
+
+
+class SubscriptionCupMVPTests(TestCase):
+    def setUp(self):
+        self.store = Store.objects.create(
+            name="VPN Store",
+            english_name="VPN Store",
+            domain="vpn.example.com",
+            card_number="0000000000000000",
+            card_owner="VPN Store",
+        )
+        self.customer = Customer.objects.create(username="alice", display_name="Alice")
+        self.plan = Plan.objects.create(
+            store=self.store,
+            name="Basic",
+            volume_gb=Decimal("10"),
+            duration_days=30,
+            price=100,
+            device_limit=2,
+        )
+        self.panel = Panel.objects.create(
+            store=self.store,
+            name="Panel",
+            url="https://panel.example.com",
+            username="admin",
+            password="panel-secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.MODERN_SINGLE_NODE,
+        )
+        self.inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=1,
+            remark="Primary",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="vpn.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+        )
+        self.order = Order.objects.create(
+            store=self.store,
+            customer=self.customer,
+            plan=self.plan,
+            inbound=self.inbound,
+            status=Order.Status.COMPLETED,
+            verification_status=Order.VerificationStatus.VERIFIED,
+            is_paid=True,
+            username="alice",
+            sub_link="https://panel.example.com/sub/panel-sub-token",
+            direct_link=self.direct_link(1),
+        )
+        self.vpn_client = self.create_vpn_client(order=self.order, direct_link=self.order.direct_link)
+
+    def direct_link(self, index, protocol="vless", host=None):
+        host = host or f"node-{index}.example.com"
+        return f"{protocol}://aaaaaaaa-aaaa-4aaa-8aaa-{index:012d}@{host}:443#Client-{index}"
+
+    def create_vpn_client(self, *, order=None, direct_link=None, xui_raw=None, status=VPNClient.Status.ACTIVE):
+        index = VPNClient.objects.count() + 1
+        order = order or self.order
+        return VPNClient.objects.create(
+            store=self.store,
+            order=order,
+            plan=self.plan,
+            inbound=self.inbound,
+            username=f"client-{index}",
+            xui_email=f"client-{index}",
+            uuid=f"aaaaaaaa-aaaa-4aaa-8aaa-{index:012d}",
+            sub_id=f"sub-{index}",
+            sub_link=f"https://panel.example.com/sub/panel-sub-token-{index}",
+            direct_link=direct_link or self.direct_link(index),
+            status=status,
+            traffic_limit_bytes=self.plan.traffic_limit_bytes,
+            duration_days=self.plan.duration_days,
+            device_limit=self.plan.device_limit,
+            activated_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(days=30),
+            xui_raw=xui_raw or {},
+        )
+
+    def create_cup_with_links(self, *links, status=SubscriptionCup.Status.ACTIVE, expires_at=None):
+        from .subscription_cups import create_config_link_from_raw
+
+        cup = SubscriptionCup.objects.create(
+            customer=self.customer,
+            order=self.order,
+            plan=self.plan,
+            vpn_client=self.vpn_client,
+            status=status,
+            expires_at=expires_at,
+        )
+        for position, raw_link in enumerate(links, start=1):
+            config_link = create_config_link_from_raw(
+                raw_link,
+                source_type=ConfigLink.SourceType.MANUAL,
+                source_panel=self.panel,
+                source_inbound=self.inbound,
+                vpn_client=self.vpn_client,
+            )
+            CupItem.objects.create(cup=cup, config_link=config_link, position=position)
+        return cup
+
+    def test_config_link_parser_detects_supported_protocols_and_unknown(self):
+        from .subscription_cups import parse_config_link
+
+        vmess_payload = base64.b64encode(
+            json.dumps({"ps": "VMess", "add": "vmess.example.com", "port": "443"}).encode("utf-8")
+        ).decode("ascii")
+        cases = {
+            "vless": "vless://aaaaaaaa-aaaa-4aaa-8aaa-000000000001@vless.example.com:443#VLESS",
+            "vmess": f"vmess://{vmess_payload}",
+            "trojan": "trojan://password@trojan.example.com:443#Trojan",
+            "ss": "ss://method:password@ss.example.com:8388#SS",
+        }
+
+        for protocol, raw_link in cases.items():
+            with self.subTest(protocol=protocol):
+                parsed = parse_config_link(raw_link)
+                self.assertEqual(parsed.protocol, protocol)
+                self.assertTrue(parsed.normalized_hash)
+
+        parsed = parse_config_link("not-a-config-link")
+        self.assertEqual(parsed.protocol, ConfigLink.Protocol.UNKNOWN)
+        self.assertEqual(parsed.raw_link, "not-a-config-link")
+
+    def test_cup_token_is_generated_and_duplicate_config_links_are_allowed(self):
+        from .subscription_cups import create_config_link_from_raw
+
+        cup = SubscriptionCup.objects.create(customer=self.customer, order=self.order)
+        raw_link = self.direct_link(7)
+        first = create_config_link_from_raw(raw_link)
+        second = create_config_link_from_raw(raw_link)
+        CupItem.objects.create(cup=cup, config_link=first, position=1)
+        CupItem.objects.create(cup=cup, config_link=second, position=2)
+
+        self.assertTrue(cup.token)
+        self.assertEqual(ConfigLink.objects.filter(raw_link=raw_link).count(), 2)
+        self.assertEqual(cup.items.count(), 2)
+
+    def test_subscription_endpoint_returns_base64_by_default_and_raw_when_requested(self):
+        links = [self.direct_link(11), "trojan://password@trojan.example.com:443#Trojan"]
+        cup = self.create_cup_with_links(*links)
+
+        response = self.client.get(reverse("subscription_cup", args=[cup.token]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response["Content-Type"].startswith("text/plain"))
+        decoded = base64.b64decode(response.content).decode("utf-8")
+        self.assertEqual(decoded, "\n".join(links))
+
+        raw_response = self.client.get(reverse("subscription_cup", args=[cup.token]), {"format": "raw"})
+        self.assertEqual(raw_response.status_code, 200)
+        self.assertEqual(raw_response.content.decode("utf-8"), "\n".join(links))
+
+    def test_subscription_endpoint_blocks_invalid_disabled_and_expired_cups(self):
+        disabled = self.create_cup_with_links(self.direct_link(12), status=SubscriptionCup.Status.DISABLED)
+        expired = self.create_cup_with_links(
+            self.direct_link(13),
+            expires_at=timezone.now() - timedelta(seconds=1),
+        )
+
+        self.assertEqual(self.client.get("/sub/missing-token").status_code, 404)
+        self.assertEqual(self.client.get(reverse("subscription_cup", args=[disabled.token])).status_code, 403)
+        self.assertEqual(self.client.get(reverse("subscription_cup", args=[expired.token])).status_code, 403)
+
+    def test_subscription_endpoint_requires_no_login_and_does_not_log_links(self):
+        secret_link = self.direct_link(14, host="secret.example.com")
+        cup = self.create_cup_with_links(secret_link)
+        self.client.logout()
+
+        with self.assertNoLogs("store.views", level="INFO"):
+            response = self.client.get(reverse("subscription_cup", args=[cup.token]), {"format": "raw"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content.decode("utf-8"), secret_link)
+
+    def test_completed_vpn_client_order_can_rebuild_subscription_cup(self):
+        from .subscription_cups import rebuild_subscription_cup_for_vpn_client, rebuild_subscription_cups_for_order
+
+        cup = rebuild_subscription_cup_for_vpn_client(self.vpn_client, force_active=True)
+        order_cups = rebuild_subscription_cups_for_order(self.order, force_active=True)
+
+        self.assertEqual(order_cups[0].pk, cup.pk)
+        self.assertEqual(cup.customer, self.customer)
+        self.assertEqual(cup.order, self.order)
+        self.assertEqual(cup.plan, self.plan)
+        self.assertEqual(cup.vpn_client, self.vpn_client)
+        self.assertEqual(cup.items.filter(is_active=True).count(), 1)
+        self.assertEqual(cup.items.get().config_link.raw_link, self.order.direct_link)
+
+    def test_multi_inbound_direct_links_produce_multiple_cup_items(self):
+        from .subscription_cups import rebuild_subscription_cup_for_vpn_client
+
+        second_inbound = Inbound.objects.create(
+            panel=self.panel,
+            inbound_id=2,
+            remark="Secondary",
+            protocol=Inbound.Protocol.TROJAN,
+            server_ip="vpn-b.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+        )
+        links = [
+            self.direct_link(21, host="alpha.example.com"),
+            "trojan://password@beta.example.com:443#Beta",
+        ]
+        vpn_client = self.create_vpn_client(
+            direct_link=links[0],
+            xui_raw={
+                "bundle_inbound_pks": [self.inbound.pk, second_inbound.pk],
+                "bundle_inbound_results": [
+                    {"direct_link": links[0]},
+                    {"direct_link": links[1]},
+                ],
+            },
+        )
+
+        cup = rebuild_subscription_cup_for_vpn_client(vpn_client, force_active=True)
+        item_links = list(
+            cup.items.filter(is_active=True)
+            .select_related("config_link")
+            .order_by("position")
+            .values_list("config_link__raw_link", flat=True)
+        )
+
+        self.assertEqual(item_links, links)
+
+    def test_order_delivery_groups_include_project_subscription_link_when_cup_exists(self):
+        from .subscription_cups import rebuild_subscription_cup_for_vpn_client
+        from .telegram_bot.order_delivery import order_config_link_groups
+
+        cup = rebuild_subscription_cup_for_vpn_client(self.vpn_client, force_active=True)
+
+        groups = order_config_link_groups(self.order)
+
+        self.assertEqual(groups[0]["subscription_link"], self.vpn_client.sub_link)
+        self.assertEqual(groups[0]["direct_link"], self.vpn_client.direct_link)
+        self.assertEqual(groups[0]["project_subscription_link"], f"https://vpn.example.com/sub/{cup.token}")
+
+    def test_rebuild_management_command_prints_safe_summary_only(self):
+        output = StringIO()
+
+        call_command(
+            "rebuild_subscription_cup",
+            "--vpn-client-id",
+            str(self.vpn_client.pk),
+            "--base-url",
+            "https://vpn.example.com",
+            stdout=output,
+        )
+
+        cup = SubscriptionCup.objects.get(vpn_client=self.vpn_client)
+        summary = output.getvalue()
+        self.assertIn(f"cup id={cup.pk}", summary)
+        self.assertIn("item_count=1", summary)
+        self.assertIn("protocols=vless", summary)
+        self.assertIn("https://vpn.example.com/sub/", summary)
+        self.assertNotIn(cup.token, summary)
+        self.assertNotIn("vless://", summary)
+        self.assertNotIn(self.vpn_client.direct_link, summary)
 
 
 class TelegramProxyTests(TestCase):
@@ -7212,6 +7476,73 @@ class AdminPanelCenterTests(TestCase):
         self.assertNotContains(response, "panel-secret")
         self.assertNotContains(response, "proxy-secret")
 
+    def test_new_xui_panel_auto_syncs_active_remote_inbounds(self):
+        self.login_admin()
+        remote_inbounds = [
+            {
+                "id": 31,
+                "remark": "Remote Alpha",
+                "protocol": "vless",
+                "port": 443,
+                "enable": True,
+                "nodeId": "node-alpha",
+                "shareAddr": "alpha.example.com",
+            },
+            {
+                "id": 32,
+                "remark": "Disabled Beta",
+                "protocol": "vless",
+                "port": 8443,
+                "enable": False,
+                "nodeId": "node-beta",
+            },
+        ]
+
+        def fake_authenticated_json(_method, path, **_kwargs):
+            if path == "/panel/api/server/getPanelUpdateInfo":
+                return {"success": True, "obj": {"currentVersion": "3.4.0"}}
+            if path == "/panel/api/server/status":
+                return {"success": True, "obj": {}}
+            if path == "/panel/api/inbounds/list":
+                return {"success": True, "obj": remote_inbounds}
+            if path == "/panel/api/nodes/list":
+                return {
+                    "success": True,
+                    "obj": [{"guid": "node-alpha", "name": "Node Alpha"}, {"guid": "node-beta", "name": "Node Beta"}],
+                }
+            if path == "/panel/api/hosts/list":
+                return {"success": True, "obj": []}
+            return {"success": True, "obj": {}}
+
+        fake_service = SimpleNamespace(login=Mock(return_value=True), authenticated_json=Mock(side_effect=fake_authenticated_json))
+        with patch("store.admin_panel_center.services.XUIService", return_value=fake_service):
+            response = self.client.post(
+                reverse("admin_store_panel_center_new"),
+                {
+                    "name": "Auto synced panel",
+                    "family": Panel.Family.XUI,
+                    "url": "https://panel-auto.example.com/admin",
+                    "username": "admin",
+                    "password": "panel-secret",
+                    "proxy_url": "",
+                    "is_active": "on",
+                },
+                follow=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        panel = Panel.objects.get(name="Auto synced panel")
+        self.assertEqual(panel.capability_profile, Panel.CapabilityProfile.MODERN_MULTI_NODE)
+        self.assertIsNotNone(panel.last_sync_at)
+        inbound = Inbound.objects.get(panel=panel, inbound_id=31)
+        self.assertEqual(inbound.remark, "Remote Alpha")
+        self.assertEqual(inbound.xui_node_id, "node-alpha")
+        self.assertTrue(inbound.is_active)
+        self.assertTrue(inbound.available_for_new_orders)
+        self.assertFalse(Inbound.objects.filter(panel=panel, inbound_id=32).exists())
+        self.assertContains(response, "Remote Alpha")
+        self.assertContains(response, "جدید: 1")
+
     def test_capability_report_uses_adapter_factory(self):
         from .panels.capabilities import CapabilityFlag, CapabilityProfile, PanelCapabilityReport
 
@@ -7402,6 +7733,7 @@ class AdminPlanRoutingBuilderTests(TestCase):
         self.assertEqual(detail.status_code, 200)
         self.assertContains(detail, "Route فعلی")
         self.assertContains(detail, "Alpha")
+        self.assertContains(detail, '<form method="post"', count=1)
 
     def test_routing_requires_staff_login(self):
         response = self.client.get(reverse("admin_store_panel_center_routing"))
@@ -7460,6 +7792,24 @@ class AdminPlanRoutingBuilderTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "At least two inbounds")
+
+    def test_panel_is_inferred_from_selected_inbounds_when_panel_field_is_blank(self):
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]),
+            self.routing_payload(
+                mode="multi",
+                panel=False,
+                inbound=False,
+                inbounds=[self.inbound, self.second_inbound],
+                action="preview",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "multi inboundIds create")
+        self.assertNotContains(response, "Panel is required")
 
     def test_multi_mode_rejects_mixed_panels_and_unsupported_profile(self):
         other_panel = Panel.objects.create(

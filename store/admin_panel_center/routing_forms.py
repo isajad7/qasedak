@@ -70,3 +70,20 @@ class PlanRoutingForm(forms.Form):
         if not raw_panel_id:
             return None
         return Panel.objects.filter(pk=raw_panel_id).first()
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if cleaned_data.get("panel"):
+            return cleaned_data
+
+        mode = cleaned_data.get("delivery_mode")
+        candidates = []
+        if mode == ROUTE_MODE_SINGLE and cleaned_data.get("inbound"):
+            candidates = [cleaned_data["inbound"]]
+        elif mode == ROUTE_MODE_MULTI:
+            candidates = list(cleaned_data.get("inbounds") or [])
+
+        panel_ids = {item.panel_id for item in candidates if item and item.panel_id}
+        if len(panel_ids) == 1:
+            cleaned_data["panel"] = candidates[0].panel
+        return cleaned_data

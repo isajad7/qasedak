@@ -195,7 +195,7 @@ class Command(BaseCommand):
             applied += 1
         return applied
 
-    def create_missing_inbounds(self, panel, planned, *, available_for_new_orders=False):
+    def create_missing_inbounds(self, panel, planned, *, available_for_new_orders=False, active_only=False):
         created = 0
         parsed = urlparse(panel.url)
         fallback_host = parsed.hostname or parsed.netloc or ""
@@ -203,15 +203,20 @@ class Command(BaseCommand):
             if item.get("reason") != "local inbound missing":
                 continue
             remote_data = item.get("remote") or {}
+            if active_only and remote_data.get("active") is False:
+                continue
             raw = item.get("raw") or {}
             inbound_id = str(remote_data.get("inbound_external_id") or "").strip()
             if not inbound_id.isdigit():
                 continue
             node_id = str(remote_data.get("node_external_id") or "").strip()
+            protocol = (
+                str(remote_data.get("protocol") or raw.get("protocol") or Inbound.Protocol.VLESS).lower()
+                or Inbound.Protocol.VLESS
+            )
             defaults = {
                 "remark": str(remote_data.get("remark") or raw.get("remark") or f"Remote inbound {inbound_id}")[:150],
-                "protocol": str(remote_data.get("protocol") or raw.get("protocol") or Inbound.Protocol.VLESS).lower()
-                or Inbound.Protocol.VLESS,
+                "protocol": protocol,
                 "server_ip": str(
                     remote_data.get("managed_share_address")
                     or raw.get("shareAddr")
@@ -222,7 +227,9 @@ class Command(BaseCommand):
                 "port": str(raw.get("port") or "")[:10],
                 "config_params": "type=tcp&security=none",
                 "is_active": remote_data.get("active") is not False,
-                "available_for_new_orders": bool(available_for_new_orders),
+                "available_for_new_orders": bool(
+                    available_for_new_orders and protocol in {Inbound.Protocol.VLESS, Inbound.Protocol.VMESS, Inbound.Protocol.TROJAN}
+                ),
                 "health_monitor_enabled": True,
                 "xui_node_id": node_id,
                 "xui_node_name": str(remote_data.get("node_name") or "")[:150],
