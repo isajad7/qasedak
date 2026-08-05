@@ -8,53 +8,63 @@
         <div>
             {% include "admin/store/panel_center/_badge.html" with tone="amber" label="Quick Subscription Builder" icon="fas fa-wand-magic-sparkles" %}
             <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">ساخت سریع لینک اشتراک</h1>
-            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">Inboundها را از یک یا چند Panel انتخاب کن تا همه لینک‌های ساخته‌شده داخل یک Cup و یک لینک /sub قرار بگیرند.</p>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">از پنل‌ها Inbound انتخاب کن، از استخرها کانفیگ آماده بردار، یا هر دو را با هم داخل یک Cup و یک لینک /sub بساز.</p>
         </div>
         <a href="{{ cup_center_url }}" class="tw-button tw-button-secondary">بازگشت به Cup Center</a>
     </div>
 </section>
 
 <section class="tw-section">
-    <div class="cup-warning">این عملیات روی هر پنل انتخاب‌شده کانفیگ واقعی می‌سازد و همه لینک‌ها را داخل یک Cup قرار می‌دهد.</div>
+    <div class="cup-warning">اگر Inbound انتخاب شود روی پنل کانفیگ واقعی ساخته می‌شود. اگر فقط استخر انتخاب شود، لینک آماده طبق قانون همان استخر تخصیص می‌گیرد.</div>
 </section>
 
 <section class="tw-section">
-    <form method="post" class="tw-admin-card tw-space-y-3" novalidate id="quick-build-form">
+    <form method="post" class="tw-space-y-4" novalidate id="quick-build-form">
         {% csrf_token %}
         {{ form.non_field_errors }}
-        <div class="cup-form-grid">
+        {% if structured_errors %}
+            <div class="tw-space-y-3">
+                {% for error in structured_errors %}
+                    {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در ساخت کانفیگ" %}
+                {% endfor %}
+            </div>
+        {% endif %}
+
+        <section class="tw-admin-card tw-space-y-3">
+            <div class="tw-section-heading"><h2>۱. مشخصات Cup</h2></div>
+            <div class="cup-form-grid">
+                <div class="cup-form-field">
+                    {{ form.title.errors }}
+                    {{ form.title.label_tag }}
+                    {{ form.title }}
+                </div>
+                <div class="cup-form-field">
+                    {{ form.volume_gb.errors }}
+                    {{ form.volume_gb.label_tag }}
+                    {{ form.volume_gb }}
+                </div>
+                <div class="cup-form-field">
+                    {{ form.duration_days.errors }}
+                    {{ form.duration_days.label_tag }}
+                    {{ form.duration_days }}
+                </div>
+                <div class="cup-form-field">
+                    {{ form.device_limit.errors }}
+                    {{ form.device_limit.label_tag }}
+                    {{ form.device_limit }}
+                </div>
+                <div class="cup-form-field cup-form-wide">
+                    {{ form.remark_prefix.errors }}
+                    {{ form.remark_prefix.label_tag }}
+                    {{ form.remark_prefix }}
+                </div>
+            </div>
+        </section>
+
+        <section class="tw-space-y-3">
+            <div class="tw-section-heading"><h2>۲. منابع پنل</h2></div>
             <div class="cup-form-field">
-                {{ form.title.errors }}
-                {{ form.title.label_tag }}
-                {{ form.title }}
-            </div>
-            <div class="cup-form-field">
-                {{ form.volume_gb.errors }}
-                {{ form.volume_gb.label_tag }}
-                {{ form.volume_gb }}
-            </div>
-            <div class="cup-form-field">
-                {{ form.duration_days.errors }}
-                {{ form.duration_days.label_tag }}
-                {{ form.duration_days }}
-            </div>
-            <div class="cup-form-field">
-                {{ form.device_limit.errors }}
-                {{ form.device_limit.label_tag }}
-                {{ form.device_limit }}
-            </div>
-            <div class="cup-form-field">
-                {{ form.remark_prefix.errors }}
-                {{ form.remark_prefix.label_tag }}
-                {{ form.remark_prefix }}
-            </div>
-            <div class="cup-form-field cup-form-wide">
-                {{ form.confirm_remote_create.errors }}
-                <label>{{ form.confirm_remote_create }} {{ form.confirm_remote_create.label }}</label>
-            </div>
-            <div class="cup-form-field cup-form-wide">
                 {{ form.inbounds.errors }}
-                <label>{{ form.inbounds.label }}</label>
                 <div class="tw-grid tw-gap-4" id="quick-build-panel-groups">
                     {% for group in panel_groups %}
                         <section class="tw-admin-card tw-space-y-3">
@@ -107,11 +117,66 @@
                 </div>
                 <span class="cup-help">برای چند inbound روی یک Panel، همان Panel باید قابلیت modern multi-node داشته باشد. انتخاب inbound از چند Panel به صورت گروه‌های جدا ساخته و داخل یک Cup جمع می‌شود.</span>
             </div>
-        </div>
-        <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row">
-            <button type="submit" class="tw-button tw-button-primary">ساخت لینک اشتراک</button>
-            <a href="{{ cancel_url }}" class="tw-button tw-button-secondary">انصراف</a>
-        </div>
+        </section>
+
+        <section class="tw-admin-card tw-space-y-3">
+            <div class="tw-section-heading"><h2>۳. منابع استخر کانفیگ</h2></div>
+            <div class="cup-form-grid">
+                <div class="cup-form-field">
+                    {{ form.inventory_quantity.errors }}
+                    {{ form.inventory_quantity.label_tag }}
+                    {{ form.inventory_quantity }}
+                    <span class="cup-help">این تعداد از هر استخر انتخاب‌شده برداشته می‌شود.</span>
+                </div>
+                <div class="cup-form-field">
+                    {{ form.inventory_pools.errors }}
+                    <label>{{ form.inventory_pools.label }}</label>
+                    <span class="cup-help">{{ form.inventory_pools.help_text }}</span>
+                </div>
+            </div>
+            <div class="tw-table-wrap">
+                <table class="tw-catalog-table">
+                    <thead>
+                        <tr>
+                            <th>انتخاب</th>
+                            <th>استخر</th>
+                            <th>قانون</th>
+                            <th>موجودی</th>
+                            <th>دارایی‌ها</th>
+                            <th>پلن مرتبط</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in inventory_pool_rows %}
+                            <tr>
+                                <td>
+                                    <input type="checkbox" name="inventory_pools" value="{{ row.id }}" data-pool-id="{{ row.id }}"{% if row.id in selected_inventory_pool_ids %} checked{% endif %}>
+                                </td>
+                                <td>{{ row.title }}</td>
+                                <td>{{ row.allocation_mode_display }}</td>
+                                <td>{{ row.available_stock }}</td>
+                                <td>{{ row.usable_asset_count }} / {{ row.asset_count }}</td>
+                                <td>{{ row.connected_plan|default:"-" }}</td>
+                            </tr>
+                        {% empty %}
+                            <tr><td colspan="6"><div class="tw-empty-state">استخر فعال برای انتخاب وجود ندارد.</div></td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="tw-admin-card tw-space-y-3">
+            <div class="tw-section-heading"><h2>۴. تایید و ساخت</h2></div>
+            <div class="cup-form-field cup-form-wide">
+                {{ form.confirm_remote_create.errors }}
+                <label>{{ form.confirm_remote_create }} {{ form.confirm_remote_create.label }}</label>
+            </div>
+            <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row">
+                <button type="submit" class="tw-button tw-button-primary">ساخت لینک اشتراک</button>
+                <a href="{{ cancel_url }}" class="tw-button tw-button-secondary">انصراف</a>
+            </div>
+        </section>
     </form>
 </section>
 

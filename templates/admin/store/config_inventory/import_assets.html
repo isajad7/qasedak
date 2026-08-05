@@ -1,0 +1,70 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div id="content-main">
+  <p>
+    <a class="button" href="{{ dashboard_url }}">{% trans "انبار کانفیگ‌ها" %}</a>
+    <a class="button" href="{{ asset_list_url }}">{% trans "کانفیگ‌های آماده" %}</a>
+  </p>
+
+  <form method="post" novalidate style="display:grid;gap:14px;max-width:980px;">
+    {% csrf_token %}
+
+    <div class="module" style="padding:16px;">
+      <h2 style="margin-top:0;">{% trans "۱. انتخاب مخزن" %}</h2>
+      <div class="form-row">
+        {{ form.pool.errors }}
+        {{ form.pool.label_tag }}
+        {{ form.pool }}
+      </div>
+      <div class="form-row">
+        {{ form.source_batch.errors }}
+        {{ form.source_batch.label_tag }}
+        {{ form.source_batch }}
+      </div>
+    </div>
+
+    <div class="module" style="padding:16px;">
+      <h2 style="margin-top:0;">{% trans "۲. وارد کردن لینک‌ها" %}</h2>
+      <p>{% trans "هر خط یک لینک کانفیگ باشد. لینک‌های تکراری مجازند و به عنوان دارایی جداگانه وارد می‌شوند." %}</p>
+      <div class="form-row">
+        {{ form.raw_text.errors }}
+        {{ form.raw_text.label_tag }}
+        {{ form.raw_text }}
+      </div>
+    </div>
+
+    <div class="submit-row" style="margin:0;">
+      <input type="submit" class="default" value="{% trans 'وارد کردن لینک‌ها' %}">
+    </div>
+  </form>
+
+  {% if import_summary %}
+    <h2>{% trans "۳. خلاصه وارد کردن و قدم بعدی" %}</h2>
+    <table>
+      <tbody>
+        <tr><th>{% trans "Pool" %}</th><td>{{ result.pool }}</td></tr>
+        <tr><th>{% trans "total lines" %}</th><td>{{ import_summary.total_lines }}</td></tr>
+        <tr><th>{% trans "created" %}</th><td>{{ import_summary.created }}</td></tr>
+        <tr><th>{% trans "skipped" %}</th><td>{{ import_summary.skipped }}</td></tr>
+        <tr><th>{% trans "duplicates detected" %}</th><td>{{ import_summary.duplicates }}</td></tr>
+        <tr><th>{% trans "invalid" %}</th><td>{{ import_summary.invalid }}</td></tr>
+        <tr><th>{% trans "available stock count" %}</th><td>{{ import_summary.available_stock }}</td></tr>
+      </tbody>
+    </table>
+    <p>
+      <a class="button default" href="{{ quick_build_url }}?inventory_pool={{ import_summary.pool_id }}">{% trans "ساخت Cup سریع با این استخر" %}</a>
+      <a class="button" href="{{ asset_list_url }}?pool__id__exact={{ import_summary.pool_id }}">{% trans "مشاهده کانفیگ‌های این استخر" %}</a>
+    </p>
+    {% if result.warnings %}
+      <h3>{% trans "Warnings" %}</h3>
+      <ul>
+        {% for warning in result.warnings %}
+          <li>{{ warning }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}

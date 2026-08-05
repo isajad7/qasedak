@@ -5,7 +5,7 @@ from django import forms
 from django.db.models import Q
 from django.utils import timezone
 
-from store.models import ConfigLink, Inbound, Panel, SubscriptionCup
+from store.models import ConfigInventoryPool, ConfigLink, Inbound, Panel, SubscriptionCup
 
 
 SUPPORTED_INBOUND_PROTOCOLS = (
@@ -148,13 +148,27 @@ class QuickSubscriptionBuilderForm(CupCenterFormMixin, forms.Form):
         widget=forms.CheckboxSelectMultiple,
         required=False,
     )
+    inventory_pools = forms.ModelMultipleChoiceField(
+        label="استخرهای کانفیگ آماده",
+        queryset=ConfigInventoryPool.objects.none(),
+        widget=forms.CheckboxSelectMultiple,
+        required=False,
+        help_text="از هر استخر به تعداد مشخص‌شده لینک برداشته می‌شود و قانون allocation همان استخر رعایت می‌شود.",
+    )
+    inventory_quantity = forms.IntegerField(
+        label="تعداد از هر استخر",
+        min_value=1,
+        max_value=50,
+        required=False,
+        initial=1,
+    )
     volume_gb = forms.DecimalField(label="Volume GB", min_value=Decimal("0.001"), max_digits=8, decimal_places=3)
     duration_days = forms.IntegerField(label="Duration days", min_value=1, max_value=3650)
     device_limit = forms.IntegerField(label="Device limit", min_value=1, max_value=100)
     remark_prefix = forms.CharField(label="Remark / email prefix", max_length=80)
     confirm_remote_create = forms.BooleanField(
-        label="این عملیات کانفیگ واقعی روی پنل می‌سازد.",
-        required=True,
+        label="اگر Inbound انتخاب شود، این عملیات کانفیگ واقعی روی پنل می‌سازد.",
+        required=False,
     )
 
     def __init__(self, *args, **kwargs):
@@ -166,6 +180,7 @@ class QuickSubscriptionBuilderForm(CupCenterFormMixin, forms.Form):
             .all()
             .order_by("panel__name", "inbound_id", "pk")
         )
+        self.fields["inventory_pools"].queryset = ConfigInventoryPool.objects.filter(is_active=True).order_by("priority", "title", "pk")
         self.fields["volume_gb"].initial = Decimal("10")
         self.fields["duration_days"].initial = 30
         self.fields["device_limit"].initial = 2
@@ -182,6 +197,12 @@ class QuickSubscriptionBuilderForm(CupCenterFormMixin, forms.Form):
     def clean(self):
         cleaned = super().clean()
         inbounds = list(cleaned.get("inbounds") or [])
-        if not inbounds:
-            self.add_error("inbounds", "حداقل یک inbound انتخاب کنید.")
+        inventory_pools = list(cleaned.get("inventory_pools") or [])
+        if not inbounds and not inventory_pools:
+            self.add_error("inbounds", "حداقل یک Inbound یا یک استخر کانفیگ آماده انتخاب کنید.")
+            self.add_error("inventory_pools", "حداقل یک Inbound یا یک استخر کانفیگ آماده انتخاب کنید.")
+        if inbounds and not cleaned.get("confirm_remote_create"):
+            self.add_error("confirm_remote_create", "برای ساخت کانفیگ روی پنل، تایید این گزینه لازم است.")
+        if inventory_pools and not cleaned.get("inventory_quantity"):
+            cleaned["inventory_quantity"] = 1
         return cleaned

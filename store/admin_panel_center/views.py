@@ -14,6 +14,7 @@ from store.admin_panel_center.services import (
     panel_action_urls,
     panel_list_items,
     safe_capability_report,
+    structured_errors_for_capability_report,
     sync_panel_inbounds,
 )
 from store.models import Panel
@@ -29,6 +30,18 @@ def _base_context(request, title):
         "title": title,
         "site_title": "VPN Store Admin",
         "site_header": "VPN Store Administration",
+    }
+
+
+def _panel_result_payload(result):
+    return {
+        "ok": result.ok,
+        "title": result.title,
+        "message": result.message,
+        "details": result.details,
+        "warnings": result.warnings,
+        "errors": result.errors,
+        "structured_errors": getattr(result, "structured_errors", []) or [],
     }
 
 
@@ -57,24 +70,10 @@ def panel_center_form(request, panel_id=None):
                     created = int(result.details.get("created") or 0)
                     updated = int(result.details.get("updated") or 0)
                     messages.success(request, f"پنل ذخیره شد و اینباندها همگام شدند. جدید: {created}، به‌روزرسانی: {updated}.")
-                    request.session["panel_center_last_result"] = {
-                        "ok": result.ok,
-                        "title": result.title,
-                        "message": result.message,
-                        "details": result.details,
-                        "warnings": result.warnings,
-                        "errors": result.errors,
-                    }
+                    request.session["panel_center_last_result"] = _panel_result_payload(result)
                 else:
                     messages.warning(request, f"پنل ذخیره شد، اما دریافت اینباندها ناموفق بود: {result.message}")
-                    request.session["panel_center_last_result"] = {
-                        "ok": result.ok,
-                        "title": result.title,
-                        "message": result.message,
-                        "details": result.details,
-                        "warnings": result.warnings,
-                        "errors": result.errors,
-                    }
+                    request.session["panel_center_last_result"] = _panel_result_payload(result)
             else:
                 messages.success(request, "پنل ذخیره شد.")
             return redirect("admin_store_panel_center_detail", saved.pk)
@@ -103,6 +102,7 @@ def panel_center_detail(request, panel_id):
         "adapter_family": getattr(adapter, "family", report.family),
         "report": report,
         "report_dict": report_dict,
+        "report_structured_errors": structured_errors_for_capability_report(panel, report),
         "capability_items": capability_items(report),
         "inbound_rows": rows[:8],
         "inbound_count": len(rows),
@@ -121,6 +121,7 @@ def panel_center_capabilities(request, panel_id):
         "actions": panel_action_urls(panel),
         "report": report,
         "report_dict": report_dict,
+        "report_structured_errors": structured_errors_for_capability_report(panel, report),
         "capability_items": capability_items(report),
     }
     return TemplateResponse(request, "admin/store/panel_center/capability_report.html", context)
@@ -147,14 +148,7 @@ def panel_center_test(request, panel_id):
         messages.success(request, result.message)
     else:
         messages.warning(request, result.message)
-    request.session["panel_center_last_result"] = {
-        "ok": result.ok,
-        "title": result.title,
-        "message": result.message,
-        "details": result.details,
-        "warnings": result.warnings,
-        "errors": result.errors,
-    }
+    request.session["panel_center_last_result"] = _panel_result_payload(result)
     return redirect("admin_store_panel_center_detail", panel.pk)
 
 
@@ -167,12 +161,5 @@ def panel_center_sync(request, panel_id):
         messages.success(request, result.message)
     else:
         messages.warning(request, result.message)
-    request.session["panel_center_last_result"] = {
-        "ok": result.ok,
-        "title": result.title,
-        "message": result.message,
-        "details": result.details,
-        "warnings": result.warnings,
-        "errors": result.errors,
-    }
+    request.session["panel_center_last_result"] = _panel_result_payload(result)
     return redirect("admin_store_panel_center_detail", panel.pk)

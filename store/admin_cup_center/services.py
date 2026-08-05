@@ -7,11 +7,23 @@ from django.db.models import Count, Max, Prefetch, Q
 from django.utils import timezone
 
 from store.config_lookup import mask_identifier
-from store.models import ConfigLink, CupItem, Inbound, Panel, SubscriptionCup
+from store.config_inventory_services import ConfigInventoryError, allocate_assets_from_pool, get_pool_stock_summary
+from store.models import ConfigInventoryPool, ConfigLink, CupItem, Inbound, Panel, SubscriptionCup
+from store.panels.errors import (
+    CupBuildValidationError,
+    CupRemoteCreateFailedError,
+    PanelCapabilityMissingError,
+    PanelIntegrationError,
+    safe_error_dict,
+    sanitize_error_value,
+)
 from store.panels.factory import get_safe_panel_adapter
 from store.panels.xui.adapter import XUIProvisioningRequest
 from store.subscription_cups import (
+    build_subscription_cup_client_path,
+    build_subscription_cup_dashboard_path,
     build_subscription_cup_path,
+    build_subscription_cup_raw_path,
     build_subscription_cup_url,
     create_config_link_from_raw,
     cup_protocols,
@@ -25,7 +37,16 @@ from store.xui_api import sanitize_xui_operational_text
 
 
 class CupCenterError(Exception):
-    pass
+    def __init__(self, message="", *, structured_error=None):
+        if isinstance(structured_error, PanelIntegrationError):
+            self.structured_error = structured_error.to_safe_dict()
+            message = message or structured_error.message
+        elif isinstance(structured_error, dict):
+            self.structured_error = structured_error
+            message = message or structured_error.get("message") or ""
+        else:
+            self.structured_error = None
+        super().__init__(message)
 
 
 class CupCenterRemoteCreateError(CupCenterError):
@@ -78,6 +99,7 @@ class QuickPanelBuildResult:
     link_count: int = 0
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    structured_errors: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -88,15 +110,20 @@ class QuickBuildResult:
     selected_inbounds: list[dict]
     masked_subscription_url: str
     protocols: list[str]
+    selected_inventory_pools: list[dict] = field(default_factory=list)
     email_masked: str = ""
     status: str = "success"
     selected_panels_count: int = 0
     selected_inbounds_count: int = 0
+    selected_inventory_pools_count: int = 0
     created_remote_client_groups_count: int = 0
+    inventory_allocation_count: int = 0
     config_link_count: int = 0
     panel_results: list[dict] = field(default_factory=list)
+    inventory_results: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    structured_errors: list[dict] = field(default_factory=list)
 
     @property
     def item_count(self):
@@ -236,6 +263,27 @@ def quick_builder_panel_groups():
     return groups
 
 
+def _inventory_pool_summary(pool):
+    summary = get_pool_stock_summary(pool)
+    capacity = summary["available_capacity"]
+    return {
+        "id": pool.pk,
+        "title": pool.title,
+        "allocation_mode": summary["allocation_mode"],
+        "allocation_mode_display": pool.get_allocation_mode_display(),
+        "available_stock": "Unlimited" if capacity is None else capacity,
+        "asset_count": summary["asset_count"],
+        "usable_asset_count": summary["usable_asset_count"],
+        "connected_plan": str(pool.connected_plan) if pool.connected_plan_id else "",
+        "priority": pool.priority,
+    }
+
+
+def quick_builder_inventory_pool_rows():
+    pools = ConfigInventoryPool.objects.filter(is_active=True).select_related("connected_plan").order_by("priority", "title", "pk")
+    return [_inventory_pool_summary(pool) for pool in pools]
+
+
 def inbound_selection_rows():
     rows = []
     for group in quick_builder_panel_groups():
@@ -267,14 +315,33 @@ def mask_link_for_display(link_or_config):
 
 def subscription_url_summary(cup, *, request=None):
     url = build_subscription_cup_url(cup, request=request)
-    raw_url = f"{url}?format=raw"
+    path = build_subscription_cup_path(cup)
+    dashboard_path = build_subscription_cup_dashboard_path(cup)
+    client_path = build_subscription_cup_client_path(cup)
+    raw_path = build_subscription_cup_raw_path(cup)
+    if request:
+        dashboard_url = request.build_absolute_uri(dashboard_path)
+        client_url = request.build_absolute_uri(client_path)
+        raw_url = request.build_absolute_uri(raw_path)
+    else:
+        base_url = build_subscription_cup_url(cup)
+        base_prefix = base_url[: -len(path)] if path and base_url.endswith(path) else ""
+        dashboard_url = f"{base_prefix}{dashboard_path}" if base_prefix else dashboard_path
+        client_url = f"{base_prefix}{client_path}" if base_prefix else client_path
+        raw_url = f"{base_prefix}{raw_path}" if base_prefix else raw_path
     return {
         "url": url,
+        "dashboard_url": dashboard_url,
+        "client_url": client_url,
         "raw_url": raw_url,
         "masked_url": mask_subscription_url(url, cup.token),
+        "masked_dashboard_url": mask_subscription_url(dashboard_url, cup.token),
+        "masked_client_url": mask_subscription_url(client_url, cup.token),
         "masked_raw_url": mask_subscription_url(raw_url, cup.token),
-        "path": build_subscription_cup_path(cup),
-        "raw_path": f"{build_subscription_cup_path(cup)}?format=raw",
+        "path": path,
+        "dashboard_path": dashboard_path,
+        "client_path": client_path,
+        "raw_path": raw_path,
     }
 
 
@@ -411,7 +478,41 @@ def add_manual_links_to_cup(cup, raw_text):
 
 
 def _safe_panel_error(exc, panel=None):
-    return sanitize_xui_operational_text(exc, panel=panel, max_length=240) or "panel_operation_failed"
+    if isinstance(exc, PanelIntegrationError):
+        return exc.message
+    return sanitize_error_value(sanitize_xui_operational_text(exc, panel=panel, max_length=240) or "panel_operation_failed")
+
+
+def _cup_structured_error(
+    exc=None,
+    *,
+    error_code="cup_build_validation_failed",
+    layer="cup_builder",
+    action="build_subscription_cup",
+    message="خطا در ساخت کانفیگ",
+    technical_detail="",
+    remediation="انتخاب پنل و اینباند را بررسی کنید.",
+    panel=None,
+    inbound=None,
+    safe_context=None,
+):
+    if isinstance(exc, PanelIntegrationError):
+        return exc.to_safe_dict()
+    return CupBuildValidationError(
+        message,
+        error_code=error_code,
+        layer=layer,
+        action=action,
+        technical_detail=technical_detail or str(exc or ""),
+        remediation=remediation,
+        panel=panel,
+        inbound=inbound,
+        safe_context=safe_context or {},
+    ).to_safe_dict()
+
+
+def _raise_cup_error(error_class, message, *, structured_error):
+    raise error_class(message, structured_error=structured_error)
 
 
 def _redacted_panel_config_metadata(remote_result, *, panel, inbound):
@@ -430,26 +531,65 @@ def _redacted_panel_config_metadata(remote_result, *, panel, inbound):
     }
 
 
-def _report_create_error(report):
+def _report_create_error(report, *, panel=None, inbound=None, action="create_client", missing_capability="supports_create_client"):
     details = "; ".join(str(message).strip() for message in (getattr(report, "errors", ()) or getattr(report, "warnings", ())) if str(message).strip())
-    if details:
-        safe_details = sanitize_xui_operational_text(details, max_length=180)
-        return f"این پنل یا خانواده پنل برای ساخت client پشتیبانی نمی‌شود. {safe_details}".strip()
-    return "این پنل از ساخت client پشتیبانی نمی‌کند."
+    message = "این پنل هنوز برای ساخت کانفیگ قابل استفاده نیست."
+    if missing_capability == "supports_multi_inbound_create":
+        message = "پنل انتخاب‌شده قابلیت supports_multi_inbound_create ندارد."
+    elif getattr(report, "family", "") == Panel.Family.MARZBAN:
+        message = "پنل Marzban هنوز برای ساخت مستقیم کانفیگ در این بخش پیاده‌سازی نشده است."
+    error_code = "unsupported_panel_family" if not getattr(report, "supported", True) else "panel_capability_missing"
+    structured = PanelCapabilityMissingError(
+        message,
+        error_code=error_code,
+        action=action,
+        technical_detail=details or f"Missing capability: {missing_capability}",
+        remediation="از Panel Center گزینه Test connection / Sync capabilities را اجرا کنید، یا family پنل را روی X-UI تنظیم کنید.",
+        panel=panel,
+        panel_family=getattr(report, "family", "") or "",
+        capability_profile=getattr(report, "capability_profile", "") or "",
+        inbound=inbound,
+        safe_context={
+            "required_capability": missing_capability,
+            "supported": getattr(report, "supported", None),
+            "capability_profile": getattr(report, "capability_profile", "") or "",
+        },
+        warnings=list(getattr(report, "warnings", ()) or []),
+    )
+    return message, structured.to_safe_dict()
 
 
 def create_panel_config_into_cup(cup, panel, inbound, options, *, adapter=None):
     if not isinstance(panel, Panel) or not isinstance(inbound, Inbound):
-        raise CupCenterRemoteCreateError("Panel و Inbound معتبر نیستند.")
+        structured = _cup_structured_error(
+            error_code="inbound_validation_failed",
+            layer="inbound_validation",
+            action="create_client",
+            message="Panel و Inbound معتبر نیستند.",
+            remediation="یک پنل فعال و یک اینباند فعال همان پنل انتخاب کنید.",
+            panel=panel if isinstance(panel, Panel) else None,
+            inbound=inbound if isinstance(inbound, Inbound) else None,
+        )
+        _raise_cup_error(CupCenterRemoteCreateError, "Panel و Inbound معتبر نیستند.", structured_error=structured)
     if inbound.panel_id != panel.pk:
-        raise CupCenterRemoteCreateError("Inbound انتخاب‌شده به Panel انتخاب‌شده وصل نیست.")
+        structured = _cup_structured_error(
+            error_code="inbound_panel_mismatch",
+            layer="inbound_validation",
+            action="create_client",
+            message="Inbound انتخاب‌شده به Panel انتخاب‌شده وصل نیست.",
+            remediation="اینباندی را انتخاب کنید که متعلق به همین پنل باشد.",
+            panel=panel,
+            inbound=inbound,
+        )
+        _raise_cup_error(CupCenterRemoteCreateError, "Inbound انتخاب‌شده به Panel انتخاب‌شده وصل نیست.", structured_error=structured)
     adapter = adapter or get_safe_panel_adapter(panel)
     try:
         report = adapter.get_capability_report()
     except Exception:
         report = None
     if report is not None and not getattr(report, "supports_create_client", False):
-        raise CupCenterRemoteCreateError(_report_create_error(report))
+        message, structured = _report_create_error(report, panel=panel, inbound=inbound, action="create_client")
+        _raise_cup_error(CupCenterRemoteCreateError, message, structured_error=structured)
 
     request = XUIProvisioningRequest(
         email_prefix=str(options.get("email_prefix") or "").strip(),
@@ -461,11 +601,30 @@ def create_panel_config_into_cup(cup, panel, inbound, options, *, adapter=None):
     try:
         remote_result = adapter.create_enabled_client(request)
     except Exception as exc:
-        raise CupCenterRemoteCreateError(_safe_panel_error(exc, panel=panel)) from exc
+        structured = CupRemoteCreateFailedError(
+            "ساخت کانفیگ روی پنل برای Cup ناموفق بود.",
+            action="create_client",
+            technical_detail=str(exc or ""),
+            remediation="credentialها، قابلیت supports_create_client، ظرفیت اینباند و وضعیت پنل را بررسی کنید.",
+            panel=panel,
+            inbound=inbound,
+            safe_context={"panel_error": exc.to_safe_dict() if isinstance(exc, PanelIntegrationError) else ""},
+        ).to_safe_dict()
+        raise CupCenterRemoteCreateError(_safe_panel_error(exc, panel=panel), structured_error=structured) from exc
 
     direct_link = str((remote_result or {}).get("direct_link") or "").strip()
     if not direct_link:
-        raise CupCenterRemoteCreateError("پنل client را ساخت اما لینک مستقیم قابل ذخیره برنگرداند.")
+        structured = _cup_structured_error(
+            error_code="cup_remote_create_missing_link",
+            layer="subscription_render",
+            action="create_client",
+            message="پنل client را ساخت اما لینک مستقیم قابل ذخیره برنگرداند.",
+            remediation="خروجی پنل و تنظیمات host/subscription را بررسی کنید؛ در صورت نیاز لینک را از پنل بازیابی و manual اضافه کنید.",
+            panel=panel,
+            inbound=inbound,
+            safe_context={"remote_created": True, "direct_link_returned": False},
+        )
+        _raise_cup_error(CupCenterRemoteCreateError, "پنل client را ساخت اما لینک مستقیم قابل ذخیره برنگرداند.", structured_error=structured)
 
     try:
         with transaction.atomic():
@@ -489,9 +648,19 @@ def create_panel_config_into_cup(cup, panel, inbound, options, *, adapter=None):
                 },
             )
     except Exception as exc:
-        raise CupCenterRemoteSaveError(
-            "کانفیگ واقعی روی پنل ساخته شد، اما ذخیره local ناموفق بود. لینک را از پنل بازیابی و به صورت manual اضافه کنید."
-        ) from exc
+        message = "کانفیگ واقعی روی پنل ساخته شد، اما ذخیره local ناموفق بود. لینک را از پنل بازیابی و به صورت manual اضافه کنید."
+        structured = _cup_structured_error(
+            exc,
+            error_code="cup_local_save_failed",
+            layer="cup_builder",
+            action="save_config_link",
+            message=message,
+            remediation="لینک ساخته‌شده را از پنل بازیابی و به صورت manual داخل Cup اضافه کنید.",
+            panel=panel,
+            inbound=inbound,
+            safe_context={"remote_created": True},
+        )
+        raise CupCenterRemoteSaveError(message, structured_error=structured) from exc
 
     return PanelConfigResult(
         config_link=config_link,
@@ -513,40 +682,150 @@ def _group_quick_build_inbounds(inbounds):
 
 def _validate_quick_build_panel_group(panel, inbounds, report=None):
     if not isinstance(panel, Panel) or not getattr(panel, "is_active", False):
-        raise CupCenterValidationError("Panel فعال و معتبر انتخاب نشده است.")
+        structured = _cup_structured_error(
+            error_code="panel_required",
+            layer="cup_builder",
+            action="validate_quick_builder",
+            message="Panel فعال و معتبر انتخاب نشده است.",
+            remediation="یک پنل فعال انتخاب کنید.",
+            panel=panel if isinstance(panel, Panel) else None,
+        )
+        _raise_cup_error(CupCenterValidationError, "Panel فعال و معتبر انتخاب نشده است.", structured_error=structured)
     if not inbounds:
-        raise CupCenterValidationError("حداقل یک inbound انتخاب کنید.")
+        message = "هیچ اینباندی انتخاب نشده است. حداقل یک inbound انتخاب کنید."
+        structured = _cup_structured_error(
+            error_code="inbound_required",
+            layer="inbound_validation",
+            action="validate_quick_builder",
+            message=message,
+            remediation="حداقل یک اینباند فعال و قابل فروش انتخاب کنید.",
+            panel=panel,
+        )
+        _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
 
     seen_remote_ids = set()
     for inbound in inbounds:
         if not isinstance(inbound, Inbound):
-            raise CupCenterValidationError("Inbound انتخاب‌شده معتبر نیست.")
+            message = "Inbound انتخاب‌شده معتبر نیست."
+            structured = _cup_structured_error(
+                error_code="inbound_validation_failed",
+                layer="inbound_validation",
+                action="validate_quick_builder",
+                message=message,
+                remediation="فقط اینباندهای معتبر موجود در لیست Quick Builder را انتخاب کنید.",
+                panel=panel,
+            )
+            _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
         if inbound.panel_id != panel.pk:
-            raise CupCenterValidationError("Inbound انتخاب‌شده به Panel خودش وصل نیست.")
+            message = "Inbound انتخاب‌شده به Panel خودش وصل نیست."
+            structured = _cup_structured_error(
+                error_code="inbound_panel_mismatch",
+                layer="inbound_validation",
+                action="validate_quick_builder",
+                message=message,
+                remediation="اینباندهای هر گروه باید متعلق به همان پنل باشند.",
+                panel=panel,
+                inbound=inbound,
+            )
+            _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
         if not inbound.panel.is_active:
-            raise CupCenterValidationError("Panel یکی از inboundها فعال نیست.")
+            message = "Panel یکی از inboundها فعال نیست."
+            structured = _cup_structured_error(
+                error_code="panel_inactive",
+                layer="inbound_validation",
+                action="validate_quick_builder",
+                message=message,
+                remediation="پنل اینباند را فعال کنید یا اینباند دیگری انتخاب کنید.",
+                panel=inbound.panel,
+                inbound=inbound,
+            )
+            _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
         if not inbound.is_active or not inbound.available_for_new_orders:
-            raise CupCenterValidationError("Inbound انتخاب‌شده فعال یا قابل فروش نیست.")
+            message = "Inbound انتخاب‌شده فعال یا قابل فروش نیست."
+            structured = _cup_structured_error(
+                error_code="inbound_not_sellable",
+                layer="inbound_validation",
+                action="validate_quick_builder",
+                message=message,
+                remediation="گزینه‌های is_active و available_for_new_orders اینباند را بررسی کنید.",
+                panel=panel,
+                inbound=inbound,
+            )
+            _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
         if inbound.protocol not in SUPPORTED_INBOUND_PROTOCOLS:
-            raise CupCenterValidationError("Protocol یکی از inboundها پشتیبانی نمی‌شود.")
+            message = "Protocol یکی از inboundها پشتیبانی نمی‌شود."
+            structured = _cup_structured_error(
+                error_code="inbound_unsupported_protocol",
+                layer="inbound_validation",
+                action="validate_quick_builder",
+                message=message,
+                technical_detail=f"protocol={inbound.protocol}",
+                remediation="فقط VLESS، VMess یا Trojan را برای Quick Builder انتخاب کنید.",
+                panel=panel,
+                inbound=inbound,
+            )
+            _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
         remote_id = str(inbound.inbound_id)
         if remote_id in seen_remote_ids:
-            raise CupCenterValidationError("Inbound ID تکراری داخل یک Panel برای ساخت remote مجاز نیست.")
+            message = "Inbound ID تکراری داخل یک Panel برای ساخت remote مجاز نیست."
+            structured = _cup_structured_error(
+                error_code="duplicate_remote_inbound_id",
+                layer="inbound_validation",
+                action="validate_quick_builder",
+                message=message,
+                remediation="برای هر پنل فقط یک رکورد با هر remote inbound ID انتخاب کنید.",
+                panel=panel,
+                inbound=inbound,
+                safe_context={"remote_inbound_id": remote_id},
+            )
+            _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
         seen_remote_ids.add(remote_id)
 
     if report is not None:
         if not getattr(report, "supported", True) or not getattr(report, "supports_create_client", False):
-            raise CupCenterValidationError(_report_create_error(report))
+            message, structured = _report_create_error(report, panel=panel, inbound=inbounds[0], action="create_client")
+            _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
         if len(inbounds) > 1 and not getattr(report, "supports_multi_inbound_create", False):
-            raise CupCenterValidationError("این پنل برای انتخاب چند inbound در یک گروه پشتیبانی نمی‌شود.")
+            message = "این پنل فقط ساخت تک‌اینباندی را پشتیبانی می‌کند. برای این پنل فقط یک اینباند انتخاب کنید. انتخاب چند inbound برای این پنل مجاز نیست."
+            structured = _cup_structured_error(
+                error_code="panel_capability_missing",
+                layer="capability_detection",
+                action="create_multi_inbound_client",
+                message=message,
+                technical_detail="Missing capability: supports_multi_inbound_create",
+                remediation="فقط یک اینباند از این پنل انتخاب کنید یا پنل modern_multi_node با قابلیت supports_multi_inbound_create انتخاب کنید.",
+                panel=panel,
+                inbound=inbounds[0],
+                safe_context={"required_capability": "supports_multi_inbound_create"},
+            )
+            _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
     elif len(inbounds) > 1:
-        raise CupCenterValidationError("قابلیت ساخت چند inbound برای این پنل قابل تایید نیست.")
+        message = "قابلیت ساخت چند inbound برای این پنل قابل تایید نیست."
+        structured = _cup_structured_error(
+            error_code="panel_capability_unknown",
+            layer="capability_detection",
+            action="create_multi_inbound_client",
+            message=message,
+            remediation="ابتدا Test connection / Sync capabilities را برای پنل اجرا کنید.",
+            panel=panel,
+            inbound=inbounds[0],
+            safe_context={"required_capability": "supports_multi_inbound_create"},
+        )
+        _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
 
 
 def _validated_quick_build_groups(inbounds, adapter_factory):
     inbounds = list(inbounds or [])
     if not inbounds:
-        raise CupCenterValidationError("حداقل یک inbound انتخاب کنید.")
+        message = "هیچ اینباندی انتخاب نشده است. حداقل یک inbound انتخاب کنید."
+        structured = _cup_structured_error(
+            error_code="inbound_required",
+            layer="inbound_validation",
+            action="validate_quick_builder",
+            message=message,
+            remediation="حداقل یک اینباند فعال و قابل فروش انتخاب کنید.",
+        )
+        _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
     groups = _group_quick_build_inbounds(inbounds)
     for group in groups:
         panel = group["panel"]
@@ -554,7 +833,16 @@ def _validated_quick_build_groups(inbounds, adapter_factory):
         try:
             report = adapter.get_capability_report()
         except Exception as exc:
-            raise CupCenterValidationError(_safe_panel_error(exc, panel=panel)) from exc
+            structured = safe_error_dict(
+                exc,
+                error_code="capability_detection_failed",
+                layer="capability_detection",
+                action="detect_capabilities",
+                message="خواندن قابلیت‌های پنل برای Quick Builder ناموفق بود.",
+                remediation="از Panel Center گزینه Test connection / Sync capabilities را اجرا کنید.",
+                panel=panel,
+            )
+            raise CupCenterValidationError(_safe_panel_error(exc, panel=panel), structured_error=structured) from exc
         _validate_quick_build_panel_group(panel, group["inbounds"], report=report)
         group["adapter"] = adapter
         group["report"] = report
@@ -587,7 +875,20 @@ def _remote_create_for_quick_build(panel, inbounds, options, adapter):
             return adapter.create_enabled_multi_inbound_client(request)
         return adapter.create_enabled_client(request)
     except Exception as exc:
-        raise CupCenterRemoteCreateError(_safe_panel_error(exc, panel=panel)) from exc
+        structured = CupRemoteCreateFailedError(
+            "ساخت کانفیگ روی پنل برای Quick Builder ناموفق بود.",
+            action="create_multi_inbound_client" if len(inbounds) > 1 else "create_client",
+            technical_detail=str(exc or ""),
+            remediation="credentialها، قابلیت‌های پنل، ظرفیت اینباند و وضعیت API نوشتن را بررسی کنید.",
+            panel=panel,
+            inbound=inbounds[0] if inbounds else None,
+            safe_context={
+                "selected_inbound_pks": [getattr(inbound, "pk", None) for inbound in inbounds],
+                "remote_inbound_ids": [getattr(inbound, "inbound_id", None) for inbound in inbounds],
+                "panel_error": exc.to_safe_dict() if isinstance(exc, PanelIntegrationError) else "",
+            },
+        ).to_safe_dict()
+        raise CupCenterRemoteCreateError(_safe_panel_error(exc, panel=panel), structured_error=structured) from exc
 
 
 def _quick_panel_result(panel, inbounds, group_index):
@@ -619,6 +920,7 @@ def _safe_quick_panel_result_dict(result):
         "link_count": result.link_count,
         "warnings": result.warnings,
         "errors": result.errors,
+        "structured_errors": result.structured_errors,
     }
 
 
@@ -646,15 +948,65 @@ def _traffic_limit_bytes_from_gb(value):
         return 0
 
 
+def _quick_inventory_link_metadata(asset, allocation, *, pool):
+    return {
+        "source": "quick_builder_inventory_pool",
+        "generated_by": "quick_builder_multi_panel",
+        "pool_id": getattr(pool, "pk", None),
+        "pool_title": sanitize_error_value(getattr(pool, "title", "") or ""),
+        "asset_id": getattr(asset, "pk", None),
+        "allocation_id": getattr(allocation, "pk", None),
+        "allocation_mode": getattr(allocation, "allocation_mode", "") or getattr(pool, "allocation_mode", ""),
+        "asset_hash_suffix": (getattr(asset, "normalized_hash", "") or "")[-8:],
+        "created_at": timezone.now().isoformat(),
+    }
+
+
+def _quick_inventory_result(pool, quantity, group_index):
+    summary = get_pool_stock_summary(pool)
+    return {
+        "pool_id": pool.pk,
+        "pool_title": sanitize_error_value(pool.title),
+        "allocation_mode": pool.allocation_mode,
+        "allocation_mode_display": pool.get_allocation_mode_display(),
+        "requested_quantity": quantity,
+        "available_before": "Unlimited" if summary["available_capacity"] is None else summary["available_capacity"],
+        "asset_count_before": summary["asset_count"],
+        "usable_asset_count_before": summary["usable_asset_count"],
+        "group_index": group_index,
+        "success": False,
+        "allocated_count": 0,
+        "link_count": 0,
+        "warnings": [],
+        "errors": [],
+        "structured_errors": [],
+    }
+
+
 def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, adapter_factory=None, request=None):
     inbounds = list(request_data.get("inbounds") or [])
+    inventory_pools = list(request_data.get("inventory_pools") or [])
+    inventory_quantity = int(request_data.get("inventory_quantity") or 1)
+    if not inbounds and not inventory_pools:
+        message = "حداقل یک Inbound یا یک استخر کانفیگ آماده انتخاب کنید."
+        structured = _cup_structured_error(
+            error_code="quick_builder_source_required",
+            layer="cup_builder",
+            action="validate_quick_builder",
+            message=message,
+            remediation="از بخش منابع پنل یک Inbound یا از بخش استخرها یک Pool انتخاب کنید.",
+        )
+        _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
     adapter_factory = adapter_factory or get_safe_panel_adapter
-    groups = _validated_quick_build_groups(inbounds, adapter_factory)
+    groups = _validated_quick_build_groups(inbounds, adapter_factory) if inbounds else []
     selected_inbounds = [_inbound_summary(inbound) for inbound in inbounds]
+    selected_inventory_pools = [_inventory_pool_summary(pool) for pool in inventory_pools]
     panel_results = []
+    inventory_results = []
     config_links = []
     cup_items = []
     created_remote_client_groups_count = 0
+    inventory_allocation_count = 0
     position = 1
 
     with transaction.atomic():
@@ -669,6 +1021,8 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
                 "generated_by": "quick_builder_multi_panel",
                 "panel_ids": [group["panel"].pk for group in groups],
                 "inbound_pks": [inbound.pk for inbound in inbounds],
+                "inventory_pool_ids": [pool.pk for pool in inventory_pools],
+                "inventory_quantity_per_pool": inventory_quantity,
                 "volume_gb": str(request_data.get("volume_gb") or ""),
                 "duration_days": int(request_data.get("duration_days") or 30),
                 "admin_user_id": getattr(admin_user, "pk", None),
@@ -689,7 +1043,21 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
             entries = _direct_link_entries_from_remote(remote_result, group_inbounds)
             missing_links = [entry for entry in entries if not entry["direct_link"]]
             if missing_links:
-                raise CupCenterRemoteCreateError("پنل client را ساخت اما همه لینک‌های مستقیم قابل ذخیره را برنگرداند.")
+                message = "پنل client را ساخت اما همه لینک‌های مستقیم قابل ذخیره را برنگرداند."
+                structured = _cup_structured_error(
+                    error_code="cup_remote_create_missing_link",
+                    layer="subscription_render",
+                    action=result.create_mode,
+                    message=message,
+                    remediation="خروجی direct_link پنل را بررسی کنید و در صورت نیاز لینک‌ها را از پنل بازیابی و manual اضافه کنید.",
+                    panel=panel,
+                    inbound=group_inbounds[0] if group_inbounds else None,
+                    safe_context={
+                        "selected_inbound_pks": [getattr(inbound, "pk", None) for inbound in group_inbounds],
+                        "missing_link_count": len(missing_links),
+                    },
+                )
+                raise CupCenterRemoteCreateError(message, structured_error=structured)
 
             with transaction.atomic():
                 for entry in entries:
@@ -724,12 +1092,106 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
             created_remote_client_groups_count += 1
         except (CupCenterRemoteCreateError, CupCenterRemoteSaveError) as exc:
             result.errors.append(str(exc))
+            if getattr(exc, "structured_error", None):
+                result.structured_errors.append(exc.structured_error)
         except Exception as exc:
             result.errors.append(_safe_panel_error(exc, panel=panel))
+            result.structured_errors.append(
+                safe_error_dict(
+                    exc,
+                    error_code="cup_remote_create_failed",
+                    layer="cup_builder",
+                    action=result.create_mode or "create_client",
+                    message="ساخت کانفیگ روی پنل برای Quick Builder ناموفق بود.",
+                    remediation="خطای پنل را بررسی و پس از رفع مشکل دوباره تلاش کنید.",
+                    panel=panel,
+                    inbound=group_inbounds[0] if group_inbounds else None,
+                )
+            )
         panel_results.append(_safe_quick_panel_result_dict(result))
 
-    errors = [error for panel_result in panel_results for error in panel_result.get("errors", [])]
-    warnings = [warning for panel_result in panel_results for warning in panel_result.get("warnings", [])]
+    for pool_index, pool in enumerate(inventory_pools, start=1):
+        result = _quick_inventory_result(pool, inventory_quantity, pool_index)
+        try:
+            with transaction.atomic():
+                allocation_result = allocate_assets_from_pool(pool, inventory_quantity, cup=cup)
+                for asset, allocation in zip(allocation_result.assets, allocation_result.allocations, strict=False):
+                    config_link = create_config_link_from_raw(
+                        asset.raw_link,
+                        source_type=ConfigLink.SourceType.IMPORTED_SUBSCRIPTION,
+                        metadata={**_quick_inventory_link_metadata(asset, allocation, pool=pool), "cup_id": cup.pk},
+                    )
+                    cup_item = CupItem.objects.create(
+                        cup=cup,
+                        config_link=config_link,
+                        position=position,
+                        is_active=True,
+                        added_reason="quick_builder_inventory",
+                        metadata={
+                            "source": "quick_builder_inventory_pool",
+                            "generated_by": "quick_builder_multi_panel",
+                            "pool_id": pool.pk,
+                            "asset_id": asset.pk,
+                            "allocation_id": allocation.pk,
+                            "allocation_mode": allocation.allocation_mode,
+                            "group_index": pool_index,
+                        },
+                    )
+                    config_links.append(config_link)
+                    cup_items.append(cup_item)
+                    position += 1
+                result["success"] = True
+                result["allocated_count"] = allocation_result.allocated_count
+                result["link_count"] = allocation_result.allocated_count
+                inventory_allocation_count += allocation_result.allocated_count
+        except ConfigInventoryError as exc:
+            message = sanitize_error_value(getattr(exc, "safe_message", str(exc)))
+            result["errors"].append(message)
+            result["structured_errors"].append(
+                _cup_structured_error(
+                    exc,
+                    error_code=f"config_inventory_{getattr(exc, 'code', 'allocation_failed')}",
+                    layer="inventory_allocation",
+                    action="allocate_inventory_pool",
+                    message=message,
+                    remediation="موجودی استخر، فعال بودن Pool و مقدار درخواستی را بررسی کنید.",
+                    safe_context={
+                        "pool_id": pool.pk,
+                        "pool_title": sanitize_error_value(pool.title),
+                        "requested_quantity": inventory_quantity,
+                    },
+                )
+            )
+        except Exception as exc:
+            message = sanitize_error_value(exc)
+            result["errors"].append(message)
+            result["structured_errors"].append(
+                safe_error_dict(
+                    exc,
+                    error_code="config_inventory_allocation_failed",
+                    layer="inventory_allocation",
+                    action="allocate_inventory_pool",
+                    message="تخصیص کانفیگ از استخر برای Quick Builder ناموفق بود.",
+                    remediation="موجودی استخر و سلامت لینک‌های واردشده را بررسی کنید و دوباره تلاش کنید.",
+                )
+            )
+        inventory_results.append(result)
+
+    panel_errors = [error for panel_result in panel_results for error in panel_result.get("errors", [])]
+    inventory_errors = [error for inventory_result in inventory_results for error in inventory_result.get("errors", [])]
+    errors = panel_errors + inventory_errors
+    structured_errors = [
+        error
+        for panel_result in panel_results
+        for error in panel_result.get("structured_errors", [])
+    ] + [
+        error
+        for inventory_result in inventory_results
+        for error in inventory_result.get("structured_errors", [])
+    ]
+    warnings = [warning for panel_result in panel_results for warning in panel_result.get("warnings", [])] + [
+        warning for inventory_result in inventory_results for warning in inventory_result.get("warnings", [])
+    ]
     if errors and config_links:
         status = "partial_success"
     elif errors:
@@ -740,13 +1202,16 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
     SubscriptionCup.objects.filter(pk=cup.pk).update(
         metadata={
             **(cup.metadata or {}),
-            "remote_created": bool(config_links),
+            "remote_created": bool(created_remote_client_groups_count),
             "status": status,
             "selected_panel_count": len(groups),
             "selected_inbound_count": len(inbounds),
+            "selected_inventory_pool_count": len(inventory_pools),
             "created_remote_client_groups_count": created_remote_client_groups_count,
+            "inventory_allocation_count": inventory_allocation_count,
             "config_link_count": len(config_links),
             "panel_results": panel_results,
+            "inventory_results": inventory_results,
             "updated_at": timezone.now().isoformat(),
         }
     )
@@ -758,16 +1223,21 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
         config_links=config_links,
         cup_items=cup_items,
         selected_inbounds=selected_inbounds,
-        masked_subscription_url=urls["masked_url"],
+        masked_subscription_url=urls["masked_client_url"],
         protocols=cup_protocols(cup),
+        selected_inventory_pools=selected_inventory_pools,
         status=status,
         selected_panels_count=len(groups),
         selected_inbounds_count=len(inbounds),
+        selected_inventory_pools_count=len(inventory_pools),
         created_remote_client_groups_count=created_remote_client_groups_count,
+        inventory_allocation_count=inventory_allocation_count,
         config_link_count=len(config_links),
         panel_results=panel_results,
+        inventory_results=inventory_results,
         warnings=warnings,
         errors=errors,
+        structured_errors=structured_errors,
     )
 
 

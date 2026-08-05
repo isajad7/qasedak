@@ -427,26 +427,79 @@ def get_subscription_cup_for_order(order):
 
 
 def active_cup_links(cup):
-    return list(
+    links = (
         CupItem.objects.filter(cup=cup, is_active=True, config_link__is_active=True)
         .select_related("config_link")
         .order_by("position", "pk")
         .values_list("config_link__raw_link", flat=True)
     )
+    return [str(link or "").strip() for link in links if str(link or "").strip()]
 
 
-def render_subscription_cup_raw(cup):
-    return "\n".join(active_cup_links(cup))
+def render_subscription_cup_raw(cup, *, trailing_newline=False):
+    raw_text = "\n".join(active_cup_links(cup))
+    if raw_text and trailing_newline:
+        return f"{raw_text}\n"
+    return raw_text
 
 
 def render_subscription_cup_base64(cup):
-    raw_text = render_subscription_cup_raw(cup)
+    raw_text = render_subscription_cup_raw(cup, trailing_newline=True)
     return base64.b64encode(raw_text.encode("utf-8")).decode("ascii")
 
 
-def render_subscription_cup(cup, *, output_format="base64"):
-    if str(output_format or "").lower() == "raw":
+def mask_config_link_for_display(link_or_config):
+    config_link = link_or_config if isinstance(link_or_config, ConfigLink) else None
+    raw_link = getattr(config_link, "raw_link", link_or_config) or ""
+    parsed = parse_config_link(raw_link)
+    protocol = getattr(config_link, "protocol", "") or parsed.protocol or ConfigLink.Protocol.UNKNOWN
+    suffix = (getattr(config_link, "normalized_hash", "") or parsed.normalized_hash or "")[-8:] or "-"
+    remark = getattr(config_link, "remark", "") or parsed.remark
+    remark_part = f" - {remark[:48]}" if remark else ""
+    return f"{protocol}://<hidden> - hash ending {suffix}{remark_part}"
+
+
+def _json_cup_item(item, *, include_links=False):
+    config_link = item.config_link
+    payload = {
+        "protocol": config_link.protocol or ConfigLink.Protocol.UNKNOWN,
+        "remark": config_link.remark or "",
+        "host": config_link.host or "",
+        "port": config_link.port,
+        "source_type": config_link.source_type or ConfigLink.SourceType.UNKNOWN,
+        "masked_link": mask_config_link_for_display(config_link),
+    }
+    if include_links:
+        payload["raw_link"] = config_link.raw_link
+    return payload
+
+
+def render_subscription_cup_json(cup, *, include_links=False):
+    items = list(
+        CupItem.objects.filter(cup=cup, is_active=True, config_link__is_active=True)
+        .select_related("config_link")
+        .order_by("position", "pk")
+    )
+    return {
+        "title": cup.title or "",
+        "status": cup.status,
+        "is_accessible": cup.is_accessible,
+        "is_expired": cup.is_expired,
+        "expires_at": cup.expires_at.isoformat() if cup.expires_at else None,
+        "traffic_limit_bytes": int(cup.traffic_limit_bytes or 0),
+        "device_limit": cup.device_limit,
+        "active_item_count": len(items),
+        "protocols": cup_protocols(cup),
+        "items": [_json_cup_item(item, include_links=include_links) for item in items],
+    }
+
+
+def render_subscription_cup(cup, format="base64", *, output_format=None, include_links=False):
+    selected_format = str(output_format if output_format is not None else format or "base64").strip().lower()
+    if selected_format == "raw":
         return render_subscription_cup_raw(cup)
+    if selected_format == "json":
+        return json.dumps(render_subscription_cup_json(cup, include_links=include_links), ensure_ascii=False)
     return render_subscription_cup_base64(cup)
 
 
@@ -467,6 +520,21 @@ def build_subscription_cup_path(cup):
         return reverse("subscription_cup", args=[cup.token])
     except NoReverseMatch:
         return f"/sub/{cup.token}"
+
+
+def build_subscription_cup_dashboard_path(cup):
+    try:
+        return reverse("subscription_cup_dashboard", args=[cup.token])
+    except NoReverseMatch:
+        return f"/sub/{cup.token}/dashboard/"
+
+
+def build_subscription_cup_client_path(cup):
+    return f"{build_subscription_cup_path(cup)}?format=base64"
+
+
+def build_subscription_cup_raw_path(cup):
+    return f"{build_subscription_cup_path(cup)}?format=raw"
 
 
 def public_base_url_for_store(store=None):

@@ -1,0 +1,73 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div id="content-main">
+  <p>
+    <a class="button" href="{% url 'admin:store_cupfulfillmentrecipe_changelist' %}">{% trans "دستورهای پر کردن Cup" %}</a>
+  </p>
+  <h1>{% trans "پیش‌نمایش دستور تحویل" %}</h1>
+  <p>
+    <strong>{% trans "Plan" %}:</strong> {{ preview.plan }}<br>
+    <strong>{% trans "Failure policy" %}:</strong> {{ preview.failure_policy }}
+  </p>
+
+  {% if preview.warnings %}
+    <h2>{% trans "Warnings" %}</h2>
+    <ul>
+      {% for warning in preview.warnings %}
+        <li>{{ warning }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  <h2>{% trans "اگر این پلن الان فروخته شود" %}</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>{% trans "Position" %}</th>
+        <th>{% trans "Source" %}</th>
+        <th>{% trans "Quantity" %}</th>
+        <th>{% trans "Required" %}</th>
+        <th>{% trans "Panel / Inbounds" %}</th>
+        <th>{% trans "Inventory stock" %}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for rule in preview.rules %}
+        <tr>
+          <td>{{ rule.position }}</td>
+          <td>{{ rule.source_type }}</td>
+          <td>{{ rule.quantity }}</td>
+          <td>{{ rule.required|yesno:"yes,no" }}</td>
+          <td>
+            {% if rule.panel %}<strong>{{ rule.panel }}</strong><br>{% endif %}
+            {% for inbound in rule.inbounds %}
+              {{ inbound }}{% if not forloop.last %}<br>{% endif %}
+            {% empty %}
+              -
+            {% endfor %}
+          </td>
+          <td>
+            {% if rule.stock_summary %}
+              <strong>{{ rule.pool }}</strong><br>
+              {% trans "Mode" %}: {{ rule.stock_summary.allocation_mode }}<br>
+              {% trans "Assets" %}: {{ rule.stock_summary.asset_count }}<br>
+              {% trans "Available capacity" %}:
+              {% if rule.stock_summary.available_capacity == None %}
+                {% trans "Unlimited" %}
+              {% else %}
+                {{ rule.stock_summary.available_capacity }}
+              {% endif %}
+            {% else %}
+              -
+            {% endif %}
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="6">{% trans "No active rules are configured." %}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

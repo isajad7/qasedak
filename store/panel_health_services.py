@@ -11,6 +11,7 @@ from django.utils import timezone
 from .admin_notifications import send_admin_message_to_telegram_admins
 from .jalali import format_jalali_datetime, persian_digits
 from .models import BotEventLog, Inbound, Panel, PanelHealthCheckLog, PanelHealthStatus, Store
+from .panels.errors import PanelIntegrationError
 from .telegram_bot.redaction import sanitize_bot_event_log_value
 from .xui_api import XUIError, XUIService, classify_xui_exception
 from .xui_compat import discover_xui_capabilities
@@ -125,6 +126,10 @@ def _base_result(panel, settings, *, status, summary, login_ok=None, error_code=
 
 
 def _classify_exception(exc):
+    if isinstance(exc, PanelIntegrationError):
+        if exc.__cause__:
+            return _classify_exception(exc.__cause__)
+        return exc.error_code or "panel_integration_error", exc.message or "خطای عملیات پنل"
     if isinstance(exc, XUIError):
         if exc.category == "http_403_csrf_required":
             return (
@@ -171,6 +176,12 @@ def _classify_exception(exc):
 
 
 def _exception_metadata(exc, *, panel):
+    if isinstance(exc, PanelIntegrationError):
+        metadata = exc.to_safe_dict()
+        if exc.__cause__:
+            _category, _message, cause_metadata = classify_xui_exception(exc.__cause__)
+            metadata["cause"] = sanitize_operational_metadata(dict(cause_metadata or {}), panel=panel)
+        return metadata
     _category, _message, metadata = classify_xui_exception(exc)
     safe_metadata = sanitize_operational_metadata(dict(metadata or {}), panel=panel)
     safe_metadata["exception"] = sanitize_operational_text(exc, panel=panel)
@@ -342,15 +353,27 @@ def build_panel_health_result(panel, *, settings=None):
     adapter = get_safe_panel_adapter(panel)
     capability_report = adapter.get_capability_report()
     if getattr(adapter, "family", "") != "xui":
+        structured_error = PanelIntegrationError(
+            "این خانواده پنل هنوز در مانیتورینگ سلامت پیاده‌سازی نشده است.",
+            error_code="unsupported_panel_family",
+            layer="adapter_factory",
+            action="panel_health_check",
+            technical_detail="Panel family is not supported by health monitoring yet.",
+            remediation="برای health monitoring فعلاً پنل X-UI انتخاب کنید یا adapter خانواده پنل را تکمیل کنید.",
+            panel=panel,
+            panel_family=getattr(capability_report, "family", "") or "",
+            capability_profile=getattr(capability_report, "capability_profile", "") or "",
+            safe_context={"capability_report": capability_report.to_dict()},
+        ).to_safe_dict()
         result = _base_result(
             panel,
             settings,
             status=PanelHealthStatus.Status.WARNING,
             summary="این خانواده پنل هنوز در مانیتورینگ سلامت پیاده‌سازی نشده است.",
             login_ok=None,
-            error_code="panel_family_unsupported",
-            error_message="Panel family is not supported by health monitoring yet.",
-            metadata={"capability_report": capability_report.to_dict()},
+            error_code="unsupported_panel_family",
+            error_message="این خانواده پنل هنوز در مانیتورینگ سلامت پیاده‌سازی نشده است.",
+            metadata={"capability_report": capability_report.to_dict(), "structured_error": structured_error},
         )
         result["response_time_ms"] = int((time.monotonic() - start) * 1000)
         return result

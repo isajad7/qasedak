@@ -3827,6 +3827,277 @@ class CupItem(TimeStampedModel):
         return f"{self.cup_id}:{self.position}:{self.config_link_id}"
 
 
+class ConfigInventoryPool(TimeStampedModel):
+    class AllocationMode(models.TextChoices):
+        EXCLUSIVE = "exclusive", _("Exclusive")
+        SHARED_LIMITED = "shared_limited", _("Shared limited")
+        SHARED_UNLIMITED = "shared_unlimited", _("Shared unlimited")
+
+    title = models.CharField(_("title"), max_length=150)
+    description = models.TextField(_("description"), blank=True)
+    connected_plan = models.ForeignKey(
+        Plan,
+        verbose_name=_("connected plan"),
+        on_delete=models.SET_NULL,
+        related_name="config_inventory_pools",
+        null=True,
+        blank=True,
+    )
+    traffic_limit_gb = models.DecimalField(
+        _("traffic limit GB"),
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+    )
+    duration_days = models.PositiveIntegerField(_("duration days"), null=True, blank=True)
+    allocation_mode = models.CharField(
+        _("allocation mode"),
+        max_length=30,
+        choices=AllocationMode.choices,
+        default=AllocationMode.EXCLUSIVE,
+        db_index=True,
+    )
+    max_allocations_per_asset = models.PositiveIntegerField(_("max allocations per asset"), null=True, blank=True)
+    is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    priority = models.PositiveIntegerField(_("priority"), default=100, db_index=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("config inventory pool")
+        verbose_name_plural = _("config inventory pools")
+        ordering = ["priority", "title", "id"]
+        indexes = [
+            models.Index(fields=["connected_plan", "is_active", "priority"]),
+            models.Index(fields=["is_active", "priority"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+
+class ConfigInventoryAsset(TimeStampedModel):
+    class Status(models.TextChoices):
+        AVAILABLE = "available", _("Available")
+        RESERVED = "reserved", _("Reserved")
+        ASSIGNED = "assigned", _("Assigned")
+        DISABLED = "disabled", _("Disabled")
+        EXPIRED = "expired", _("Expired")
+        BURNED = "burned", _("Burned")
+
+    pool = models.ForeignKey(
+        ConfigInventoryPool,
+        verbose_name=_("pool"),
+        on_delete=models.CASCADE,
+        related_name="assets",
+    )
+    raw_link = models.TextField(_("raw link"))
+    normalized_link = models.TextField(_("normalized link"), blank=True)
+    normalized_hash = models.CharField(_("normalized hash"), max_length=64, blank=True, db_index=True)
+    protocol = models.CharField(
+        _("protocol"),
+        max_length=20,
+        choices=ConfigLink.Protocol.choices,
+        default=ConfigLink.Protocol.UNKNOWN,
+        db_index=True,
+    )
+    remark = models.CharField(_("remark"), max_length=255, blank=True)
+    host = models.CharField(_("host"), max_length=255, blank=True)
+    port = models.PositiveIntegerField(_("port"), null=True, blank=True)
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.AVAILABLE,
+        db_index=True,
+    )
+    traffic_limit_gb = models.DecimalField(
+        _("traffic limit GB"),
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+    )
+    expires_at = models.DateTimeField(_("expires at"), null=True, blank=True, db_index=True)
+    max_allocations = models.PositiveIntegerField(_("max allocations"), null=True, blank=True)
+    current_allocations = models.PositiveIntegerField(_("current allocations"), default=0, db_index=True)
+    source_batch = models.CharField(_("source batch"), max_length=150, blank=True, db_index=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("config inventory asset")
+        verbose_name_plural = _("config inventory assets")
+        ordering = ["pool__priority", "created_at", "id"]
+        indexes = [
+            models.Index(fields=["pool", "status", "created_at"]),
+            models.Index(fields=["pool", "normalized_hash"]),
+            models.Index(fields=["status", "expires_at"]),
+        ]
+
+    def __str__(self):
+        suffix = self.normalized_hash[-8:] if self.normalized_hash else str(self.pk or "-")
+        return f"{self.pool_id}:{self.protocol}:{suffix}"
+
+
+class ConfigAllocation(TimeStampedModel):
+    class Status(models.TextChoices):
+        ACTIVE = "active", _("Active")
+        RELEASED = "released", _("Released")
+        CANCELLED = "cancelled", _("Cancelled")
+
+    asset = models.ForeignKey(
+        ConfigInventoryAsset,
+        verbose_name=_("asset"),
+        on_delete=models.CASCADE,
+        related_name="allocations",
+    )
+    cup = models.ForeignKey(
+        SubscriptionCup,
+        verbose_name=_("subscription cup"),
+        on_delete=models.SET_NULL,
+        related_name="config_allocations",
+        null=True,
+        blank=True,
+    )
+    order = models.ForeignKey(
+        Order,
+        verbose_name=_("order"),
+        on_delete=models.SET_NULL,
+        related_name="config_allocations",
+        null=True,
+        blank=True,
+    )
+    allocation_mode = models.CharField(
+        _("allocation mode"),
+        max_length=30,
+        choices=ConfigInventoryPool.AllocationMode.choices,
+        db_index=True,
+    )
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    allocated_at = models.DateTimeField(_("allocated at"), default=timezone.now, db_index=True)
+    released_at = models.DateTimeField(_("released at"), null=True, blank=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("config allocation")
+        verbose_name_plural = _("config allocations")
+        ordering = ["-allocated_at", "-id"]
+        indexes = [
+            models.Index(fields=["asset", "status"]),
+            models.Index(fields=["cup", "status"]),
+            models.Index(fields=["order", "status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.asset_id}:{self.status}:{self.allocated_at:%Y-%m-%d}"
+
+
+class CupFulfillmentRecipe(TimeStampedModel):
+    class FailurePolicy(models.TextChoices):
+        STRICT = "strict", _("Strict")
+        PARTIAL_ALLOWED = "partial_allowed", _("Partial allowed")
+
+    plan = models.ForeignKey(
+        Plan,
+        verbose_name=_("plan"),
+        on_delete=models.CASCADE,
+        related_name="cup_fulfillment_recipes",
+    )
+    title = models.CharField(_("title"), max_length=150)
+    is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    priority = models.PositiveIntegerField(_("priority"), default=100, db_index=True)
+    failure_policy = models.CharField(
+        _("failure policy"),
+        max_length=30,
+        choices=FailurePolicy.choices,
+        default=FailurePolicy.STRICT,
+        db_index=True,
+    )
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("cup fulfillment recipe")
+        verbose_name_plural = _("cup fulfillment recipes")
+        ordering = ["priority", "id"]
+        indexes = [
+            models.Index(fields=["plan", "is_active", "priority"]),
+            models.Index(fields=["is_active", "priority"]),
+        ]
+
+    def __str__(self):
+        return f"{self.plan} - {self.title}"
+
+
+class CupFillerRule(TimeStampedModel):
+    class SourceType(models.TextChoices):
+        PANEL_INBOUNDS = "panel_inbounds", _("Panel inbounds")
+        INVENTORY_POOL = "inventory_pool", _("Inventory pool")
+
+    recipe = models.ForeignKey(
+        CupFulfillmentRecipe,
+        verbose_name=_("recipe"),
+        on_delete=models.CASCADE,
+        related_name="rules",
+    )
+    position = models.PositiveIntegerField(_("position"), default=1, db_index=True)
+    source_type = models.CharField(
+        _("source type"),
+        max_length=30,
+        choices=SourceType.choices,
+        db_index=True,
+    )
+    quantity = models.PositiveIntegerField(_("quantity"), default=1, validators=[MinValueValidator(1)])
+    required = models.BooleanField(_("required"), default=True)
+    panel = models.ForeignKey(
+        Panel,
+        verbose_name=_("panel"),
+        on_delete=models.SET_NULL,
+        related_name="cup_filler_rules",
+        null=True,
+        blank=True,
+    )
+    inbounds = models.ManyToManyField(
+        Inbound,
+        verbose_name=_("inbounds"),
+        related_name="cup_filler_rules",
+        blank=True,
+    )
+    inventory_pool = models.ForeignKey(
+        ConfigInventoryPool,
+        verbose_name=_("inventory pool"),
+        on_delete=models.SET_NULL,
+        related_name="cup_filler_rules",
+        null=True,
+        blank=True,
+    )
+    allocation_mode = models.CharField(
+        _("allocation mode override"),
+        max_length=30,
+        choices=ConfigInventoryPool.AllocationMode.choices,
+        blank=True,
+    )
+    is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("cup filler rule")
+        verbose_name_plural = _("cup filler rules")
+        ordering = ["position", "id"]
+        indexes = [
+            models.Index(fields=["recipe", "is_active", "position"]),
+            models.Index(fields=["source_type", "is_active"]),
+        ]
+
+    def __str__(self):
+        return f"{self.recipe_id}:{self.position}:{self.source_type}"
+
+
 class VPNClientActionLog(TimeStampedModel):
     class ActorType(models.TextChoices):
         USER = "user", _("User")

@@ -26,6 +26,13 @@
         <div class="tw-min-w-0 tw-flex-1">
             <h3>{{ last_result.title }}</h3>
             <p>{{ last_result.message }}</p>
+            {% if last_result.structured_errors %}
+                <div class="tw-mt-3 tw-space-y-3">
+                    {% for error in last_result.structured_errors %}
+                        {% include "admin/store/components/structured_error_card.html" with error=error title=last_result.title %}
+                    {% endfor %}
+                </div>
+            {% endif %}
             {% if last_result.details %}
                 <details class="tw-advanced-panel tw-mt-2">
                     <summary><span>نمایش جزئیات فنی</span><small>safe metadata</small></summary>
@@ -40,6 +47,13 @@
 <section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
     <div class="tw-admin-card">
         <div class="tw-section-heading tw-mb-4"><h2>گزارش قابلیت</h2></div>
+        {% if report_structured_errors %}
+            <div class="tw-mb-3 tw-space-y-3">
+                {% for error in report_structured_errors %}
+                    {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در قابلیت پنل" %}
+                {% endfor %}
+            </div>
+        {% endif %}
         <div class="tw-space-y-3">
             {% for label, badge in capability_items %}
                 <div class="tw-model-row">

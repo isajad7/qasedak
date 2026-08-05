@@ -9,7 +9,7 @@ from django.utils import timezone
 from store.models import Inbound, Panel, PanelHealthStatus
 from store.panels import get_safe_panel_adapter
 from store.panels.capabilities import sanitize_capability_metadata
-from store.panels.errors import PanelOperationUnsupportedError
+from store.panels.errors import PanelIntegrationError, safe_error_dict
 from store.xui_api import XUIService, classify_xui_exception, sanitize_xui_operational_text
 from store.xui_compat import discover_xui_capabilities
 from store.management.commands.sync_xui_topology import Command as SyncXUITopologyCommand
@@ -26,6 +26,7 @@ class PanelActionResult:
     details: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    structured_errors: list[dict] = field(default_factory=list)
 
 
 def mask_panel_url(value):
@@ -88,6 +89,26 @@ def capability_items(report):
     ]
 
 
+def structured_errors_for_capability_report(panel, report):
+    if not report or (getattr(report, "supported", True) and not getattr(report, "errors", ())):
+        return []
+    return [
+        PanelIntegrationError(
+            "این پنل هنوز برای ساخت کانفیگ قابل استفاده نیست.",
+            error_code="panel_capability_missing" if getattr(report, "supported", False) else "unsupported_panel_family",
+            layer="capability_detection",
+            action="detect_capabilities",
+            technical_detail="; ".join(getattr(report, "errors", ()) or getattr(report, "warnings", ())),
+            remediation="از Panel Center گزینه Test connection / Sync capabilities را اجرا کنید، یا family پنل را روی X-UI تنظیم کنید.",
+            panel=panel,
+            panel_family=getattr(report, "family", "") or "",
+            capability_profile=getattr(report, "capability_profile", "") or "",
+            safe_context={"capability_report": report.to_dict()},
+            warnings=list(getattr(report, "warnings", ()) or []),
+        ).to_safe_dict()
+    ]
+
+
 def safe_capability_report(panel):
     adapter = get_safe_panel_adapter(panel)
     report = adapter.get_capability_report()
@@ -124,22 +145,55 @@ def build_test_connection_result(panel):
     adapter = get_safe_panel_adapter(panel)
     if getattr(adapter, "family", "") != Panel.Family.XUI:
         report = adapter.get_capability_report()
-        message = "; ".join(report.errors or report.warnings) or "این خانواده پنل هنوز پشتیبانی عملیاتی ندارد."
-        return PanelActionResult(False, "تست اتصال انجام نشد", message, details=report.to_dict(), errors=list(report.errors))
+        message = "این پنل هنوز برای تست اتصال عملیاتی قابل استفاده نیست."
+        structured = safe_error_dict(
+            PanelIntegrationError(
+                message,
+                error_code="unsupported_panel_family",
+                layer="adapter_factory",
+                action="test_connection",
+                technical_detail="; ".join(report.errors or report.warnings),
+                remediation="family پنل را بررسی کنید یا برای عملیات remote از پنل X-UI استفاده کنید.",
+                panel=panel,
+                panel_family=report.family,
+                capability_profile=report.capability_profile,
+                safe_context={"capability_report": report.to_dict()},
+            )
+        )
+        return PanelActionResult(
+            False,
+            "تست اتصال انجام نشد",
+            message,
+            details=report.to_dict(),
+            errors=[message],
+            structured_errors=[structured],
+        )
 
     try:
         login_ok = adapter.test_connection()
         read_inbounds = adapter.list_inbounds()
         report = adapter.detect_capabilities(live=True, write=False)
     except Exception as exc:
-        category, message, metadata = classify_xui_exception(exc)
+        source_exc = exc.__cause__ if isinstance(exc, PanelIntegrationError) and exc.__cause__ else exc
+        category, message, metadata = classify_xui_exception(source_exc)
         safe_message = sanitize_xui_operational_text(message or exc, panel=panel)
+        structured = safe_error_dict(
+            exc,
+            error_code=category or "panel_test_connection_failed",
+            layer="panel_login",
+            action="test_connection",
+            message="تست اتصال پنل ناموفق بود.",
+            remediation=(metadata or {}).get("remediation_hint") or "credentialها، CSRF/2FA و دسترسی شبکه پنل را بررسی کنید.",
+            panel=panel,
+            safe_context=sanitize_capability_metadata({"error_code": category, **(metadata or {})}),
+        )
         return PanelActionResult(
             False,
             "تست اتصال ناموفق بود",
             safe_message,
             details=sanitize_capability_metadata({"error_code": category, **(metadata or {})}),
             errors=[safe_message],
+            structured_errors=[structured],
         )
 
     return PanelActionResult(
@@ -162,8 +216,29 @@ def sync_panel_inbounds(panel, *, create_missing=True, available_for_new_orders=
     adapter = get_safe_panel_adapter(panel)
     if getattr(adapter, "family", "") != Panel.Family.XUI:
         report = adapter.get_capability_report()
-        message = "; ".join(report.errors or report.warnings) or "همگام‌سازی برای این خانواده پنل هنوز پشتیبانی نمی‌شود."
-        return PanelActionResult(False, "همگام‌سازی پشتیبانی نمی‌شود", message, details=report.to_dict(), errors=list(report.errors))
+        message = "همگام‌سازی برای این خانواده پنل هنوز پشتیبانی نمی‌شود."
+        structured = safe_error_dict(
+            PanelIntegrationError(
+                message,
+                error_code="unsupported_panel_family",
+                layer="adapter_factory",
+                action="sync_inbounds",
+                technical_detail="; ".join(report.errors or report.warnings),
+                remediation="برای Sync inbounds فعلاً پنل X-UI انتخاب کنید یا adapter خانواده پنل را تکمیل کنید.",
+                panel=panel,
+                panel_family=report.family,
+                capability_profile=report.capability_profile,
+                safe_context={"capability_report": report.to_dict()},
+            )
+        )
+        return PanelActionResult(
+            False,
+            "همگام‌سازی پشتیبانی نمی‌شود",
+            message,
+            details=report.to_dict(),
+            errors=[message],
+            structured_errors=[structured],
+        )
 
     command = SyncXUITopologyCommand()
     service = XUIService(panel)
@@ -188,7 +263,23 @@ def sync_panel_inbounds(panel, *, create_missing=True, available_for_new_orders=
         panel.save(update_fields=["last_sync_at", "updated_at"])
     except Exception as exc:
         safe_error = sanitize_xui_operational_text(exc, panel=panel)
-        return PanelActionResult(False, "همگام‌سازی ناموفق بود", safe_error, errors=[safe_error])
+        return PanelActionResult(
+            False,
+            "همگام‌سازی ناموفق بود",
+            safe_error,
+            errors=[safe_error],
+            structured_errors=[
+                safe_error_dict(
+                    exc,
+                    error_code="panel_read_failed",
+                    layer="panel_read",
+                    action="sync_inbounds",
+                    message="همگام‌سازی اینباندهای پنل ناموفق بود.",
+                    remediation="Test connection را اجرا کنید و دسترسی API خواندنی پنل را بررسی کنید.",
+                    panel=panel,
+                )
+            ],
+        )
 
     protocols = {
         str(item.get("protocol") or "").lower()

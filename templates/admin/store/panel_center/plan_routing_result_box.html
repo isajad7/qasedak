@@ -2,6 +2,13 @@
     <div class="tw-action-icon"><i class="fas fa-info" aria-hidden="true"></i></div>
     <div class="tw-min-w-0 tw-flex-1">
         <h3>{{ result.message }}</h3>
+        {% if result.structured_errors %}
+            <div class="tw-mt-3 tw-space-y-3">
+                {% for error in result.structured_errors %}
+                    {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در اعتبارسنجی مسیر" %}
+                {% endfor %}
+            </div>
+        {% endif %}
         {% if result.errors %}
             <ul class="tw-detail-list">{% for error in result.errors %}<li>{{ error }}</li>{% endfor %}</ul>
         {% endif %}

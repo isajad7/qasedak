@@ -34,15 +34,20 @@
     </div>
 
     <div class="tw-admin-card">
-        <div class="tw-section-heading tw-mb-4"><h2>Subscription URL</h2></div>
-        <code class="tw-safe-command">{{ subscription.masked_url }}</code>
-        <code class="tw-safe-command">{{ subscription.masked_raw_url }}</code>
+        <div class="tw-section-heading tw-mb-4"><h2>Subscription URLs</h2></div>
+        <div class="tw-model-list tw-mb-3">
+            <div class="tw-model-row"><span>صفحه کاربر</span><strong dir="ltr">{{ subscription.masked_dashboard_url }}</strong></div>
+            <div class="tw-model-row"><span>لینک ورود به برنامه</span><strong dir="ltr">{{ subscription.masked_client_url }}</strong></div>
+            <div class="tw-model-row"><span>خروجی خام</span><strong dir="ltr">{{ subscription.masked_raw_url }}</strong></div>
+        </div>
         <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row tw-mt-2">
-            <button type="button" class="tw-button tw-button-primary" data-cup-copy="{{ subscription.url }}" data-cup-copy-label="Copy URL">Copy URL</button>
+            <button type="button" class="tw-button tw-button-primary" data-cup-copy="{{ subscription.dashboard_url }}" data-cup-copy-label="Copy dashboard URL">Copy dashboard URL</button>
+            <button type="button" class="tw-button tw-button-secondary" data-cup-copy="{{ subscription.client_url }}" data-cup-copy-label="Copy client URL">Copy client URL</button>
             <button type="button" class="tw-button tw-button-secondary" data-cup-copy="{{ subscription.raw_url }}" data-cup-copy-label="Copy raw URL">Copy raw URL</button>
         </div>
         <div class="tw-model-list tw-mt-2">
-            <div class="tw-model-row"><span>Base64 endpoint</span><strong dir="ltr">{{ subscription.path }}</strong></div>
+            <div class="tw-model-row"><span>Dashboard endpoint</span><strong dir="ltr">{{ subscription.dashboard_path }}</strong></div>
+            <div class="tw-model-row"><span>Client base64 endpoint</span><strong dir="ltr">{{ subscription.client_path }}</strong></div>
             <div class="tw-model-row"><span>Raw endpoint</span><strong dir="ltr">{{ subscription.raw_path }}</strong></div>
         </div>
         {% if perms.store.change_subscriptioncup %}

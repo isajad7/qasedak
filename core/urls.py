@@ -70,6 +70,10 @@ from store.admin_cup_center.views import (
     cup_center_quick_result,
     cup_center_rebuild,
 )
+from store.admin_config_inventory import (
+    config_inventory_dashboard,
+    config_inventory_import,
+)
 from store.admin_staff import (
     staff_access_center,
     staff_create,
@@ -92,6 +96,16 @@ urlpatterns = [
         'admin/store/setup/',
         admin.site.admin_view(setup_center),
         name='admin_store_setup_center',
+    ),
+    path(
+        'admin/store/config-inventory/',
+        admin.site.admin_view(config_inventory_dashboard),
+        name='admin_store_config_inventory',
+    ),
+    path(
+        'admin/store/config-inventory/import/',
+        admin.site.admin_view(config_inventory_import),
+        name='admin_store_config_inventory_import',
     ),
     path(
         'admin/store/backups/',

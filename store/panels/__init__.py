@@ -4,7 +4,26 @@ from .capabilities import (
     InboundHealthResult,
     PanelCapabilityReport,
 )
-from .errors import PanelAdapterError, PanelFamilyUnsupportedError, PanelOperationUnsupportedError
+from .errors import (
+    CupBuildValidationError,
+    CupPartialBuildError,
+    CupRemoteCreateFailedError,
+    InboundUnsupportedError,
+    InboundValidationError,
+    PanelAdapterError,
+    PanelAdapterUnavailableError,
+    PanelCapabilityMissingError,
+    PanelCreateClientFailedError,
+    PanelDeleteClientFailedError,
+    PanelFamilyUnsupportedError,
+    PanelIntegrationError,
+    PanelLoginFailedError,
+    PanelOperationUnsupportedError,
+    PanelReadFailedError,
+    PanelWriteForbiddenError,
+    RoutingValidationError,
+    UnsupportedPanelFamilyError,
+)
 from .factory import PanelAdapterFactory, get_panel_adapter
 from .factory import get_safe_panel_adapter
 
@@ -13,10 +32,25 @@ __all__ = [
     "CapabilityProfile",
     "InboundHealthResult",
     "PanelAdapterError",
+    "PanelAdapterUnavailableError",
     "PanelAdapterFactory",
     "PanelCapabilityReport",
+    "PanelCapabilityMissingError",
+    "PanelCreateClientFailedError",
+    "PanelDeleteClientFailedError",
     "PanelFamilyUnsupportedError",
+    "PanelIntegrationError",
+    "PanelLoginFailedError",
     "PanelOperationUnsupportedError",
+    "PanelReadFailedError",
+    "PanelWriteForbiddenError",
+    "UnsupportedPanelFamilyError",
+    "InboundUnsupportedError",
+    "InboundValidationError",
+    "RoutingValidationError",
+    "CupBuildValidationError",
+    "CupPartialBuildError",
+    "CupRemoteCreateFailedError",
     "get_panel_adapter",
     "get_safe_panel_adapter",
 ]

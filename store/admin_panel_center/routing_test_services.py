@@ -12,7 +12,7 @@ from store.admin_panel_center.routing_services import validate_routing_selection
 from store.models import Order, Panel, VPNClient
 from store.naming import build_xui_client_email
 from store.panels import get_safe_panel_adapter
-from store.panels.errors import PanelOperationUnsupportedError
+from store.panels.errors import PanelIntegrationError, PanelOperationUnsupportedError, RoutingValidationError, safe_error_dict
 from store.panels.xui.adapter import XUIProvisioningRequest
 from store.xui_api import XUIError, find_xui_client_and_stats, sanitize_xui_operational_text
 
@@ -101,6 +101,7 @@ class SafeProvisioningTestResult:
     remaining_remote_test_clients_count: int = 0
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    structured_errors: list[dict] = field(default_factory=list)
     steps: list[SafeProvisioningTestStep] = field(default_factory=list)
     cleanup: SafeProvisioningTestCleanupResult = field(default_factory=SafeProvisioningTestCleanupResult)
     masked_delivery_preview: MaskedDeliveryPreview = field(default_factory=MaskedDeliveryPreview)
@@ -148,10 +149,20 @@ def _mask_client_name(email, marker):
 
 
 def _safe_error(exc, panel=None):
+    if isinstance(exc, PanelIntegrationError):
+        return mask_sensitive_output(exc.message)
     return mask_sensitive_output(sanitize_xui_operational_text(exc, panel=panel, max_length=700))
 
 
 def _classify_exception(exc):
+    if isinstance(exc, PanelIntegrationError):
+        if exc.error_code == "panel_write_forbidden":
+            return ERROR_WRITE_API_FORBIDDEN
+        if exc.error_code == "panel_login_failed":
+            return ERROR_LOGIN_FAILED
+        if exc.error_code in {"unsupported_panel_family", "panel_adapter_unavailable", "panel_capability_missing"}:
+            return ERROR_UNSUPPORTED_CAPABILITY
+        exc = exc.__cause__ or exc
     message = str(exc or "").lower()
     category = str(getattr(exc, "category", "") or "").lower()
     if "login" in message or "auth" in category or "auth" in message:
@@ -161,6 +172,27 @@ def _classify_exception(exc):
     if isinstance(exc, PanelOperationUnsupportedError):
         return ERROR_UNSUPPORTED_CAPABILITY
     return ERROR_CREATE_FAILED
+
+
+def _structured_test_error(message, *, error_code, layer, action, result, panel=None, inbound=None, remediation="", technical_detail=""):
+    return RoutingValidationError(
+        message,
+        error_code=error_code,
+        layer=layer,
+        action=action,
+        technical_detail=technical_detail or message,
+        remediation=remediation or "انتخاب‌های مسیر، قابلیت‌های پنل و اینباندهای انتخاب‌شده را بررسی کنید.",
+        panel=panel,
+        panel_family=result.panel_family,
+        capability_profile=result.capability_profile,
+        inbound=inbound,
+        safe_context={
+            "plan_id": result.plan_id,
+            "expected_mode": result.expected_mode,
+            "selected_local_inbound_pks": result.selected_local_inbound_pks,
+            "selected_remote_inbound_ids": result.selected_remote_inbound_ids,
+        },
+    ).to_safe_dict()
 
 
 def _selected_inbounds(request):
@@ -250,6 +282,22 @@ class SafeRouteProvisioningTestService:
 
             if validation_errors:
                 result.errors.extend(mask_sensitive_output(item) for item in validation_errors)
+                primary_error_code = steps["validation"].error_code or ERROR_ROUTE_INVALID
+                result.structured_errors.extend(
+                    _structured_test_error(
+                        mask_sensitive_output(item),
+                        error_code=primary_error_code if index == 0 else ERROR_ROUTE_INVALID,
+                        layer="routing_validation",
+                        action="live_provisioning_test",
+                        result=result,
+                        panel=panel,
+                        inbound=inbounds[0] if inbounds else None,
+                        remediation=(
+                            "برای تست live فقط اینباندهای معتبر همان پنل را انتخاب کنید و Capability را از Panel Center به‌روزرسانی کنید."
+                        ),
+                    )
+                    for index, item in enumerate(validation_errors)
+                )
                 steps["validation"].status = STATUS_ERROR
                 steps["validation"].message = "Route validation failed."
                 steps["validation"].error_code = steps["validation"].error_code or ERROR_ROUTE_INVALID
@@ -295,6 +343,23 @@ class SafeRouteProvisioningTestService:
                 error_code = _classify_exception(exc)
                 safe_error = _safe_error(exc, panel=panel)
                 result.errors.append(safe_error)
+                result.structured_errors.append(
+                    safe_error_dict(
+                        exc,
+                        error_code=error_code,
+                        layer="provisioning_test",
+                        action="create_client",
+                        message="خطا در ساخت client تست روی پنل",
+                        remediation="credentialها، قابلیت create client، ظرفیت اینباند و CSRF/write API پنل را بررسی کنید.",
+                        panel=panel,
+                        inbound=inbounds[0] if inbounds else None,
+                        safe_context={
+                            "expected_mode": result.expected_mode,
+                            "selected_remote_inbound_ids": result.selected_remote_inbound_ids,
+                            "test_marker": result.test_marker,
+                        },
+                    )
+                )
                 steps["create"].status = STATUS_ERROR
                 steps["create"].message = "Remote test client creation failed."
                 steps["create"].error_code = error_code
@@ -315,6 +380,19 @@ class SafeRouteProvisioningTestService:
             except Exception as exc:
                 safe_error = _safe_error(exc, panel=panel)
                 result.errors.append(safe_error)
+                result.structured_errors.append(
+                    safe_error_dict(
+                        exc,
+                        error_code=ERROR_VERIFY_FAILED,
+                        layer="provisioning_test",
+                        action="verify_client",
+                        message="خطا در تایید client تست روی اینباندها",
+                        remediation="وجود client تست را روی همه اینباندهای انتخاب‌شده بررسی کنید.",
+                        panel=panel,
+                        inbound=inbounds[0] if inbounds else None,
+                        safe_context={"verified_inbound_count": result.verified_inbound_count, "expected_inbound_count": len(inbounds)},
+                    )
+                )
                 steps["verify"].status = STATUS_ERROR
                 steps["verify"].message = "Remote verification failed."
                 steps["verify"].error_code = ERROR_VERIFY_FAILED
@@ -337,6 +415,18 @@ class SafeRouteProvisioningTestService:
             except Exception as exc:
                 safe_error = _safe_error(exc, panel=panel)
                 result.errors.append(safe_error)
+                result.structured_errors.append(
+                    safe_error_dict(
+                        exc,
+                        error_code=ERROR_LINK_GENERATION_FAILED,
+                        layer="subscription_render",
+                        action="render_test_links",
+                        message="خطا در ساخت پیش‌نمایش امن لینک‌ها",
+                        remediation="خروجی پنل برای direct_link یا subscription را بررسی کنید.",
+                        panel=panel,
+                        inbound=inbounds[0] if inbounds else None,
+                    )
+                )
                 steps["links"].status = STATUS_ERROR
                 steps["links"].message = "Delivery link generation failed."
                 steps["links"].error_code = ERROR_LINK_GENERATION_FAILED

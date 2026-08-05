@@ -34,6 +34,7 @@ from store.models import (
 )
 from store.renewal_reminder_services import get_active_clients_for_reminders, normalize_reminder_days
 from store.panels import get_safe_panel_adapter
+from store.panels.errors import PanelIntegrationError
 from store.xui_compat import discover_xui_capabilities
 
 
@@ -135,6 +136,26 @@ class Command(BaseCommand):
         if item.level == self.LEVEL_WARNING:
             return self.style.WARNING(text)
         return self.style.ERROR(text)
+
+    def structured_panel_summary(self, error):
+        if isinstance(error, PanelIntegrationError):
+            data = error.to_safe_dict()
+        elif isinstance(error, dict):
+            data = error
+        else:
+            data = {"error_code": "panel_error", "message": self.sanitize_panel_error(error, None)}
+        parts = [
+            f"error_code={data.get('error_code') or '-'}",
+            f"layer={data.get('layer') or '-'}",
+            f"panel_id={data.get('panel_id') or '-'}",
+            f"panel_name={data.get('panel_name') or '-'}",
+            f"action={data.get('action') or '-'}",
+        ]
+        if data.get("remediation"):
+            parts.append(f"remediation={data['remediation']}")
+        if data.get("message"):
+            parts.append(f"message={data['message']}")
+        return " ".join(parts)
 
     def check_deployment_settings(self):
         secret_key = (getattr(settings, "SECRET_KEY", "") or "").strip()
@@ -550,9 +571,44 @@ class Command(BaseCommand):
                 profile_label = report.capability_profile or "unknown"
                 version_label = report.detected_version or "-"
                 if not report.supported:
-                    self.warning(subject, f"Panel family={report.family} is unsupported: {'; '.join(report.errors or report.warnings)}")
+                    structured = PanelIntegrationError(
+                        "این پنل هنوز برای ساخت کانفیگ قابل استفاده نیست.",
+                        error_code="unsupported_panel_family",
+                        layer="adapter_factory",
+                        action="check_integrations",
+                        technical_detail="; ".join(report.errors or report.warnings),
+                        remediation="family پنل را بررسی کنید یا برای عملیات remote از پنل X-UI استفاده کنید.",
+                        panel=panel,
+                        panel_family=report.family,
+                        capability_profile=report.capability_profile,
+                    )
+                    self.warning(
+                        subject,
+                        (
+                            f"Panel family={report.family} is unsupported: {'; '.join(report.errors or report.warnings)} "
+                            f"{self.structured_panel_summary(structured)}"
+                        ),
+                    )
                 elif profile_label == Panel.CapabilityProfile.UNKNOWN_SAFE:
-                    self.warning(subject, "X-UI compatibility profile is unknown_safe; destructive operations are blocked.")
+                    structured = PanelIntegrationError(
+                        "این پنل هنوز برای ساخت کانفیگ قابل استفاده نیست.",
+                        error_code="panel_capability_missing",
+                        layer="capability_detection",
+                        action="check_integrations",
+                        technical_detail="X-UI compatibility profile is unknown_safe; destructive operations are blocked.",
+                        remediation="از Panel Center گزینه Test connection / Sync capabilities را اجرا کنید.",
+                        panel=panel,
+                        panel_family=report.family,
+                        capability_profile=profile_label,
+                        safe_context={"required_capability": "supports_create_client"},
+                    )
+                    self.warning(
+                        subject,
+                        (
+                            "X-UI compatibility profile is unknown_safe; destructive operations are blocked. "
+                            f"{self.structured_panel_summary(structured)}"
+                        ),
+                    )
                 elif profile_label in {
                     Panel.CapabilityProfile.MODERN_SINGLE_NODE,
                     Panel.CapabilityProfile.MODERN_MULTI_NODE,
@@ -575,6 +631,16 @@ class Command(BaseCommand):
         except Exception as exc:
             category, message, metadata = classify_xui_exception(exc)
             parts = [f"X-UI login failed: error_code={category}"]
+            structured = PanelIntegrationError(
+                "ورود به پنل ناموفق بود.",
+                error_code=category or "panel_login_failed",
+                layer="panel_login",
+                action="login",
+                technical_detail=message or str(exc),
+                remediation=metadata.get("remediation_hint") or "credentialها، CSRF/2FA و دسترسی شبکه پنل را بررسی کنید.",
+                panel=panel,
+            )
+            parts.append(self.structured_panel_summary(structured))
             if metadata.get("http_status"):
                 parts.append(f"http_status=HTTP {metadata['http_status']}")
             parts.append(f"message={self.sanitize_panel_error(message, panel)}")

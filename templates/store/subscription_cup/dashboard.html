@@ -1,0 +1,319 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }} | اشتراک</title>
+    <link href="{% static 'css/vazirmatn.css' %}?v={{ static_version }}" rel="stylesheet">
+    <style>
+        :root {
+            color-scheme: light;
+            --ink: #172033;
+            --muted: #667085;
+            --line: #d7dde8;
+            --surface: #ffffff;
+            --soft: #f6f8fb;
+            --teal: #0f766e;
+            --green: #16803c;
+            --amber: #9a650d;
+            --rose: #bd2444;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: linear-gradient(180deg, #fbfcfd 0%, #eef7f4 46%, #f9faf7 100%);
+            color: var(--ink);
+            font-family: Vazirmatn, Tahoma, sans-serif;
+            line-height: 1.8;
+        }
+        .page {
+            width: min(1120px, calc(100% - 32px));
+            margin: 0 auto;
+            padding: 28px 0 42px;
+        }
+        .topbar, .panel, .config {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.94);
+            box-shadow: 0 18px 48px rgba(23, 32, 51, 0.08);
+        }
+        .topbar {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 18px;
+            align-items: center;
+            padding: 24px;
+        }
+        h1, h2, p { margin: 0; }
+        h1 { font-size: clamp(1.45rem, 2.8vw, 2.4rem); font-weight: 900; letter-spacing: 0; }
+        h2 { font-size: 1rem; font-weight: 900; }
+        .subtitle { margin-top: 6px; color: var(--muted); font-size: 0.95rem; }
+        .status {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 92px;
+            min-height: 38px;
+            border-radius: 8px;
+            padding: 4px 12px;
+            font-weight: 900;
+            color: #ffffff;
+        }
+        .status.active { background: var(--green); }
+        .status.blocked { background: var(--rose); }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 12px;
+            margin-top: 18px;
+        }
+        .metric, .linkbox {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--surface);
+            padding: 14px;
+        }
+        .metric span, .field-label {
+            display: block;
+            color: var(--muted);
+            font-size: 0.78rem;
+            font-weight: 800;
+        }
+        .metric strong {
+            display: block;
+            margin-top: 3px;
+            overflow-wrap: anywhere;
+            color: var(--ink);
+            font-size: 1.04rem;
+            font-weight: 900;
+            direction: ltr;
+            text-align: right;
+        }
+        .sections {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 18px;
+            margin-top: 18px;
+        }
+        .panel { padding: 20px; }
+        .panel-head {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 14px;
+        }
+        .linkbox code {
+            display: block;
+            margin: 8px 0 12px;
+            overflow-wrap: anywhere;
+            color: #0f172a;
+            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+            font-size: 0.82rem;
+            direction: ltr;
+            text-align: left;
+        }
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        button, .button {
+            min-height: 40px;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            padding: 8px 13px;
+            background: var(--teal);
+            color: #ffffff;
+            cursor: pointer;
+            font: inherit;
+            font-size: 0.88rem;
+            font-weight: 900;
+            text-decoration: none;
+        }
+        button.secondary, .button.secondary {
+            border-color: var(--line);
+            background: #ffffff;
+            color: var(--ink);
+        }
+        button:disabled {
+            cursor: not-allowed;
+            opacity: 0.64;
+        }
+        .notice {
+            border: 1px solid #f2c4cf;
+            border-radius: 8px;
+            background: #fff5f7;
+            padding: 14px;
+            color: #8f1731;
+            font-weight: 800;
+        }
+        .muted {
+            color: var(--muted);
+            font-size: 0.88rem;
+        }
+        .quick {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+        }
+        .quick .button { text-align: center; }
+        .config-list {
+            display: grid;
+            gap: 10px;
+        }
+        .config {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 12px;
+            align-items: center;
+            padding: 14px;
+            box-shadow: none;
+        }
+        .config-main {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 10px;
+        }
+        .value {
+            display: block;
+            overflow-wrap: anywhere;
+            font-weight: 850;
+            direction: ltr;
+            text-align: right;
+        }
+        .qr-note {
+            display: none;
+            margin-top: 10px;
+            border: 1px dashed #b8c1ce;
+            border-radius: 8px;
+            background: var(--soft);
+            padding: 12px;
+            color: var(--muted);
+            font-size: 0.86rem;
+        }
+        .qr-note.is-open { display: block; }
+        @media (max-width: 860px) {
+            .topbar { grid-template-columns: 1fr; }
+            .grid, .quick, .config-main { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .config { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 560px) {
+            .page { width: min(100% - 20px, 1120px); padding-top: 14px; }
+            .grid, .quick, .config-main { grid-template-columns: 1fr; }
+            .topbar, .panel { padding: 16px; }
+            .actions { display: grid; grid-template-columns: 1fr; }
+            button, .button { width: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <main class="page">
+        <section class="topbar">
+            <div>
+                <h1>{{ title }}</h1>
+                <p class="subtitle">داشبورد اشتراک و لینک ورود به برنامه</p>
+            </div>
+            <span class="status {% if cup.is_accessible %}active{% else %}blocked{% endif %}">{{ status_label }}</span>
+        </section>
+
+        <section class="grid" aria-label="خلاصه اشتراک">
+            <div class="metric"><span>روز باقی‌مانده</span><strong>{{ remaining_days_label }}</strong></div>
+            <div class="metric"><span>تاریخ انقضا</span><strong>{{ cup.expires_at|date:"Y-m-d H:i"|default:"-" }}</strong></div>
+            <div class="metric"><span>حجم پلن</span><strong>{{ traffic_limit_label }}</strong></div>
+            <div class="metric"><span>تعداد کانفیگ</span><strong>{{ item_count }}</strong></div>
+        </section>
+
+        <div class="sections">
+            {% if not cup.is_accessible %}
+                <section class="notice">
+                    این اشتراک در حال حاضر قابل استفاده نیست. برای تمدید یا فعال‌سازی با پشتیبانی تماس بگیرید.
+                </section>
+            {% endif %}
+
+            <section class="panel">
+                <div class="panel-head">
+                    <h2>لینک اشتراک</h2>
+                    <span class="muted">{{ protocols|join:", "|default:"بدون پروتکل فعال" }}</span>
+                </div>
+                <div class="linkbox">
+                    <span class="field-label">لینک ورود به برنامه</span>
+                    <code>{{ subscription_url }}</code>
+                    <div class="actions">
+                        <button type="button" data-copy="{{ subscription_url }}">کپی لینک</button>
+                        <button type="button" class="secondary" data-toggle-qr="subscription">نمایش QR</button>
+                    </div>
+                    <div id="qr-subscription" class="qr-note">QR در این نسخه به صورت تصویری تولید نمی‌شود. همین لینک را در برنامه مقصد import کنید.</div>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-head">
+                    <h2>ورود سریع</h2>
+                    <span class="muted">حجم مصرف‌شده فعلاً از Cup قابل محاسبه نیست</span>
+                </div>
+                <div class="quick">
+                    <button type="button" data-copy="{{ subscription_url }}">Hiddify</button>
+                    <button type="button" data-copy="{{ subscription_url }}">v2rayNG</button>
+                    <button type="button" data-copy="{{ subscription_url }}">Clash</button>
+                    <button type="button" data-copy="{{ subscription_url }}">sing-box</button>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-head">
+                    <h2>کانفیگ‌ها</h2>
+                    <span class="muted">{{ item_count }} مورد فعال</span>
+                </div>
+                {% if config_rows %}
+                    <div class="config-list">
+                        {% for row in config_rows %}
+                            <article class="config">
+                                <div class="config-main">
+                                    <div><span class="field-label">Protocol</span><span class="value">{{ row.protocol }}</span></div>
+                                    <div><span class="field-label">Remark</span><span class="value">{{ row.remark }}</span></div>
+                                    <div><span class="field-label">Host</span><span class="value">{{ row.host }}</span></div>
+                                    <div><span class="field-label">Port</span><span class="value">{{ row.port }}</span></div>
+                                    <div><span class="field-label">Source</span><span class="value">{{ row.source_panel|default:"-" }}{% if row.source_inbound %} / {{ row.source_inbound }}{% endif %}</span></div>
+                                </div>
+                                <div class="actions">
+                                    <button type="button" data-copy="{{ row.raw_link }}">کپی کانفیگ</button>
+                                    <button type="button" class="secondary" data-toggle-qr="config-{{ forloop.counter }}">QR</button>
+                                </div>
+                                <div id="qr-config-{{ forloop.counter }}" class="qr-note">QR تصویری برای این کانفیگ در این فاز فعال نیست.</div>
+                            </article>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="muted">کانفیگ فعالی برای نمایش وجود ندارد.</p>
+                {% endif %}
+            </section>
+        </div>
+    </main>
+    <script>
+        document.addEventListener("click", async function (event) {
+            const copyButton = event.target.closest("[data-copy]");
+            if (copyButton) {
+                try {
+                    await navigator.clipboard.writeText(copyButton.dataset.copy || "");
+                    const original = copyButton.textContent;
+                    copyButton.textContent = "کپی شد";
+                    window.setTimeout(function () { copyButton.textContent = original; }, 1200);
+                } catch (error) {
+                    copyButton.textContent = "کپی نشد";
+                }
+                return;
+            }
+            const qrButton = event.target.closest("[data-toggle-qr]");
+            if (qrButton) {
+                const note = document.getElementById("qr-" + qrButton.dataset.toggleQr);
+                if (note) {
+                    note.classList.toggle("is-open");
+                }
+            }
+        });
+    </script>
+</body>
+</html>

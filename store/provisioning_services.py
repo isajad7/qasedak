@@ -12,6 +12,7 @@ from django.utils import timezone
 from .db_locking import select_for_update_self
 from .models import Inbound, Order, Panel, VPNClient
 from .naming import build_client_display_name, build_xui_client_email
+from .panels.errors import PanelIntegrationError
 from .referral_services import create_referral_reward_for_order
 from .xui_api import (
     XUIError,
@@ -295,6 +296,8 @@ def multi_inbound_order_identity(order, inbounds, *, index=1):
 
 
 def _safe_error(exc, panel=None):
+    if isinstance(exc, PanelIntegrationError):
+        return exc.message
     return sanitize_xui_operational_text(exc, panel=panel, max_length=700)
 
 
@@ -857,23 +860,46 @@ def approve_and_provision_order(order, actor=None, source=None, notify=True):
                 safe_error=block_reason,
             )
 
-        strategy = resolve_order_provisioning_strategy(order)
-        if strategy == STRATEGY_RENEW_EXISTING_CLIENT:
-            result = _activate_renewal_order_locked(order, actor=actor)
-        elif strategy in {STRATEGY_DEFERRED_CREATE_ENABLED, STRATEGY_DIRECT_CREATE_ENABLED} and order.inbound_id and is_modern_panel(order.inbound.panel):
-            result = _activate_modern_enabled_order_locked(order, actor=actor, strategy=strategy)
+        from .cup_fulfillment_services import fulfill_order_with_recipe
+
+        fulfillment_result = fulfill_order_with_recipe(order, actor=actor)
+        if fulfillment_result.intercepted:
+            order.refresh_from_db()
+            if fulfillment_result.ok:
+                result = ProvisioningResult(
+                    True,
+                    "سفارش تایید شد و Subscription Cup از recipe پلن تکمیل شد.",
+                    order_status=order.status,
+                    provisioning_status=order.provisioning_status,
+                )
+                result.subscription_cups = fulfillment_result.subscription_cups
+            else:
+                result = ProvisioningResult(
+                    False,
+                    "تکمیل Subscription Cup برای این پلن ناموفق بود. سفارش قابل retry است.",
+                    order_status=order.status,
+                    provisioning_status=order.provisioning_status,
+                    safe_error="; ".join(fulfillment_result.errors[:3]),
+                )
         else:
-            result = _activate_legacy_order_locked(order, actor=actor)
+            strategy = resolve_order_provisioning_strategy(order)
+            if strategy == STRATEGY_RENEW_EXISTING_CLIENT:
+                result = _activate_renewal_order_locked(order, actor=actor)
+            elif strategy in {STRATEGY_DEFERRED_CREATE_ENABLED, STRATEGY_DIRECT_CREATE_ENABLED} and order.inbound_id and is_modern_panel(order.inbound.panel):
+                result = _activate_modern_enabled_order_locked(order, actor=actor, strategy=strategy)
+            else:
+                result = _activate_legacy_order_locked(order, actor=actor)
 
     if result.ok:
         try:
             from .subscription_cups import rebuild_subscription_cups_for_order
 
-            result.subscription_cups = rebuild_subscription_cups_for_order(
-                order,
-                force_active=True,
-                added_reason="provisioning",
-            )
+            if not getattr(result, "subscription_cups", None):
+                result.subscription_cups = rebuild_subscription_cups_for_order(
+                    order,
+                    force_active=True,
+                    added_reason="provisioning",
+                )
         except Exception:
             result.subscription_cups = []
             logger.exception("Could not rebuild subscription cups for order_id=%s tracking=%s", order.pk, order.order_tracking_code)

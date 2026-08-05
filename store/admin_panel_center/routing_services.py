@@ -11,6 +11,7 @@ from store.admin_catalog import get_plan_route_status, money_label, plan_duratio
 from store.admin_panel_center.routing_forms import ROUTE_MODE_MULTI, ROUTE_MODE_NONE, ROUTE_MODE_SINGLE
 from store.models import Inbound, Order, Panel, Plan, PlanInboundRoute, VPNClient
 from store.panels import get_safe_panel_adapter
+from store.panels.errors import RoutingValidationError
 from store.plan_route_services import (
     BULK_ROUTE_STRATEGY_REPLACE_ACTIVE,
     active_routes_for_plan_operator,
@@ -31,6 +32,7 @@ class RoutingOperationResult:
     details: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    structured_errors: list[dict] = field(default_factory=list)
 
 
 def plan_routing_url(plan):
@@ -145,28 +147,28 @@ def validate_inbound_for_routing(inbound, *, panel=None, require_panel_capabilit
     errors = []
     warnings = []
     if not inbound:
-        return ["Inbound is required."], warnings
+        return ["اینباند انتخاب نشده است. Inbound is required."], warnings
     if panel and inbound.panel_id != panel.pk:
-        errors.append("Inbound does not belong to the selected panel.")
+        errors.append("اینباند انتخاب‌شده به پنل انتخاب‌شده وصل نیست. Inbound does not belong to the selected panel.")
     if not inbound.is_active:
-        errors.append("Inbound is inactive.")
+        errors.append("اینباند غیرفعال است. Inbound is inactive.")
     if not inbound.available_for_new_orders:
-        errors.append("Inbound is not sellable.")
+        errors.append("اینباند برای فروش جدید فعال نیست. Inbound is not sellable.")
     if inbound.legacy_note:
-        errors.append("Inbound is marked as legacy.")
+        errors.append("اینباند legacy علامت‌گذاری شده است. Inbound is marked as legacy.")
     if not inbound.panel_id:
-        errors.append("Inbound has no panel.")
+        errors.append("اینباند پنل ندارد. Inbound has no panel.")
     elif not inbound.panel.is_active:
-        errors.append("Inbound panel is inactive.")
+        errors.append("پنل اینباند غیرفعال است. Inbound panel is inactive.")
     protocol = str(inbound.protocol or "").lower()
     if protocol not in SUPPORTED_ROUTE_PROTOCOLS:
-        errors.append("Inbound protocol is not supported by the routing builder.")
+        errors.append("پروتکل اینباند در Routing Builder پشتیبانی نمی‌شود. Inbound protocol is not supported by the routing builder.")
     if inbound.max_clients is not None and inbound.current_users >= inbound.max_clients:
         warnings.append("Inbound capacity is currently full.")
     if require_panel_capability and inbound.panel_id:
         report = panel_report(inbound.panel)
         if not report.supports_create_client:
-            errors.append("Panel does not support client creation.")
+            errors.append("پنل قابلیت ساخت client ندارد. Panel does not support client creation.")
     return errors, warnings
 
 
@@ -179,17 +181,17 @@ def validate_routing_selection(*, plan, mode, panel=None, inbound=None, inbounds
         return errors, warnings
 
     if not panel:
-        errors.append("Panel is required.")
+        errors.append("پنل مقصد انتخاب نشده است. Panel is required.")
         return errors, warnings
     report = panel_report(panel)
     if not report.supports_create_client:
-        errors.append("Selected panel does not support client creation.")
+        errors.append("پنل انتخاب‌شده قابلیت supports_create_client ندارد. Selected panel does not support client creation.")
 
     if mode == ROUTE_MODE_SINGLE:
         if not inbound:
-            errors.append("Exactly one inbound is required for single mode.")
+            errors.append("برای حالت single دقیقاً یک اینباند انتخاب کنید. Exactly one inbound is required for single mode.")
         if selected:
-            errors.append("Use the single inbound field for single mode.")
+            errors.append("در حالت single از فیلد تک‌اینباندی استفاده کنید. Use the single inbound field for single mode.")
         if inbound:
             inbound_errors, inbound_warnings = validate_inbound_for_routing(inbound, panel=panel)
             errors.extend(inbound_errors)
@@ -198,29 +200,82 @@ def validate_routing_selection(*, plan, mode, panel=None, inbound=None, inbounds
 
     if mode == ROUTE_MODE_MULTI:
         if inbound:
-            errors.append("Single inbound field must be empty for multi mode.")
+            errors.append("در حالت multi فیلد تک‌اینباندی باید خالی باشد. Single inbound field must be empty for multi mode.")
         if len(selected) < 2:
-            errors.append("At least two inbounds are required for multi mode.")
+            errors.append("برای حالت multi حداقل دو اینباند انتخاب کنید. At least two inbounds are required for multi mode.")
         panel_ids = {item.panel_id for item in selected}
         if len(panel_ids) > 1:
-            errors.append("All selected inbounds must belong to the same panel.")
+            errors.append("اینباندهای انتخاب‌شده از چند پنل هستند. این مورد فقط در Multi-panel Builder مجاز است، نه در single-panel route builder. All selected inbounds must belong to the same panel.")
         if panel.pk not in panel_ids and selected:
-            errors.append("Selected inbounds do not belong to the selected panel.")
+            errors.append("اینباندهای انتخاب‌شده به پنل انتخاب‌شده وصل نیستند. Selected inbounds do not belong to the selected panel.")
         if not report.supports_multi_inbound_create:
-            errors.append("Selected panel does not support multi-inbound create.")
+            errors.append("پنل انتخاب‌شده قابلیت supports_multi_inbound_create ندارد. Selected panel does not support multi-inbound create.")
         if panel.capability_profile != Panel.CapabilityProfile.MODERN_MULTI_NODE:
-            errors.append("Multi mode requires modern_multi_node capability profile.")
+            errors.append("حالت multi به capability profile modern_multi_node نیاز دارد. Multi mode requires modern_multi_node capability profile.")
         remote_ids = [str(item.inbound_id) for item in selected]
         if len(set(remote_ids)) != len(remote_ids):
-            errors.append("Duplicate remote inbound IDs are not allowed in this builder.")
+            errors.append("Inbound ID ریموت تکراری داخل این builder مجاز نیست. Duplicate remote inbound IDs are not allowed in this builder.")
         for item in selected:
             inbound_errors, inbound_warnings = validate_inbound_for_routing(item, panel=panel)
             errors.extend(f"Inbound #{item.pk}: {message}" for message in inbound_errors)
             warnings.extend(f"Inbound #{item.pk}: {message}" for message in inbound_warnings)
         return errors, warnings
 
-    errors.append("Unknown delivery mode.")
+    errors.append("حالت تحویل شناخته نشد. Unknown delivery mode.")
     return errors, warnings
+
+
+def _routing_error_code(message):
+    text = str(message or "").lower()
+    if "supports_create_client" in text or "client creation" in text:
+        return "panel_capability_missing"
+    if "supports_multi_inbound_create" in text or "multi-inbound" in text or "modern_multi_node" in text:
+        return "panel_capability_missing"
+    if "same panel" in text or "پنل" in text and "چند" in text:
+        return "mixed_panel_selection"
+    if "inbound" in text or "اینباند" in text:
+        return "inbound_validation_failed"
+    if "panel is required" in text or "پنل مقصد" in text:
+        return "panel_required"
+    return "routing_validation_failed"
+
+
+def _routing_remediation(message):
+    text = str(message or "").lower()
+    if "sync capabilities" in text or "supports_" in text or "client creation" in text:
+        return "از Panel Center گزینه Test connection / Sync capabilities را اجرا کنید یا پنل X-UI با قابلیت لازم انتخاب کنید."
+    if "same panel" in text or "چند پنل" in text:
+        return "برای route تک‌پنلی فقط اینباندهای همان پنل را انتخاب کنید؛ برای چند پنل از Multi-panel Builder استفاده کنید."
+    if "inbound" in text or "اینباند" in text:
+        return "وضعیت active، available_for_new_orders، protocol و اتصال اینباند به پنل را بررسی کنید."
+    return "انتخاب‌های route را اصلاح و دوباره Preview یا Save را اجرا کنید."
+
+
+def _structured_routing_errors(errors, *, plan, mode, panel=None, inbound=None, inbounds=None):
+    selected = [inbound] if inbound else list(inbounds or [])
+    fallback_inbound = selected[0] if selected else None
+    report = panel_report(panel) if panel else None
+    return [
+        RoutingValidationError(
+            str(message),
+            error_code=_routing_error_code(message),
+            action="validate_route",
+            technical_detail=str(message),
+            remediation=_routing_remediation(message),
+            panel=panel,
+            panel_family=getattr(report, "family", "") if report else "",
+            capability_profile=getattr(report, "capability_profile", "") if report else "",
+            inbound=fallback_inbound,
+            safe_context={
+                "plan_id": getattr(plan, "pk", None),
+                "plan_name": getattr(plan, "name", "") or "",
+                "mode": mode,
+                "selected_inbound_pks": [getattr(item, "pk", None) for item in selected if item],
+                "remote_inbound_ids": [getattr(item, "inbound_id", None) for item in selected if item],
+            },
+        ).to_safe_dict()
+        for message in errors
+    ]
 
 
 def preview_routing(*, plan, mode, panel=None, inbound=None, inbounds=None):
@@ -243,14 +298,29 @@ def preview_routing(*, plan, mode, panel=None, inbound=None, inbounds=None):
         "vpn_clients_created": VPNClient.objects.count(),
     }
     if errors:
-        return RoutingOperationResult(False, mode, "Preview has validation errors.", details=details, warnings=warnings, errors=errors)
+        return RoutingOperationResult(
+            False,
+            mode,
+            "Preview has validation errors.",
+            details=details,
+            warnings=warnings,
+            errors=errors,
+            structured_errors=_structured_routing_errors(errors, plan=plan, mode=mode, panel=panel, inbound=inbound, inbounds=inbounds),
+        )
     return RoutingOperationResult(True, mode, "Preview is ready. No remote write was performed.", details=details, warnings=warnings)
 
 
 def apply_routing(*, plan, mode, panel=None, inbound=None, inbounds=None):
     errors, warnings = validate_routing_selection(plan=plan, mode=mode, panel=panel, inbound=inbound, inbounds=inbounds)
     if errors:
-        return RoutingOperationResult(False, mode, "Route was not saved.", warnings=warnings, errors=errors)
+        return RoutingOperationResult(
+            False,
+            mode,
+            "Route was not saved.",
+            warnings=warnings,
+            errors=errors,
+            structured_errors=_structured_routing_errors(errors, plan=plan, mode=mode, panel=panel, inbound=inbound, inbounds=inbounds),
+        )
     if mode == ROUTE_MODE_NONE:
         return deactivate_plan_routes(plan)
     if mode == ROUTE_MODE_SINGLE:
@@ -277,7 +347,15 @@ def apply_routing(*, plan, mode, panel=None, inbound=None, inbounds=None):
             note="Updated from Panel Integration Center routing builder.",
         )
     if result.get("errors"):
-        return RoutingOperationResult(False, mode, "Route was not saved.", details=result, warnings=result.get("warnings", []), errors=result["errors"])
+        return RoutingOperationResult(
+            False,
+            mode,
+            "Route was not saved.",
+            details=result,
+            warnings=result.get("warnings", []),
+            errors=result["errors"],
+            structured_errors=_structured_routing_errors(result["errors"], plan=plan, mode=mode, panel=panel, inbound=inbound, inbounds=inbounds),
+        )
     return RoutingOperationResult(True, mode, "Route saved.", details=result, warnings=result.get("warnings", []))
 
 

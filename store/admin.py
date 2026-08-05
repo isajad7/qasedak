@@ -49,7 +49,12 @@ from .models import (
     BotUser,
     BroadcastMessage,
     BroadcastRecipient,
+    ConfigAllocation,
+    ConfigInventoryAsset,
+    ConfigInventoryPool,
     ConfigLink,
+    CupFillerRule,
+    CupFulfillmentRecipe,
     CupItem,
     Customer,
     CustomerAnalyticsReport,
@@ -152,7 +157,9 @@ from .plan_route_services import (
     normalize_plan_ids,
     preview_bulk_plan_routes,
 )
-from .subscription_cups import apply_config_link_parse, build_subscription_cup_url, mask_subscription_url
+from .admin_config_inventory import config_inventory_import, fulfillment_recipe_preview
+from .config_inventory_services import get_pool_stock_summary
+from .subscription_cups import apply_config_link_parse, build_subscription_cup_url, mask_config_link_for_display, mask_subscription_url, parse_config_link
 from .xui_api import mask_xui_value, sync_inbound_data
 
 
@@ -1873,6 +1880,7 @@ class PlanAdmin(ImportExportModelAdmin):
         "catalog_inbound_destination",
         "routing_builder_link",
         "quick_review_link",
+        "fulfillment_recipe_actions",
     )
     list_filter = (
         "store",
@@ -1966,6 +1974,31 @@ class PlanAdmin(ImportExportModelAdmin):
     def routing_builder_link(self, obj):
         url = reverse("admin_store_panel_center_routing_detail", args=[obj.pk])
         return format_html('<a class="button" href="{}">{}</a>', url, _("تنظیم مسیر"))
+
+    @admin.display(description=_("Cup fulfillment"))
+    def fulfillment_recipe_actions(self, obj):
+        add_url = f"{reverse('admin:store_cupfulfillmentrecipe_add')}?{urlencode({'plan': obj.pk})}"
+        recipe = obj.cup_fulfillment_recipes.filter(is_active=True).order_by("priority", "pk").first()
+        create_button = format_html(
+            '<a class="button" href="{}">{}</a>',
+            add_url,
+            _("ساخت دستور پر کردن Cup برای این پلن"),
+        )
+        if recipe:
+            preview_url = reverse("admin:store_cupfulfillmentrecipe_preview", args=[recipe.pk])
+            preview_button = format_html(
+                ' <a class="button" href="{}">{}</a>',
+                preview_url,
+                _("پیش‌نمایش دستور تحویل"),
+            )
+            return format_html("{}{}", create_button, preview_button)
+        recipe_list_url = f"{reverse('admin:store_cupfulfillmentrecipe_changelist')}?{urlencode({'plan__id__exact': obj.pk})}"
+        list_button = format_html(
+            ' <a class="button" href="{}">{}</a>',
+            recipe_list_url,
+            _("دستورهای این پلن"),
+        )
+        return format_html("{}{}", create_button, list_button)
 
     def get_queryset(self, request):
         return (
@@ -4258,6 +4291,259 @@ class VPNClientAdmin(ImportExportModelAdmin):
     @admin.display(description=_("Last reminder"), ordering="admin_last_reminder_sent_at")
     def last_reminder_sent_at(self, obj):
         return getattr(obj, "admin_last_reminder_sent_at", None) or "-"
+
+
+@admin.register(ConfigInventoryPool)
+class ConfigInventoryPoolAdmin(ImportExportModelAdmin):
+    change_list_template = "admin/store/config_inventory/pool_change_list.html"
+    list_display = (
+        "id",
+        "title",
+        "connected_plan",
+        "allocation_mode",
+        "available_stock",
+        "is_active",
+        "priority",
+        "import_assets_link",
+        "created_at",
+    )
+    list_filter = ("allocation_mode", "is_active", "connected_plan", "created_at")
+    search_fields = ("title", "description", "connected_plan__name")
+    autocomplete_fields = ("connected_plan",)
+    readonly_fields = ("import_assets_action", "stock_summary", "created_at", "updated_at")
+    fieldsets = (
+        (_("Pool"), {"fields": ("title", "description", "connected_plan", "is_active", "priority", "import_assets_action")}),
+        (
+            _("Allocation"),
+            {
+                "fields": (
+                    "allocation_mode",
+                    "max_allocations_per_asset",
+                    "traffic_limit_gb",
+                    "duration_days",
+                    "stock_summary",
+                )
+            },
+        ),
+        (_("Metadata"), {"classes": ("collapse",), "fields": ("metadata", "created_at", "updated_at")}),
+    )
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path("import/", self.admin_site.admin_view(self.import_assets_view), name="store_configinventorypool_import"),
+        ]
+        return custom + urls
+
+    @admin.display(description=_("Available stock"))
+    def available_stock(self, obj):
+        summary = get_pool_stock_summary(obj)
+        capacity = summary["available_capacity"]
+        if capacity is None:
+            return _("Unlimited (%(count)s reusable assets)") % {"count": summary["usable_asset_count"]}
+        return capacity
+
+    @admin.display(description=_("Import"))
+    def import_assets_link(self, obj):
+        url = reverse("admin_store_config_inventory_import")
+        return format_html('<a class="button" href="{}?pool={}">{}</a>', url, obj.pk, _("وارد کردن لینک کانفیگ"))
+
+    @admin.display(description=_("Import config links"))
+    def import_assets_action(self, obj):
+        if not obj or not obj.pk:
+            url = reverse("admin_store_config_inventory_import")
+            return format_html('<a class="button" href="{}">{}</a>', url, _("وارد کردن لینک کانفیگ"))
+        return self.import_assets_link(obj)
+
+    @admin.display(description=_("Stock summary"))
+    def stock_summary(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        summary = get_pool_stock_summary(obj)
+        rows = [
+            (_("Mode"), summary["allocation_mode"]),
+            (_("Assets"), summary["asset_count"]),
+            (_("Usable assets"), summary["usable_asset_count"]),
+            (_("Available capacity"), _("Unlimited") if summary["available_capacity"] is None else summary["available_capacity"]),
+        ]
+        for status, count in summary["status_counts"].items():
+            if count:
+                rows.append((status, count))
+        return format_html_join("", "<div><strong>{}</strong>: {}</div>", rows)
+
+    def import_assets_view(self, request):
+        return config_inventory_import(request)
+
+
+@admin.register(ConfigInventoryAsset)
+class ConfigInventoryAssetAdmin(ImportExportModelAdmin):
+    list_display = (
+        "id",
+        "pool",
+        "protocol",
+        "masked_raw_link",
+        "status",
+        "current_allocations",
+        "max_allocations",
+        "source_batch",
+        "expires_at",
+        "created_at",
+    )
+    list_filter = ("status", "protocol", "pool", "source_batch", "created_at", "expires_at")
+    search_fields = ("normalized_hash", "remark", "host", "source_batch")
+    autocomplete_fields = ("pool",)
+    readonly_fields = (
+        "masked_raw_link",
+        "normalized_link",
+        "normalized_hash",
+        "protocol",
+        "remark",
+        "host",
+        "port",
+        "current_allocations",
+        "created_at",
+        "updated_at",
+    )
+    fieldsets = (
+        (_("Link"), {"fields": ("pool", "raw_link", "masked_raw_link", "protocol", "remark", "host", "port", "status")}),
+        (
+            _("Allocation"),
+            {
+                "fields": (
+                    "traffic_limit_gb",
+                    "expires_at",
+                    "max_allocations",
+                    "current_allocations",
+                    "source_batch",
+                )
+            },
+        ),
+        (_("Metadata"), {"classes": ("collapse",), "fields": ("normalized_link", "normalized_hash", "metadata", "created_at", "updated_at")}),
+    )
+    list_select_related = ("pool",)
+
+    @admin.display(description=_("Config link"))
+    def masked_raw_link(self, obj):
+        if not obj or not obj.raw_link:
+            return "-"
+        return mask_config_link_for_display(obj.raw_link)
+
+    def save_model(self, request, obj, form, change):
+        parsed = parse_config_link(obj.raw_link)
+        obj.normalized_link = parsed.normalized_link
+        obj.normalized_hash = parsed.normalized_hash
+        obj.protocol = parsed.protocol
+        obj.remark = parsed.remark
+        obj.host = parsed.host
+        obj.port = parsed.port
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(ConfigAllocation)
+class ConfigAllocationAdmin(ImportExportModelAdmin):
+    list_display = (
+        "id",
+        "asset",
+        "allocation_mode",
+        "status",
+        "cup",
+        "order",
+        "allocated_at",
+        "released_at",
+    )
+    list_filter = ("status", "allocation_mode", "allocated_at", "released_at")
+    search_fields = ("asset__normalized_hash", "asset__remark", "cup__token", "order__order_tracking_code")
+    autocomplete_fields = ("asset", "cup", "order")
+    readonly_fields = ("allocated_at", "created_at", "updated_at")
+    list_select_related = ("asset", "cup", "order")
+
+
+class CupFillerRuleInline(admin.TabularInline):
+    model = CupFillerRule
+    extra = 0
+    show_change_link = True
+    autocomplete_fields = ("panel", "inventory_pool")
+    filter_horizontal = ("inbounds",)
+    fields = (
+        "position",
+        "source_type",
+        "quantity",
+        "required",
+        "panel",
+        "inbounds",
+        "inventory_pool",
+        "allocation_mode",
+        "is_active",
+    )
+
+
+@admin.register(CupFulfillmentRecipe)
+class CupFulfillmentRecipeAdmin(ImportExportModelAdmin):
+    inlines = (CupFillerRuleInline,)
+    list_display = (
+        "id",
+        "title",
+        "plan",
+        "is_active",
+        "priority",
+        "failure_policy",
+        "active_rule_count",
+        "preview_link",
+        "created_at",
+    )
+    list_filter = ("is_active", "failure_policy", "plan", "created_at")
+    search_fields = ("title", "plan__name")
+    autocomplete_fields = ("plan",)
+    readonly_fields = ("preview_link", "created_at", "updated_at")
+    fieldsets = (
+        (_("Recipe"), {"fields": ("title", "plan", "is_active", "priority", "failure_policy", "preview_link")}),
+        (_("Metadata"), {"classes": ("collapse",), "fields": ("metadata", "created_at", "updated_at")}),
+    )
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path("<int:recipe_id>/preview/", self.admin_site.admin_view(self.preview_view), name="store_cupfulfillmentrecipe_preview"),
+        ]
+        return custom + urls
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("plan").annotate(admin_active_rule_count=Count("rules", filter=Q(rules__is_active=True)))
+
+    @admin.display(description=_("Active rules"), ordering="admin_active_rule_count")
+    def active_rule_count(self, obj):
+        return getattr(obj, "admin_active_rule_count", None) if getattr(obj, "admin_active_rule_count", None) is not None else obj.rules.filter(is_active=True).count()
+
+    @admin.display(description=_("Preview"))
+    def preview_link(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        url = reverse("admin:store_cupfulfillmentrecipe_preview", args=[obj.pk])
+        return format_html('<a class="button" href="{}">{}</a>', url, _("پیش‌نمایش دستور تحویل"))
+
+    def preview_view(self, request, recipe_id):
+        return fulfillment_recipe_preview(request, recipe_id)
+
+
+@admin.register(CupFillerRule)
+class CupFillerRuleAdmin(ImportExportModelAdmin):
+    list_display = (
+        "id",
+        "recipe",
+        "position",
+        "source_type",
+        "quantity",
+        "required",
+        "panel",
+        "inventory_pool",
+        "allocation_mode",
+        "is_active",
+    )
+    list_filter = ("source_type", "required", "is_active", "panel", "inventory_pool", "created_at")
+    search_fields = ("recipe__title", "recipe__plan__name", "panel__name", "inventory_pool__title")
+    autocomplete_fields = ("recipe", "panel", "inventory_pool")
+    filter_horizontal = ("inbounds",)
+    list_select_related = ("recipe", "panel", "inventory_pool")
 
 
 @admin.register(ConfigLink)

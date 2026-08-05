@@ -1,0 +1,30 @@
+<article class="tw-action-item tw-tone-rose">
+    <div class="tw-action-icon"><i class="fas fa-triangle-exclamation" aria-hidden="true"></i></div>
+    <div class="tw-min-w-0 tw-flex-1">
+        <h3>{{ title|default:error.message|default:"خطای عملیات پنل" }}</h3>
+        <div class="tw-model-list tw-mt-2">
+            {% if error.error_code %}<div class="tw-model-row"><span>کد خطا</span><strong>{{ error.error_code }}</strong></div>{% endif %}
+            {% if error.layer %}<div class="tw-model-row"><span>مرحله</span><strong>{{ error.layer }}</strong></div>{% endif %}
+            {% if error.panel_name or error.panel_id %}
+                <div class="tw-model-row"><span>پنل</span><strong>{% if error.panel_id %}#{{ error.panel_id }} / {% endif %}{{ error.panel_name|default:"-" }}</strong></div>
+            {% endif %}
+            {% if error.panel_family or error.capability_profile %}
+                <div class="tw-model-row"><span>خانواده/قابلیت</span><strong>{{ error.panel_family|default:"-" }} / {{ error.capability_profile|default:"-" }}</strong></div>
+            {% endif %}
+            {% if error.inbound_id or error.remote_inbound_id %}
+                <div class="tw-model-row"><span>اینباند</span><strong>{% if error.inbound_id %}#{{ error.inbound_id }}{% endif %}{% if error.remote_inbound_id %} / remote #{{ error.remote_inbound_id }}{% endif %}</strong></div>
+            {% endif %}
+            {% if error.action %}<div class="tw-model-row"><span>عملیات</span><strong>{{ error.action }}</strong></div>{% endif %}
+            {% if error.message %}<div class="tw-model-row"><span>پیام</span><strong>{{ error.message }}</strong></div>{% endif %}
+            {% if error.remediation %}<div class="tw-model-row"><span>راه‌حل پیشنهادی</span><strong>{{ error.remediation }}</strong></div>{% endif %}
+        </div>
+        {% if error.technical_detail or error.safe_context or error.warnings %}
+            <details class="tw-advanced-panel tw-mt-2">
+                <summary><span>جزئیات فنی</span><small>safe</small></summary>
+                {% if error.technical_detail %}<code class="tw-safe-command">{{ error.technical_detail }}</code>{% endif %}
+                {% if error.safe_context %}<code class="tw-safe-command">{{ error.safe_context }}</code>{% endif %}
+                {% if error.warnings %}<ul class="tw-detail-list">{% for warning in error.warnings %}<li>{{ warning }}</li>{% endfor %}</ul>{% endif %}
+            </details>
+        {% endif %}
+    </div>
+</article>

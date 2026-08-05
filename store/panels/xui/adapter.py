@@ -12,7 +12,14 @@ from store.xui_compat import (
 )
 
 from ..capabilities import CapabilityFlag, CapabilityProfile, InboundHealthResult, PanelCapabilityReport
-from ..errors import PanelOperationUnsupportedError
+from ..errors import (
+    PanelCreateClientFailedError,
+    PanelDeleteClientFailedError,
+    PanelLoginFailedError,
+    PanelOperationUnsupportedError,
+    PanelReadFailedError,
+    PanelWriteForbiddenError,
+)
 
 
 XUI_READ_ENDPOINTS = (
@@ -70,7 +77,9 @@ def _report_from_xui_profile(panel, profile) -> PanelCapabilityReport:
         login_method = "legacy_with_csrf_fallback"
     warnings = ()
     if profile.profile == "unknown_safe":
-        warnings = ("Destructive client operations must stay disabled until capabilities are known.",)
+        warnings = (
+            "این پنل هنوز برای ساخت کانفیگ قابل استفاده نیست؛ قابلیت‌های پنل هنوز شناسایی نشده‌اند.",
+        )
     return PanelCapabilityReport(
         family="xui",
         profile=capability_profile,
@@ -109,8 +118,32 @@ class XUIPanelAdapter:
         self.panel = panel
         self.service = service or XUIService(panel)
 
+    def _write_error(self, exc, *, action: str, inbound=None):
+        category = str(getattr(exc, "category", "") or "").lower()
+        message = str(exc or "").lower()
+        error_class = PanelWriteForbiddenError if "403" in message or "forbidden" in message or "csrf" in category else PanelCreateClientFailedError
+        return error_class(
+            "ساخت client روی پنل X-UI ناموفق بود.",
+            action=action,
+            technical_detail=str(exc or ""),
+            remediation="دسترسی API نوشتنی، CSRF، ظرفیت اینباند و credentialهای پنل را بررسی کنید.",
+            panel=self.panel,
+            panel_family=self.family,
+            capability_profile=getattr(self.panel, "capability_profile", "") or "",
+            inbound=inbound,
+        )
+
     def test_connection(self) -> bool:
-        self.service.login()
+        try:
+            self.service.login()
+        except Exception as exc:
+            raise PanelLoginFailedError(
+                "ورود به پنل X-UI ناموفق بود.",
+                technical_detail=str(exc or ""),
+                panel=self.panel,
+                panel_family=self.family,
+                capability_profile=getattr(self.panel, "capability_profile", "") or "",
+            ) from exc
         return True
 
     def get_capability_report(self) -> PanelCapabilityReport:
@@ -127,7 +160,17 @@ class XUIPanelAdapter:
         return _report_from_xui_profile(self.panel, profile)
 
     def list_inbounds(self) -> list[dict]:
-        payload = self.service.authenticated_json("GET", "/panel/api/inbounds/list")
+        try:
+            payload = self.service.authenticated_json("GET", "/panel/api/inbounds/list")
+        except Exception as exc:
+            raise PanelReadFailedError(
+                "خواندن لیست اینباندها از پنل X-UI ناموفق بود.",
+                action="list_inbounds",
+                technical_detail=str(exc or ""),
+                panel=self.panel,
+                panel_family=self.family,
+                capability_profile=getattr(self.panel, "capability_profile", "") or "",
+            ) from exc
         obj = payload.get("obj") if isinstance(payload, dict) else []
         if isinstance(obj, dict):
             obj = obj.get("items") or obj.get("inbounds") or []
@@ -157,38 +200,72 @@ class XUIPanelAdapter:
 
     def create_enabled_client(self, request: XUIProvisioningRequest) -> dict:
         if not request.inbound:
-            raise PanelOperationUnsupportedError("X-UI enabled client creation requires one inbound.")
-        return self.service.create_enabled_client(
-            email_prefix=request.email_prefix,
-            total_gb=request.total_gb,
-            duration_hours=int(request.duration_days or 0) * 24,
-            inbound=request.inbound,
-            limit_ip=request.limit_ip,
-            client_uuid=request.client_uuid,
-            sub_id=request.sub_id,
-            email=request.email,
-        )
+            raise PanelOperationUnsupportedError(
+                "ساخت client در X-UI به یک اینباند نیاز دارد.",
+                error_code="inbound_required",
+                layer="inbound_validation",
+                action="create_client",
+                remediation="برای ساخت تک‌اینباندی دقیقاً یک اینباند انتخاب کنید.",
+                panel=self.panel,
+                panel_family=self.family,
+                capability_profile=getattr(self.panel, "capability_profile", "") or "",
+            )
+        try:
+            return self.service.create_enabled_client(
+                email_prefix=request.email_prefix,
+                total_gb=request.total_gb,
+                duration_hours=int(request.duration_days or 0) * 24,
+                inbound=request.inbound,
+                limit_ip=request.limit_ip,
+                client_uuid=request.client_uuid,
+                sub_id=request.sub_id,
+                email=request.email,
+            )
+        except Exception as exc:
+            raise self._write_error(exc, action="create_client", inbound=request.inbound) from exc
 
     def create_enabled_multi_inbound_client(self, request: XUIProvisioningRequest) -> dict:
         inbounds = list(request.inbounds or [])
         if not inbounds:
-            raise PanelOperationUnsupportedError("X-UI multi-inbound creation requires inbounds.")
-        return self.service.create_enabled_multi_inbound_client(
-            email_prefix=request.email_prefix,
-            total_gb=request.total_gb,
-            duration_hours=int(request.duration_days or 0) * 24,
-            inbounds=inbounds,
-            limit_ip=request.limit_ip,
-            client_uuid=request.client_uuid,
-            sub_id=request.sub_id,
-            email=request.email,
-        )
+            raise PanelOperationUnsupportedError(
+                "ساخت multi-inbound در X-UI به حداقل یک اینباند نیاز دارد.",
+                error_code="inbound_required",
+                layer="inbound_validation",
+                action="create_multi_inbound_client",
+                remediation="برای ساخت چنداینباندی، اینباندهای همان پنل را انتخاب کنید.",
+                panel=self.panel,
+                panel_family=self.family,
+                capability_profile=getattr(self.panel, "capability_profile", "") or "",
+            )
+        try:
+            return self.service.create_enabled_multi_inbound_client(
+                email_prefix=request.email_prefix,
+                total_gb=request.total_gb,
+                duration_hours=int(request.duration_days or 0) * 24,
+                inbounds=inbounds,
+                limit_ip=request.limit_ip,
+                client_uuid=request.client_uuid,
+                sub_id=request.sub_id,
+                email=request.email,
+            )
+        except Exception as exc:
+            raise self._write_error(exc, action="create_multi_inbound_client") from exc
 
     def delete_client(self, inbound, identifier: str, *, allow_multi_scope: bool = False) -> bool:
-        return bool(
-            self.service.delete_client_from_inbound(
-                inbound,
-                identifier,
-                allow_multi_scope=allow_multi_scope,
+        try:
+            return bool(
+                self.service.delete_client_from_inbound(
+                    inbound,
+                    identifier,
+                    allow_multi_scope=allow_multi_scope,
+                )
             )
-        )
+        except Exception as exc:
+            raise PanelDeleteClientFailedError(
+                "حذف client از پنل X-UI ناموفق بود.",
+                technical_detail=str(exc or ""),
+                panel=self.panel,
+                panel_family=self.family,
+                capability_profile=getattr(self.panel, "capability_profile", "") or "",
+                inbound=inbound,
+            ) from exc

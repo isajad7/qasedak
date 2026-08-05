@@ -42,16 +42,24 @@
             <div class="cup-stat"><span>Config links</span><strong>{{ result.config_link_count }}</strong></div>
             <div class="cup-stat"><span>Selected panels</span><strong>{{ result.selected_panels_count }}</strong></div>
             <div class="cup-stat"><span>Selected inbounds</span><strong>{{ result.selected_inbounds_count }}</strong></div>
+            <div class="cup-stat"><span>Selected pools</span><strong>{{ result.selected_inventory_pools_count }}</strong></div>
             <div class="cup-stat"><span>Remote groups</span><strong>{{ result.created_remote_client_groups_count }}</strong></div>
+            <div class="cup-stat"><span>Inventory allocations</span><strong>{{ result.inventory_allocation_count }}</strong></div>
             <div class="cup-stat"><span>Protocols</span><strong>{{ result.protocols|join:", "|default:"-" }}</strong></div>
         </div>
     </div>
 
     <div class="tw-admin-card">
         <div class="tw-section-heading tw-mb-4"><h2>Subscription URL</h2></div>
-        <code class="tw-safe-command">{{ result.masked_subscription_url }}</code>
+        <div class="tw-model-list tw-mb-3">
+            <div class="tw-model-row"><span>صفحه کاربر</span><strong dir="ltr">{{ subscription.masked_dashboard_url }}</strong></div>
+            <div class="tw-model-row"><span>لینک ورود به برنامه</span><strong dir="ltr">{{ subscription.masked_client_url }}</strong></div>
+            <div class="tw-model-row"><span>خروجی خام</span><strong dir="ltr">{{ subscription.masked_raw_url }}</strong></div>
+        </div>
+        <code class="tw-safe-command">{{ subscription.masked_client_url }}</code>
         <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row tw-mt-2">
-            <button type="button" class="tw-button tw-button-primary" data-cup-copy="{{ subscription.url }}" data-cup-copy-label="Copy subscription URL">Copy subscription URL</button>
+            <button type="button" class="tw-button tw-button-primary" data-cup-copy="{{ subscription.client_url }}" data-cup-copy-label="Copy client URL">Copy client URL</button>
+            <button type="button" class="tw-button tw-button-secondary" data-cup-copy="{{ subscription.dashboard_url }}" data-cup-copy-label="Copy dashboard URL">Copy dashboard URL</button>
             <a href="{{ detail_url }}" class="tw-button tw-button-secondary">جزئیات Cup</a>
         </div>
     </div>
@@ -61,6 +69,13 @@
 <section class="tw-section">
     <div class="tw-admin-card tw-space-y-2">
         <div class="tw-section-heading"><h2>هشدارها و خطاها</h2></div>
+        {% if result.structured_errors %}
+            <div class="tw-mb-3 tw-space-y-3">
+                {% for error in result.structured_errors %}
+                    {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در ساخت کانفیگ" %}
+                {% endfor %}
+            </div>
+        {% endif %}
         {% for error in result.errors %}
             <div class="cup-warning">{{ error }}</div>
         {% endfor %}
@@ -104,6 +119,13 @@
                         <td>{% if panel.success %}yes{% else %}no{% endif %}</td>
                         <td>{{ panel.link_count }}</td>
                         <td>
+                            {% if panel.structured_errors %}
+                                <div class="tw-space-y-2">
+                                    {% for error in panel.structured_errors %}
+                                        {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در این پنل" %}
+                                    {% endfor %}
+                                </div>
+                            {% endif %}
                             {% for error in panel.errors %}<div>{{ error }}</div>{% endfor %}
                             {% for warning in panel.warnings %}<div>{{ warning }}</div>{% endfor %}
                             {% if not panel.errors and not panel.warnings %}-{% endif %}
@@ -116,6 +138,51 @@
         </table>
     </div>
 </section>
+
+{% if result.inventory_results %}
+<section class="tw-section">
+    <div class="tw-table-wrap tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>نتیجه هر استخر</h2></div>
+        <table class="tw-catalog-table">
+            <thead>
+                <tr>
+                    <th>استخر</th>
+                    <th>قانون</th>
+                    <th>درخواست</th>
+                    <th>موجودی قبل</th>
+                    <th>تخصیص</th>
+                    <th>وضعیت</th>
+                    <th>Warnings / Errors</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for pool in result.inventory_results %}
+                    <tr>
+                        <td>{{ pool.pool_title }}</td>
+                        <td>{{ pool.allocation_mode_display }}</td>
+                        <td>{{ pool.requested_quantity }}</td>
+                        <td>{{ pool.available_before }}</td>
+                        <td>{{ pool.allocated_count }}</td>
+                        <td>{% if pool.success %}yes{% else %}no{% endif %}</td>
+                        <td>
+                            {% if pool.structured_errors %}
+                                <div class="tw-space-y-2">
+                                    {% for error in pool.structured_errors %}
+                                        {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در این استخر" %}
+                                    {% endfor %}
+                                </div>
+                            {% endif %}
+                            {% for error in pool.errors %}<div>{{ error }}</div>{% endfor %}
+                            {% for warning in pool.warnings %}<div>{{ warning }}</div>{% endfor %}
+                            {% if not pool.errors and not pool.warnings %}-{% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
 
 <section class="tw-section">
     <div class="tw-table-wrap tw-admin-card">
@@ -150,4 +217,32 @@
         </table>
     </div>
 </section>
+
+{% if result.selected_inventory_pools %}
+<section class="tw-section">
+    <div class="tw-table-wrap tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>استخرهای انتخاب‌شده</h2></div>
+        <table class="tw-catalog-table">
+            <thead>
+                <tr>
+                    <th>استخر</th>
+                    <th>قانون</th>
+                    <th>موجودی</th>
+                    <th>دارایی قابل استفاده</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for pool in result.selected_inventory_pools %}
+                    <tr>
+                        <td>{{ pool.title }}</td>
+                        <td>{{ pool.allocation_mode_display }}</td>
+                        <td>{{ pool.available_stock }}</td>
+                        <td>{{ pool.usable_asset_count }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
 {% endblock %}

@@ -85,6 +85,13 @@
 <section class="tw-section">
     <div class="tw-admin-card">
         <div class="tw-section-heading tw-mb-4"><h2>هشدارها و خطاهای امن</h2></div>
+        {% if result.structured_errors %}
+            <div class="tw-mb-3 tw-space-y-3">
+                {% for error in result.structured_errors %}
+                    {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در تست ساخت واقعی" %}
+                {% endfor %}
+            </div>
+        {% endif %}
         {% if result.errors %}
             <ul class="tw-detail-list">{% for error in result.errors %}<li>{{ error }}</li>{% endfor %}</ul>
         {% endif %}

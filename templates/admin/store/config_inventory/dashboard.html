@@ -1,0 +1,57 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div id="content-main">
+  <p>{% trans "از این صفحه مخزن کانفیگ بسازید، لینک‌های آماده را وارد کنید و Recipeهای پر کردن Subscription Cup را مدیریت کنید." %}</p>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:18px 0;">
+    {% for card in action_cards %}
+      <div class="module" style="padding:16px;">
+        <h2 style="margin-top:0;">{{ card.title }}</h2>
+        <p>{{ card.description }}</p>
+        <a class="button" href="{{ card.url }}">{{ card.title }}</a>
+      </div>
+    {% endfor %}
+  </div>
+
+  <h2>{% trans "خلاصه" %}</h2>
+  <table>
+    <tbody>
+      <tr><th>{% trans "مخزن‌ها" %}</th><td>{{ pool_count }}</td></tr>
+      <tr><th>{% trans "کانفیگ‌های آماده" %}</th><td>{{ asset_count }}</td></tr>
+      <tr><th>{% trans "تخصیص‌ها" %}</th><td>{{ allocation_count }}</td></tr>
+      <tr><th>{% trans "Recipeها" %}</th><td>{{ recipe_count }}</td></tr>
+      <tr><th>{% trans "قوانین" %}</th><td>{{ rule_count }}</td></tr>
+    </tbody>
+  </table>
+
+  <h2>{% trans "موجودی مخزن‌ها" %}</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>{% trans "مخزن" %}</th>
+        <th>{% trans "حالت تخصیص" %}</th>
+        <th>{% trans "دارایی‌ها" %}</th>
+        <th>{% trans "تخصیص فعال" %}</th>
+        <th>{% trans "موجودی قابل استفاده" %}</th>
+        <th>{% trans "عملیات" %}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in pool_rows %}
+        <tr>
+          <td>{{ row.pool.title }}</td>
+          <td>{{ row.pool.allocation_mode }}</td>
+          <td>{{ row.asset_count }}</td>
+          <td>{{ row.active_allocation_count }}</td>
+          <td>{{ row.available_stock }}</td>
+          <td><a class="button" href="{{ row.import_url }}">{% trans "وارد کردن لینک کانفیگ" %}</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="6">{% trans "هنوز مخزنی ساخته نشده است." %}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

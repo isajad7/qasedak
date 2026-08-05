@@ -48,7 +48,12 @@ from .models import (
     BotUser,
     BroadcastMessage,
     BroadcastRecipient,
+    ConfigAllocation,
+    ConfigInventoryAsset,
+    ConfigInventoryPool,
     ConfigLink,
+    CupFillerRule,
+    CupFulfillmentRecipe,
     CupItem,
     Customer,
     DailyAdminReportLog,
@@ -283,6 +288,12 @@ class SubscriptionCupMVPTests(TestCase):
             CupItem.objects.create(cup=cup, config_link=config_link, position=position)
         return cup
 
+    def browser_headers(self):
+        return {
+            "HTTP_ACCEPT": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "HTTP_USER_AGENT": "Mozilla/5.0 AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+        }
+
     def create_staff_user_with_perms(self, *codenames):
         user = get_user_model().objects.create_user(
             username=f"cup-staff-{get_user_model().objects.count()}",
@@ -360,12 +371,49 @@ class SubscriptionCupMVPTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response["Content-Type"].startswith("text/plain"))
+        self.assertEqual(response["Cache-Control"], "no-store")
         decoded = base64.b64decode(response.content).decode("utf-8")
-        self.assertEqual(decoded, "\n".join(links))
+        self.assertEqual(decoded, "\n".join(links) + "\n")
 
         raw_response = self.client.get(reverse("subscription_cup", args=[cup.token]), {"format": "raw"})
         self.assertEqual(raw_response.status_code, 200)
+        self.assertTrue(raw_response["Content-Type"].startswith("text/plain"))
+        self.assertEqual(raw_response["Cache-Control"], "no-store")
         self.assertEqual(raw_response.content.decode("utf-8"), "\n".join(links))
+
+    def test_subscription_endpoint_explicit_formats_and_client_detection(self):
+        links = [self.direct_link(15), self.direct_link(16)]
+        cup = self.create_cup_with_links(*links)
+        url = reverse("subscription_cup", args=[cup.token])
+
+        encoded = self.client.get(url, {"format": "base64"}, **self.browser_headers())
+        self.assertTrue(encoded["Content-Type"].startswith("text/plain"))
+        self.assertEqual(base64.b64decode(encoded.content).decode("utf-8"), "\n".join(links) + "\n")
+
+        raw_response = self.client.get(url, {"format": "raw"}, **self.browser_headers())
+        self.assertTrue(raw_response["Content-Type"].startswith("text/plain"))
+        self.assertEqual(raw_response.content.decode("utf-8"), "\n".join(links))
+
+        dashboard = self.client.get(url, {"view": "dashboard"})
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertTrue(dashboard["Content-Type"].startswith("text/html"))
+        self.assertContains(dashboard, "داشبورد اشتراک")
+
+        client_response = self.client.get(
+            url,
+            HTTP_ACCEPT="text/html",
+            HTTP_USER_AGENT="Hiddify/1.0",
+        )
+        self.assertTrue(client_response["Content-Type"].startswith("text/plain"))
+        self.assertEqual(base64.b64decode(client_response.content).decode("utf-8"), "\n".join(links) + "\n")
+
+        json_response = self.client.get(url, {"format": "json"})
+        json_body = json.loads(json_response.content.decode("utf-8"))
+        self.assertEqual(json_response.status_code, 200)
+        self.assertTrue(json_response["Content-Type"].startswith("application/json"))
+        self.assertEqual(json_body["active_item_count"], 2)
+        self.assertIn("masked_link", json_body["items"][0])
+        self.assertNotIn("vless://aaaaaaaa", json_response.content.decode("utf-8"))
 
     def test_subscription_endpoint_blocks_invalid_disabled_and_expired_cups(self):
         disabled = self.create_cup_with_links(self.direct_link(12), status=SubscriptionCup.Status.DISABLED)
@@ -377,6 +425,50 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertEqual(self.client.get("/sub/missing-token").status_code, 404)
         self.assertEqual(self.client.get(reverse("subscription_cup", args=[disabled.token])).status_code, 403)
         self.assertEqual(self.client.get(reverse("subscription_cup", args=[expired.token])).status_code, 403)
+        self.assertEqual(
+            self.client.get(reverse("subscription_cup", args=[disabled.token]), {"format": "raw"}).content.decode("utf-8"),
+            "Subscription is not active.\n",
+        )
+
+    def test_subscription_dashboard_renders_for_browser_and_hides_admin_secrets(self):
+        links = [self.direct_link(17), "trojan://password@trojan.example.com:443#Trojan"]
+        cup = self.create_cup_with_links(*links)
+        cup.title = "Alice dashboard"
+        cup.traffic_limit_bytes = self.plan.traffic_limit_bytes
+        cup.expires_at = timezone.now() + timedelta(days=7)
+        cup.save(update_fields=["title", "traffic_limit_bytes", "expires_at", "updated_at"])
+
+        response = self.client.get(reverse("subscription_cup", args=[cup.token]), **self.browser_headers())
+        body = response.content.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response["Content-Type"].startswith("text/html"))
+        self.assertEqual(response["Cache-Control"], "no-store")
+        self.assertContains(response, "Alice dashboard")
+        self.assertContains(response, "فعال")
+        self.assertContains(response, "تعداد کانفیگ")
+        self.assertContains(response, "2")
+        self.assertContains(response, "لینک ورود به برنامه")
+        self.assertContains(response, "کپی کانفیگ")
+        self.assertNotIn("panel-secret", body)
+        self.assertNotIn("panel-sub-token", body)
+        self.assertNotIn(self.panel.password, body)
+
+        explicit = self.client.get(reverse("subscription_cup_dashboard", args=[cup.token]))
+        self.assertEqual(explicit.status_code, 200)
+        self.assertContains(explicit, "داشبورد اشتراک")
+
+    def test_disabled_subscription_dashboard_is_friendly_without_config_links(self):
+        link = self.direct_link(18)
+        disabled = self.create_cup_with_links(link, status=SubscriptionCup.Status.DISABLED)
+
+        response = self.client.get(reverse("subscription_cup", args=[disabled.token]), **self.browser_headers())
+        body = response.content.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "غیرفعال")
+        self.assertContains(response, "قابل استفاده نیست")
+        self.assertNotIn(link, body)
 
     def test_subscription_endpoint_requires_no_login_and_does_not_log_links(self):
         secret_link = self.direct_link(14, host="secret.example.com")
@@ -521,6 +613,11 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "vless://&lt;hidden&gt;")
         self.assertContains(response, "Active items")
+        self.assertContains(response, "صفحه کاربر")
+        self.assertContains(response, "لینک ورود به برنامه")
+        self.assertContains(response, "خروجی خام")
+        self.assertContains(response, "?format=base64")
+        self.assertContains(response, "?format=raw")
         self.assertNotIn("vless://aaaaaaaa", body)
 
     def test_cup_center_add_existing_config_links_allows_duplicate_items(self):
@@ -627,6 +724,39 @@ class SubscriptionCupMVPTests(TestCase):
         adapter.create_enabled_client.assert_called_once()
         bot_client.assert_not_called()
 
+    def test_cup_center_create_from_inbound_failure_shows_structured_safe_error(self):
+        cup = SubscriptionCup.objects.create(customer=self.customer, order=self.order, plan=self.plan)
+        adapter = Mock()
+        adapter.get_capability_report.return_value = SimpleNamespace(supports_create_client=True, errors=(), warnings=())
+        adapter.create_enabled_client.side_effect = RuntimeError(
+            "Traceback (most recent call last): failed vless://11111111-1111-4111-8111-111111111111@example.com:443 csrf-token panel-secret"
+        )
+        self.client.force_login(self.admin_user)
+
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter", return_value=adapter):
+            response = self.client.post(
+                reverse("admin_store_cup_center_create_from_inbound", args=[cup.pk]),
+                {
+                    "panel": self.panel.pk,
+                    "inbound": self.inbound.pk,
+                    "total_gb": "1",
+                    "duration_days": "30",
+                    "device_limit": "2",
+                    "email_prefix": f"qasedak-cup-{cup.pk}-test",
+                    "confirm_remote_create": "on",
+                },
+            )
+
+        body = response.content.decode("utf-8")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "cup_remote_create_failed")
+        self.assertContains(response, "create_client")
+        self.assertContains(response, self.panel.name)
+        self.assertNotIn("Traceback (most recent call last)", body)
+        self.assertNotIn("vless://", body)
+        self.assertNotIn("11111111-1111-4111-8111-111111111111", body)
+        self.assertNotIn("panel-secret", body)
+
     def test_manual_cup_form_does_not_load_order_customer_dropdowns(self):
         from .admin_cup_center.forms import ManualCupForm
 
@@ -706,13 +836,13 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertContains(response, "3.4.0")
         self.assertContains(response, "Health: ok")
 
-    def test_quick_builder_validation_requires_inbound(self):
+    def test_quick_builder_validation_requires_source(self):
         self.client.force_login(self.admin_user)
 
         response = self.client.post(
             reverse("admin_store_cup_center_quick_build"),
             {
-                "title": "No inbound",
+                "title": "No source",
                 "panel": self.panel.pk,
                 "volume_gb": "10",
                 "duration_days": "30",
@@ -723,8 +853,8 @@ class SubscriptionCupMVPTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "حداقل یک inbound انتخاب کنید")
-        self.assertFalse(SubscriptionCup.objects.filter(title="No inbound").exists())
+        self.assertContains(response, "حداقل یک Inbound یا یک استخر")
+        self.assertFalse(SubscriptionCup.objects.filter(title="No source").exists())
 
     def test_quick_builder_rejects_unsupported_inbound_protocol(self):
         unsupported_inbound = Inbound.objects.create(
@@ -970,6 +1100,8 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertContains(result_response, "partial_success")
         self.assertContains(result_response, "Failing Panel")
         self.assertContains(result_response, "panel timeout")
+        self.assertContains(result_response, "cup_remote_create_failed")
+        self.assertContains(result_response, "create_client")
         self.assertNotIn(first_link, result_body)
 
         raw_response = self.client.get(reverse("subscription_cup", args=[cup.token]), {"format": "raw"})
@@ -1015,6 +1147,8 @@ class SubscriptionCupMVPTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "پشتیبانی")
+        self.assertContains(response, "unsupported_panel_family")
+        self.assertContains(response, "Sync capabilities")
         self.assertFalse(SubscriptionCup.objects.filter(title="Unsupported quick").exists())
 
     def test_quick_builder_rejects_legacy_multi_selection(self):
@@ -1056,6 +1190,8 @@ class SubscriptionCupMVPTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "چند inbound")
+        self.assertContains(response, "supports_multi_inbound_create")
+        self.assertContains(response, "panel_capability_missing")
         adapter.create_enabled_multi_inbound_client.assert_not_called()
         self.assertFalse(SubscriptionCup.objects.filter(title="Legacy multi").exists())
 
@@ -1130,6 +1266,520 @@ class SubscriptionCupMVPTests(TestCase):
 
         raw_response = self.client.get(reverse("subscription_cup", args=[cup.token]), {"format": "raw"})
         self.assertEqual(raw_response.content.decode("utf-8"), "\n".join([first_link, second_link]))
+
+    def test_quick_builder_inventory_pool_is_visible_and_preselected_from_import_flow(self):
+        from .config_inventory_services import import_config_assets
+
+        pool = self.create_inventory_pool(title="Quick Pool Stock")
+        raw_link = self.direct_link(214, host="quick-pool-secret.example.com")
+        import_config_assets(pool, raw_link)
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(f"{reverse('admin_store_cup_center_quick_build')}?inventory_pool={pool.pk}")
+        body = response.content.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "منابع استخر کانفیگ")
+        self.assertContains(response, pool.title)
+        self.assertIn(f'name="inventory_pools" value="{pool.pk}"', body)
+        self.assertIn("checked", body)
+        self.assertNotIn(raw_link, body)
+
+    def test_quick_builder_inventory_only_creates_cup_without_panel_order_vpnclient_or_telegram(self):
+        from .config_inventory_services import import_config_assets
+
+        pool = self.create_inventory_pool(title="Inventory Only Quick")
+        inventory_link = self.direct_link(215, host="inventory-only.example.com")
+        import_config_assets(pool, inventory_link)
+        before_order_count = Order.objects.count()
+        before_client_count = VPNClient.objects.count()
+        self.client.force_login(self.admin_user)
+
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter") as adapter_factory, patch(
+            "store.telegram_bot.client.BotClient"
+        ) as bot_client:
+            response = self.client.post(
+                reverse("admin_store_cup_center_quick_build"),
+                {
+                    "title": "Inventory only quick cup",
+                    "inventory_pools": [pool.pk],
+                    "inventory_quantity": "1",
+                    "volume_gb": "10",
+                    "duration_days": "30",
+                    "device_limit": "2",
+                    "remark_prefix": "qasedak-cup-inventory-only",
+                },
+            )
+
+        cup = SubscriptionCup.objects.get(title="Inventory only quick cup")
+        self.assertRedirects(response, reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        self.assertEqual(Order.objects.count(), before_order_count)
+        self.assertEqual(VPNClient.objects.count(), before_client_count)
+        self.assertEqual(cup.items.count(), 1)
+        self.assertEqual(ConfigAllocation.objects.filter(cup=cup).count(), 1)
+        self.assertEqual(ConfigLink.objects.get(cup_items__cup=cup).source_type, ConfigLink.SourceType.IMPORTED_SUBSCRIPTION)
+        adapter_factory.assert_not_called()
+        bot_client.assert_not_called()
+
+        asset = ConfigInventoryAsset.objects.get(pool=pool)
+        self.assertEqual(asset.status, ConfigInventoryAsset.Status.ASSIGNED)
+        self.assertEqual(asset.current_allocations, 1)
+        result_response = self.client.get(reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        result_body = result_response.content.decode("utf-8")
+        self.assertContains(result_response, "Inventory allocations")
+        self.assertContains(result_response, pool.title)
+        self.assertNotIn(inventory_link, result_body)
+
+        raw_response = self.client.get(reverse("subscription_cup", args=[cup.token]), {"format": "raw"})
+        self.assertEqual(raw_response.content.decode("utf-8"), inventory_link)
+
+    def test_quick_builder_hybrid_panel_and_inventory_pool_creates_one_cup(self):
+        from .config_inventory_services import import_config_assets
+
+        pool = self.create_inventory_pool(title="Hybrid Quick Pool")
+        inventory_link = self.direct_link(216, host="hybrid-inventory.example.com")
+        panel_link = self.direct_link(217, host="hybrid-panel.example.com")
+        import_config_assets(pool, inventory_link)
+        adapter = self.quick_builder_adapter(direct_link=panel_link)
+        self.client.force_login(self.admin_user)
+
+        with patch("store.admin_cup_center.services.get_safe_panel_adapter", return_value=adapter):
+            response = self.client.post(
+                reverse("admin_store_cup_center_quick_build"),
+                {
+                    "title": "Hybrid quick cup",
+                    "inbounds": [self.inbound.pk],
+                    "inventory_pools": [pool.pk],
+                    "inventory_quantity": "1",
+                    "volume_gb": "10",
+                    "duration_days": "30",
+                    "device_limit": "2",
+                    "remark_prefix": "qasedak-cup-hybrid",
+                    "confirm_remote_create": "on",
+                },
+            )
+
+        cup = SubscriptionCup.objects.get(title="Hybrid quick cup")
+        self.assertRedirects(response, reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        self.assertEqual(cup.items.count(), 2)
+        self.assertEqual(ConfigAllocation.objects.filter(cup=cup).count(), 1)
+        self.assertCountEqual(
+            list(ConfigLink.objects.filter(cup_items__cup=cup).values_list("source_type", flat=True)),
+            [ConfigLink.SourceType.PANEL_GENERATED, ConfigLink.SourceType.IMPORTED_SUBSCRIPTION],
+        )
+        adapter.create_enabled_client.assert_called_once()
+
+        result_response = self.client.get(reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        result_body = result_response.content.decode("utf-8")
+        self.assertContains(result_response, self.panel.name)
+        self.assertContains(result_response, pool.title)
+        self.assertNotIn(panel_link, result_body)
+        self.assertNotIn(inventory_link, result_body)
+
+        raw_response = self.client.get(reverse("subscription_cup", args=[cup.token]), {"format": "raw"})
+        self.assertCountEqual(raw_response.content.decode("utf-8").splitlines(), [panel_link, inventory_link])
+
+    def test_quick_builder_inventory_shortage_returns_structured_safe_result(self):
+        pool = self.create_inventory_pool(title="Empty Quick Pool")
+        self.client.force_login(self.admin_user)
+
+        response = self.client.post(
+            reverse("admin_store_cup_center_quick_build"),
+            {
+                "title": "Shortage quick cup",
+                "inventory_pools": [pool.pk],
+                "inventory_quantity": "2",
+                "volume_gb": "10",
+                "duration_days": "30",
+                "device_limit": "2",
+                "remark_prefix": "qasedak-cup-shortage",
+            },
+        )
+
+        cup = SubscriptionCup.objects.get(title="Shortage quick cup")
+        self.assertRedirects(response, reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        self.assertEqual(cup.items.count(), 0)
+        self.assertEqual(ConfigAllocation.objects.filter(cup=cup).count(), 0)
+        self.assertEqual(cup.metadata["status"], "failed")
+
+        result_response = self.client.get(reverse("admin_store_cup_center_quick_result", args=[cup.pk]))
+        result_body = result_response.content.decode("utf-8")
+        self.assertContains(result_response, "config_inventory_insufficient_stock")
+        self.assertContains(result_response, "insufficient stock")
+        self.assertNotIn("vless://", result_body)
+
+    def create_inventory_pool(self, **kwargs):
+        defaults = {
+            "title": f"Pool {ConfigInventoryPool.objects.count() + 1}",
+            "allocation_mode": ConfigInventoryPool.AllocationMode.EXCLUSIVE,
+            "is_active": True,
+        }
+        defaults.update(kwargs)
+        return ConfigInventoryPool.objects.create(**defaults)
+
+    def create_fulfillment_order(self, *, plan=None):
+        return Order.objects.create(
+            store=self.store,
+            customer=self.customer,
+            plan=plan or self.plan,
+            status=Order.Status.PENDING_VERIFICATION,
+            verification_status=Order.VerificationStatus.PENDING,
+            is_paid=True,
+            username="alice-recipe",
+        )
+
+    def create_inventory_recipe(self, pool, *, quantity=1, failure_policy=None, plan=None):
+        recipe = CupFulfillmentRecipe.objects.create(
+            plan=plan or self.plan,
+            title="Inventory recipe",
+            failure_policy=failure_policy or CupFulfillmentRecipe.FailurePolicy.STRICT,
+        )
+        CupFillerRule.objects.create(
+            recipe=recipe,
+            position=1,
+            source_type=CupFillerRule.SourceType.INVENTORY_POOL,
+            quantity=quantity,
+            inventory_pool=pool,
+            required=True,
+        )
+        return recipe
+
+    def test_inventory_import_allows_duplicate_config_assets(self):
+        from .config_inventory_services import import_config_assets
+
+        pool = self.create_inventory_pool()
+        raw_link = self.direct_link(201)
+
+        result = import_config_assets(pool, "\n".join([raw_link, raw_link, "not-a-config"]))
+
+        self.assertEqual(result.created_count, 2)
+        self.assertEqual(result.skipped_count, 1)
+        self.assertEqual(result.duplicate_count, 1)
+        self.assertEqual(ConfigInventoryAsset.objects.filter(pool=pool, raw_link=raw_link).count(), 2)
+        self.assertEqual(ConfigInventoryAsset.objects.filter(pool=pool).values("normalized_hash").distinct().count(), 1)
+
+    def test_exclusive_inventory_allocation_marks_asset_assigned(self):
+        from .config_inventory_services import allocate_assets_from_pool, import_config_assets
+
+        pool = self.create_inventory_pool()
+        import_config_assets(pool, self.direct_link(202))
+        cup = SubscriptionCup.objects.create(order=self.order, plan=self.plan)
+
+        result = allocate_assets_from_pool(pool, 1, cup=cup, order=self.order)
+
+        asset = result.assets[0]
+        asset.refresh_from_db()
+        self.assertEqual(result.allocated_count, 1)
+        self.assertEqual(asset.status, ConfigInventoryAsset.Status.ASSIGNED)
+        self.assertEqual(asset.current_allocations, 1)
+        self.assertEqual(ConfigAllocation.objects.get(asset=asset).cup, cup)
+
+    def test_shared_unlimited_inventory_can_allocate_same_asset_multiple_times(self):
+        from .config_inventory_services import allocate_assets_from_pool, import_config_assets
+
+        pool = self.create_inventory_pool(allocation_mode=ConfigInventoryPool.AllocationMode.SHARED_UNLIMITED)
+        import_config_assets(pool, self.direct_link(203))
+
+        result = allocate_assets_from_pool(pool, 2, order=self.order)
+
+        self.assertEqual(result.allocated_count, 2)
+        self.assertEqual(len({asset.pk for asset in result.assets}), 1)
+        asset = result.assets[0]
+        asset.refresh_from_db()
+        self.assertEqual(asset.current_allocations, 2)
+
+    def test_inventory_allocation_insufficient_stock_gives_safe_error(self):
+        from .config_inventory_services import InsufficientInventoryStock, allocate_assets_from_pool, import_config_assets
+
+        pool = self.create_inventory_pool()
+        import_config_assets(pool, self.direct_link(204))
+
+        with self.assertRaises(InsufficientInventoryStock) as raised:
+            allocate_assets_from_pool(pool, 2)
+
+        message = raised.exception.safe_message
+        self.assertIn("insufficient stock", message)
+        self.assertNotIn("vless://", message)
+        self.assertNotIn("aaaaaaaa-aaaa", message)
+
+    def test_plan_without_recipe_is_not_intercepted_and_old_activation_still_runs(self):
+        legacy_panel = Panel.objects.create(
+            store=self.store,
+            name="Legacy Panel",
+            url="https://legacy.example.com",
+            username="admin",
+            password="panel-secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.LEGACY_SINGLE_NODE,
+        )
+        legacy_inbound = Inbound.objects.create(
+            panel=legacy_panel,
+            inbound_id=8,
+            remark="Legacy",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="legacy.example.com",
+            port="443",
+            config_params="{}",
+            is_active=True,
+        )
+        order = Order.objects.create(
+            store=self.store,
+            customer=self.customer,
+            plan=self.plan,
+            inbound=legacy_inbound,
+            status=Order.Status.PENDING_VERIFICATION,
+            verification_status=Order.VerificationStatus.PENDING,
+            is_paid=True,
+            username="legacy-order",
+            uuid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            sub_link="https://legacy.example.com/sub/legacy",
+            direct_link=self.direct_link(205, host="legacy.example.com"),
+        )
+        VPNClient.objects.create(
+            store=self.store,
+            order=order,
+            plan=self.plan,
+            inbound=legacy_inbound,
+            username=order.username,
+            xui_email=order.username,
+            uuid=order.uuid,
+            sub_id="legacy",
+            sub_link=order.sub_link,
+            direct_link=order.direct_link,
+            status=VPNClient.Status.INACTIVE,
+            traffic_limit_bytes=self.plan.traffic_limit_bytes,
+            duration_days=self.plan.duration_days,
+            device_limit=self.plan.device_limit,
+        )
+
+        with patch("store.order_actions.enable_client", return_value=True):
+            result = activate_order(order, notify=False)
+
+        order.refresh_from_db()
+        self.assertTrue(result.success)
+        self.assertEqual(order.status, Order.Status.COMPLETED)
+        self.assertEqual(order.provisioning_status, Order.ProvisioningStatus.PROVISIONED)
+        self.assertNotIn("cup_fulfillment_recipe", order.metadata)
+
+    def test_inventory_only_recipe_creates_cup_and_cup_items(self):
+        from .config_inventory_services import import_config_assets
+        from .cup_fulfillment_services import fulfill_order_with_recipe
+        from .telegram_bot.order_delivery import order_config_link_groups
+
+        pool = self.create_inventory_pool()
+        links = [self.direct_link(206), self.direct_link(207)]
+        import_config_assets(pool, "\n".join(links))
+        self.create_inventory_recipe(pool, quantity=2)
+        order = self.create_fulfillment_order()
+
+        result = fulfill_order_with_recipe(order)
+
+        order.refresh_from_db()
+        self.assertEqual(result.status, "success")
+        self.assertEqual(order.status, Order.Status.COMPLETED)
+        self.assertEqual(result.cup.items.count(), 2)
+        self.assertCountEqual(
+            list(result.cup.items.values_list("config_link__raw_link", flat=True)),
+            links,
+        )
+        groups = order_config_link_groups(order)
+        self.assertEqual(groups[0]["subscription_link"], "")
+        self.assertIn("/sub/", groups[0]["project_subscription_link"])
+
+    def test_hybrid_recipe_creates_panel_and_inventory_links_in_one_cup(self):
+        from .config_inventory_services import import_config_assets
+        from .cup_fulfillment_services import fulfill_order_with_recipe
+
+        pool = self.create_inventory_pool()
+        inventory_link = self.direct_link(208, host="inventory.example.com")
+        panel_link = self.direct_link(209, host="panel-generated.example.com")
+        import_config_assets(pool, inventory_link)
+        recipe = CupFulfillmentRecipe.objects.create(plan=self.plan, title="Hybrid recipe")
+        panel_rule = CupFillerRule.objects.create(
+            recipe=recipe,
+            position=1,
+            source_type=CupFillerRule.SourceType.PANEL_INBOUNDS,
+            quantity=1,
+            panel=self.panel,
+            required=True,
+        )
+        panel_rule.inbounds.add(self.inbound)
+        CupFillerRule.objects.create(
+            recipe=recipe,
+            position=2,
+            source_type=CupFillerRule.SourceType.INVENTORY_POOL,
+            quantity=1,
+            inventory_pool=pool,
+            required=True,
+        )
+        adapter = self.quick_builder_adapter(direct_link=panel_link)
+        order = self.create_fulfillment_order()
+
+        result = fulfill_order_with_recipe(order, adapter_factory=lambda panel: adapter)
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.cup.items.count(), 2)
+        self.assertEqual(result.panel_generated_count, 1)
+        self.assertEqual(result.inventory_allocation_count, 1)
+        self.assertCountEqual(
+            list(result.cup.items.values_list("config_link__raw_link", flat=True)),
+            [panel_link, inventory_link],
+        )
+        adapter.create_enabled_client.assert_called_once()
+
+    def test_required_rule_failure_strict_marks_fulfillment_failed(self):
+        from .cup_fulfillment_services import fulfill_order_with_recipe
+
+        pool = self.create_inventory_pool()
+        self.create_inventory_recipe(pool, quantity=1)
+        order = self.create_fulfillment_order()
+
+        result = fulfill_order_with_recipe(order)
+
+        order.refresh_from_db()
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(order.provisioning_status, Order.ProvisioningStatus.FAILED)
+        self.assertIn("insufficient stock", order.last_provisioning_error)
+        self.assertEqual(result.cup.items.count(), 0)
+
+    def test_config_inventory_admin_pages_load_for_staff(self):
+        from .config_inventory_services import import_config_assets
+
+        pool = self.create_inventory_pool()
+        import_config_assets(pool, self.direct_link(210))
+        recipe = self.create_inventory_recipe(pool, quantity=1)
+        self.client.force_login(self.admin_user)
+
+        urls = [
+            reverse("admin_store_config_inventory"),
+            reverse("admin_store_config_inventory_import"),
+            reverse("admin:store_configinventorypool_changelist"),
+            reverse("admin:store_configinventoryasset_changelist"),
+            reverse("admin:store_configallocation_changelist"),
+            reverse("admin:store_cupfulfillmentrecipe_changelist"),
+            reverse("admin:store_cupfillerrule_changelist"),
+            reverse("admin:store_configinventorypool_import"),
+            reverse("admin:store_cupfulfillmentrecipe_preview", args=[recipe.pk]),
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+
+    def test_config_inventory_jazzmin_menu_has_clear_labels(self):
+        menu_items = settings.JAZZMIN_SETTINGS["custom_links"]["انبار کانفیگ‌ها"]
+        labels = {str(item.get("name")) for item in menu_items}
+
+        self.assertIn("مخزن‌های کانفیگ", labels)
+        self.assertIn("وارد کردن لینک کانفیگ", labels)
+        self.assertIn("کانفیگ‌های آماده", labels)
+        self.assertIn("تخصیص‌های کانفیگ", labels)
+        self.assertIn("دستور پر کردن Cup", labels)
+        self.assertIn("قوانین پرکننده Cup", labels)
+
+    def test_config_inventory_dashboard_shows_action_cards(self):
+        pool = self.create_inventory_pool(title="Dashboard Stock")
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(reverse("admin_store_config_inventory"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "انبار کانفیگ‌ها")
+        self.assertContains(response, "ساخت مخزن جدید")
+        self.assertContains(response, "وارد کردن لینک کانفیگ")
+        self.assertContains(response, "مشاهده کانفیگ‌های آماده")
+        self.assertContains(response, "ساخت Cup سریع از پنل/استخر")
+        self.assertContains(response, "ساخت Recipe برای پلن")
+        self.assertContains(response, pool.title)
+
+    def test_config_inventory_import_page_creates_assets_and_masks_result(self):
+        pool = self.create_inventory_pool(title="Import Page Stock")
+        raw_link = self.direct_link(211, host="admin-import-secret.example.com")
+        duplicate_link = self.direct_link(212, host="admin-import-duplicate.example.com")
+        self.client.force_login(self.admin_user)
+
+        response = self.client.post(
+            reverse("admin_store_config_inventory_import"),
+            {
+                "pool": pool.pk,
+                "source_batch": "admin-import-test",
+                "raw_text": "\n".join([raw_link, duplicate_link, duplicate_link, "not-a-config"]),
+            },
+        )
+        body = response.content.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(ConfigInventoryAsset.objects.filter(pool=pool).count(), 3)
+        self.assertContains(response, "خلاصه وارد کردن")
+        self.assertContains(response, "total lines")
+        self.assertContains(response, "created")
+        self.assertContains(response, "duplicates detected")
+        self.assertContains(response, "available stock count")
+        self.assertContains(response, "ساخت Cup سریع با این استخر")
+        self.assertContains(response, f"{reverse('admin_store_cup_center_quick_build')}?inventory_pool={pool.pk}")
+        self.assertNotIn(raw_link, body)
+        self.assertNotIn(duplicate_link, body)
+        self.assertNotIn("vless://aaaaaaaa", body)
+        self.assertNotIn("admin-import-secret.example.com", body)
+
+    def test_config_inventory_pool_admin_has_import_links_on_list_and_detail(self):
+        pool = self.create_inventory_pool(title="Pool Admin Stock")
+        self.client.force_login(self.admin_user)
+
+        changelist = self.client.get(reverse("admin:store_configinventorypool_changelist"))
+        detail = self.client.get(reverse("admin:store_configinventorypool_change", args=[pool.pk]))
+
+        self.assertEqual(changelist.status_code, 200)
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(changelist, "وارد کردن لینک کانفیگ")
+        self.assertContains(changelist, reverse("admin_store_config_inventory_import"))
+        self.assertContains(detail, "وارد کردن لینک کانفیگ")
+        self.assertContains(detail, f"{reverse('admin_store_config_inventory_import')}?pool={pool.pk}")
+
+    def test_config_inventory_asset_admin_masks_links(self):
+        from .config_inventory_services import import_config_assets
+
+        pool = self.create_inventory_pool(title="Masked Asset Stock")
+        raw_link = self.direct_link(213, host="masked-admin-secret.example.com")
+        import_config_assets(pool, raw_link)
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(reverse("admin:store_configinventoryasset_changelist"))
+        body = response.content.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "vless://&lt;hidden&gt;")
+        self.assertNotIn(raw_link, body)
+        self.assertNotIn("vless://aaaaaaaa", body)
+
+    def test_config_inventory_recipe_preview_page_loads(self):
+        pool = self.create_inventory_pool()
+        recipe = self.create_inventory_recipe(pool, quantity=1)
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(reverse("admin:store_cupfulfillmentrecipe_preview", args=[recipe.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "پیش‌نمایش دستور تحویل")
+        self.assertContains(response, "اگر این پلن الان فروخته شود")
+
+    def test_config_inventory_custom_pages_block_non_staff(self):
+        pool = self.create_inventory_pool()
+        recipe = self.create_inventory_recipe(pool, quantity=1)
+        regular_user = get_user_model().objects.create_user(username="inventory-regular", password="secret")
+        self.client.force_login(regular_user)
+
+        urls = [
+            reverse("admin_store_config_inventory"),
+            reverse("admin_store_config_inventory_import"),
+            reverse("admin:store_cupfulfillmentrecipe_preview", args=[recipe.pk]),
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertNotEqual(response.status_code, 200)
 
 
 class TelegramProxyTests(TestCase):
@@ -2859,6 +3509,60 @@ class PanelAdapterFactoryTests(TestCase):
         self.assertEqual(unsupported_report.family, "wireguard")
         self.assertFalse(unsupported_report.supported)
         self.assertIn("not supported", " ".join(unsupported_report.errors))
+
+    def test_structured_panel_error_serializes_safely(self):
+        from .panels.errors import PanelIntegrationError
+
+        error = PanelIntegrationError(
+            "ساخت client ناموفق بود token=secret-token",
+            error_code="panel_create_client_failed",
+            layer="panel_write",
+            action="create_client",
+            technical_detail="failed for vless://11111111-1111-4111-8111-111111111111@example.com:443 csrf-token secret-token",
+            remediation="Run Sync capabilities.",
+            panel=self.panel,
+            inbound=self.inbound,
+            safe_context={
+                "password": "panel-secret",
+                "uuid": "11111111-1111-4111-8111-111111111111",
+                "direct_link": self.panel.url + "/sub/private-sub-id",
+            },
+        )
+
+        payload = error.to_safe_dict()
+        text = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual(payload["error_code"], "panel_create_client_failed")
+        self.assertEqual(payload["layer"], "panel_write")
+        self.assertEqual(payload["action"], "create_client")
+        self.assertEqual(payload["panel_id"], self.panel.pk)
+        self.assertEqual(payload["inbound_id"], self.inbound.pk)
+        self.assertIn("Run Sync capabilities", payload["remediation"])
+        self.assertNotIn("secret-token", text)
+        self.assertNotIn("panel-secret", text)
+        self.assertNotIn("11111111-1111-4111-8111-111111111111", text)
+        self.assertNotIn("vless://", text)
+        self.assertNotIn("private-sub-id", text)
+
+    def test_unsupported_family_operation_raises_structured_error(self):
+        from .panels import get_panel_adapter
+        from .panels.errors import UnsupportedPanelFamilyError
+        from .panels.xui.adapter import XUIProvisioningRequest
+
+        self.panel.family = Panel.Family.UNKNOWN
+        self.panel.save(update_fields=["family", "updated_at"])
+        adapter = get_panel_adapter(self.panel)
+
+        with self.assertRaises(UnsupportedPanelFamilyError) as caught:
+            adapter.create_enabled_client(XUIProvisioningRequest("prefix", Decimal("1"), 30, inbound=self.inbound))
+
+        payload = caught.exception.to_safe_dict()
+        self.assertEqual(payload["error_code"], "unsupported_panel_family")
+        self.assertEqual(payload["layer"], "adapter_factory")
+        self.assertEqual(payload["action"], "create_client")
+        self.assertEqual(payload["panel_id"], self.panel.pk)
+        self.assertEqual(payload["remote_inbound_id"], self.inbound.inbound_id)
+        self.assertIn("Sync capabilities", payload["remediation"])
 
     def test_capability_report_redacts_sensitive_metadata(self):
         from .panels.capabilities import CapabilityFlag, CapabilityProfile, PanelCapabilityReport

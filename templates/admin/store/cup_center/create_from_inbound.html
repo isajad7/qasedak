@@ -22,6 +22,13 @@
     <form method="post" class="tw-admin-card tw-space-y-3" novalidate>
         {% csrf_token %}
         {{ form.non_field_errors }}
+        {% if structured_errors %}
+            <div class="tw-space-y-3">
+                {% for error in structured_errors %}
+                    {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در ساخت کانفیگ" %}
+                {% endfor %}
+            </div>
+        {% endif %}
         <div class="cup-form-grid">
             {% for field in form.visible_fields %}
                 <div class="cup-form-field {% if field.name == 'confirm_remote_create' %}cup-form-wide{% endif %}">

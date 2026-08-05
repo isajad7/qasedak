@@ -13,6 +13,7 @@ urlpatterns = [
     path('order/<uuid:order_id>/', views.order_detail, name='order_detail'),
     path('order/<uuid:order_id>/delete/', views.delete_order, name='delete_order'),
     path('r/<str:referral_code>/', views.referral_landing, name='referral_landing'),
+    path('sub/<str:token>/dashboard/', views.subscription_cup_dashboard, name='subscription_cup_dashboard'),
     path('sub/<str:token>', views.subscription_cup, name='subscription_cup'),
     path('sub/<str:token>/', views.subscription_cup, name='subscription_cup_slash'),
     path('my-access/', views.my_configurations, name='my_configurations'),

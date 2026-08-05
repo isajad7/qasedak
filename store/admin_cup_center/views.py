@@ -19,6 +19,7 @@ from store.admin_cup_center.services import (
     cup_list_items,
     cup_queryset,
     mask_link_for_display,
+    quick_builder_inventory_pool_rows,
     quick_builder_panel_groups,
     quick_build_subscription_cup,
     rebuild_cup_from_source,
@@ -84,15 +85,20 @@ def _store_quick_result(request, result):
         "status": result.status,
         "protocols": result.protocols,
         "selected_inbounds": result.selected_inbounds,
+        "selected_inventory_pools": result.selected_inventory_pools,
         "selected_panels_count": result.selected_panels_count,
         "selected_inbounds_count": result.selected_inbounds_count,
+        "selected_inventory_pools_count": result.selected_inventory_pools_count,
         "created_remote_client_groups_count": result.created_remote_client_groups_count,
+        "inventory_allocation_count": result.inventory_allocation_count,
         "config_link_count": result.config_link_count,
         "panel_results": result.panel_results,
+        "inventory_results": result.inventory_results,
         "masked_subscription_url": result.masked_subscription_url,
         "email_masked": result.email_masked,
         "warnings": result.warnings,
         "errors": result.errors,
+        "structured_errors": result.structured_errors,
     }
 
 
@@ -104,6 +110,7 @@ def cup_center_quick_build(request):
     _require_perm(request, "store.view_inbound")
     if request.method == "POST":
         form = QuickSubscriptionBuilderForm(request.POST)
+        structured_errors = []
         if form.is_valid():
             try:
                 result = quick_build_subscription_cup(form.cleaned_data, admin_user=request.user, request=request)
@@ -117,13 +124,33 @@ def cup_center_quick_build(request):
                 return redirect("admin_store_cup_center_quick_result", result.cup.pk)
             except (CupCenterValidationError, CupCenterRemoteCreateError, CupCenterRemoteSaveError) as exc:
                 form.add_error(None, str(exc))
+                if getattr(exc, "structured_error", None):
+                    structured_errors.append(exc.structured_error)
     else:
-        form = QuickSubscriptionBuilderForm()
+        initial = {}
+        selected_pool_ids = [value for value in request.GET.getlist("inventory_pool") if str(value).isdigit()]
+        if not selected_pool_ids:
+            pool_id = str(request.GET.get("pool") or "").strip()
+            selected_pool_ids = [pool_id] if pool_id.isdigit() else []
+        if selected_pool_ids:
+            initial["inventory_pools"] = selected_pool_ids
+        form = QuickSubscriptionBuilderForm(initial=initial)
+        structured_errors = []
+    if request.method == "POST":
+        selected_inventory_pool_ids = {int(value) for value in request.POST.getlist("inventory_pools") if str(value).isdigit()}
+    else:
+        selected_inventory_pool_ids = {int(value) for value in request.GET.getlist("inventory_pool") if str(value).isdigit()}
+        pool_id = str(request.GET.get("pool") or "").strip()
+        if pool_id.isdigit():
+            selected_inventory_pool_ids.add(int(pool_id))
     context = {
         **_base_context(request, "ساخت سریع لینک اشتراک"),
         "form": form,
         "panel_groups": quick_builder_panel_groups(),
+        "inventory_pool_rows": quick_builder_inventory_pool_rows(),
         "selected_inbound_ids": {int(value) for value in request.POST.getlist("inbounds") if str(value).isdigit()},
+        "selected_inventory_pool_ids": selected_inventory_pool_ids,
+        "structured_errors": structured_errors,
         "cancel_url": reverse("admin_store_cup_center"),
     }
     return TemplateResponse(request, "admin/store/cup_center/quick_build.html", context)
@@ -148,6 +175,11 @@ def cup_center_quick_result(request, cup_id):
         for row in item_rows
     ]
     fallback_panel_results = cup.metadata.get("panel_results") if isinstance(cup.metadata, dict) else None
+    fallback_structured_errors = [
+        error
+        for panel_result in (fallback_panel_results or [])
+        for error in ((panel_result.get("structured_errors") or []) if isinstance(panel_result, dict) else [])
+    ]
     context = {
         **_base_context(request, "نتیجه ساخت سریع لینک اشتراک", cup=cup),
         "subscription": subscription_url_summary(cup, request=request),
@@ -159,13 +191,18 @@ def cup_center_quick_result(request, cup_id):
             "selected_inbounds": selected_inbounds,
             "selected_panels_count": session_result.get("selected_panels_count") or (cup.metadata.get("selected_panel_count") if isinstance(cup.metadata, dict) else "") or "-",
             "selected_inbounds_count": session_result.get("selected_inbounds_count") or (cup.metadata.get("selected_inbound_count") if isinstance(cup.metadata, dict) else "") or len(selected_inbounds),
+            "selected_inventory_pools": session_result.get("selected_inventory_pools") or [],
+            "selected_inventory_pools_count": session_result.get("selected_inventory_pools_count") or (cup.metadata.get("selected_inventory_pool_count") if isinstance(cup.metadata, dict) else "") or 0,
             "created_remote_client_groups_count": session_result.get("created_remote_client_groups_count") or (cup.metadata.get("created_remote_client_groups_count") if isinstance(cup.metadata, dict) else "") or 0,
+            "inventory_allocation_count": session_result.get("inventory_allocation_count") or (cup.metadata.get("inventory_allocation_count") if isinstance(cup.metadata, dict) else "") or 0,
             "config_link_count": session_result.get("config_link_count") or (cup.metadata.get("config_link_count") if isinstance(cup.metadata, dict) else "") or len(item_rows),
             "panel_results": session_result.get("panel_results") or fallback_panel_results or [],
-            "masked_subscription_url": session_result.get("masked_subscription_url") or subscription_url_summary(cup, request=request)["masked_url"],
+            "inventory_results": session_result.get("inventory_results") or (cup.metadata.get("inventory_results") if isinstance(cup.metadata, dict) else "") or [],
+            "masked_subscription_url": session_result.get("masked_subscription_url") or subscription_url_summary(cup, request=request)["masked_client_url"],
             "email_masked": session_result.get("email_masked") or "",
             "warnings": session_result.get("warnings") or [],
             "errors": session_result.get("errors") or [],
+            "structured_errors": session_result.get("structured_errors") or fallback_structured_errors,
         },
         "detail_url": reverse("admin_store_cup_center_detail", args=[cup.pk]),
         "preview_url": reverse("admin_store_cup_center_preview", args=[cup.pk]),
@@ -313,6 +350,7 @@ def cup_center_create_from_inbound(request, cup_id):
     created_result = None
     if request.method == "POST":
         form = PanelConfigIntoCupForm(request.POST, cup=cup)
+        structured_errors = []
         if form.is_valid():
             try:
                 created_result = create_panel_config_into_cup(cup, form.cleaned_data["panel"], form.cleaned_data["inbound"], form.cleaned_data)
@@ -320,14 +358,20 @@ def cup_center_create_from_inbound(request, cup_id):
                 return redirect("admin_store_cup_center_detail", cup.pk)
             except CupCenterRemoteSaveError as exc:
                 form.add_error(None, str(exc))
+                if getattr(exc, "structured_error", None):
+                    structured_errors.append(exc.structured_error)
             except CupCenterRemoteCreateError as exc:
                 form.add_error(None, str(exc))
+                if getattr(exc, "structured_error", None):
+                    structured_errors.append(exc.structured_error)
     else:
         form = PanelConfigIntoCupForm(cup=cup)
+        structured_errors = []
     context = {
         **_base_context(request, "ساخت کانفیگ از Panel/Inbound", cup=cup),
         "form": form,
         "created_result": created_result,
+        "structured_errors": structured_errors,
         "detail_url": reverse("admin_store_cup_center_detail", args=[cup.pk]),
     }
     return TemplateResponse(request, "admin/store/cup_center/create_from_inbound.html", context)

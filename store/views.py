@@ -64,7 +64,14 @@ from .referral_services import (
     redeem_referral_rewards,
 )
 from .setup_readiness import SETUP_NOT_READY_MESSAGE, store_is_sellable
-from .subscription_cups import render_subscription_cup
+from .subscription_cups import (
+    active_cup_links,
+    build_subscription_cup_client_path,
+    build_subscription_cup_dashboard_path,
+    build_subscription_cup_raw_path,
+    render_subscription_cup,
+    render_subscription_cup_json,
+)
 from .telegram_link_services import (
     generate_web_telegram_link,
     get_customer_telegram_link_status,
@@ -82,24 +89,165 @@ SUPPORT_MESSAGE_MAX_LENGTH = 2000
 SUPPORT_CONTACT_MAX_LENGTH = 120
 logger = logging.getLogger(__name__)
 
+CLIENT_SUBSCRIPTION_USER_AGENTS = (
+    "v2ray",
+    "v2rayng",
+    "hiddify",
+    "clash",
+    "sing-box",
+    "shadowrocket",
+    "nekoray",
+    "surge",
+    "quantumult",
+    "stash",
+    "loon",
+)
+BROWSER_USER_AGENTS = (
+    "chrome",
+    "crios",
+    "safari",
+    "firefox",
+    "fxios",
+    "edg",
+    "opr/",
+    "opera",
+)
+SUBSCRIPTION_OUTPUT_FORMATS = {"base64", "raw", "json"}
+
+
+def _no_store(response):
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+def _subscription_plain_response(body, *, status=200):
+    return _no_store(
+        HttpResponse(
+            body,
+            status=status,
+            content_type="text/plain; charset=utf-8",
+        )
+    )
+
+
+def _normalized_subscription_format(request):
+    output_format = str(request.GET.get("format") or "base64").strip().lower()
+    if output_format not in SUBSCRIPTION_OUTPUT_FORMATS:
+        return "base64"
+    return output_format
+
+
+def _is_client_user_agent(user_agent):
+    lowered = str(user_agent or "").lower()
+    return any(marker in lowered for marker in CLIENT_SUBSCRIPTION_USER_AGENTS)
+
+
+def _is_browser_user_agent(user_agent):
+    lowered = str(user_agent or "").lower()
+    return bool(lowered) and any(marker in lowered for marker in BROWSER_USER_AGENTS)
+
+
+def wants_dashboard(request):
+    if "format" in request.GET:
+        return False
+    if str(request.GET.get("view") or "").strip().lower() == "dashboard":
+        return True
+    user_agent = request.META.get("HTTP_USER_AGENT", "")
+    if _is_client_user_agent(user_agent):
+        return False
+    accept = request.META.get("HTTP_ACCEPT", "")
+    return "text/html" in str(accept or "").lower() and _is_browser_user_agent(user_agent)
+
+
+def _subscription_dashboard_context(request, cup):
+    subscription_url = request.build_absolute_uri(build_subscription_cup_client_path(cup))
+    dashboard_url = request.build_absolute_uri(build_subscription_cup_dashboard_path(cup))
+    raw_url = request.build_absolute_uri(build_subscription_cup_raw_path(cup))
+    active_items = list(
+        cup.items.filter(is_active=True, config_link__is_active=True)
+        .select_related("config_link", "config_link__source_panel", "config_link__source_inbound")
+        .order_by("position", "pk")
+    )
+    protocols = []
+    config_rows = []
+    for item in active_items:
+        config_link = item.config_link
+        protocol = config_link.protocol or "unknown"
+        if protocol not in protocols:
+            protocols.append(protocol)
+        source_panel = getattr(config_link, "source_panel", None)
+        source_inbound = getattr(config_link, "source_inbound", None)
+        config_rows.append(
+            {
+                "protocol": protocol,
+                "remark": config_link.remark or "-",
+                "host": config_link.host or "-",
+                "port": config_link.port or "-",
+                "source_panel": getattr(source_panel, "name", "") or "",
+                "source_inbound": getattr(source_inbound, "remark", "") or "",
+                "raw_link": config_link.raw_link,
+            }
+        )
+    remaining_days = None
+    if cup.expires_at:
+        remaining_seconds = (cup.expires_at - timezone.now()).total_seconds()
+        remaining_days = max(0, int((remaining_seconds + 86399) // 86400))
+    traffic_limit_gb = round((int(cup.traffic_limit_bytes or 0) / (1024 ** 3)), 2) if cup.traffic_limit_bytes else None
+    return {
+        "cup": cup,
+        "title": cup.title or getattr(cup.vpn_client, "username", "") or getattr(cup.order, "username", "") or "اشتراک شما",
+        "status_label": "فعال" if cup.is_accessible else ("منقضی" if cup.is_expired else "غیرفعال"),
+        "remaining_days": remaining_days,
+        "remaining_days_label": remaining_days if remaining_days is not None else "-",
+        "traffic_limit_gb": traffic_limit_gb,
+        "traffic_limit_label": f"{traffic_limit_gb} GB" if traffic_limit_gb else "-",
+        "item_count": len(active_items),
+        "protocols": protocols,
+        "config_rows": config_rows if cup.is_accessible else [],
+        "subscription_url": subscription_url,
+        "dashboard_url": dashboard_url,
+        "raw_url": raw_url,
+        "client_path": build_subscription_cup_client_path(cup),
+        "dashboard_path": build_subscription_cup_dashboard_path(cup),
+        "raw_path": build_subscription_cup_raw_path(cup),
+        "has_links": bool(active_cup_links(cup)),
+    }
+
+
+def _render_subscription_dashboard(request, cup):
+    response = render(
+        request,
+        "store/subscription_cup/dashboard.html",
+        _subscription_dashboard_context(request, cup),
+    )
+    return _no_store(response)
+
 
 @require_GET
 def subscription_cup(request, token):
-    cup = get_object_or_404(SubscriptionCup, token=token)
-    if not cup.is_accessible:
-        return HttpResponse(
-            "Subscription is not active.\n",
-            status=403,
-            content_type="text/plain; charset=utf-8",
-        )
-
-    output_format = str(request.GET.get("format") or "base64").strip().lower()
-    if output_format not in {"base64", "raw"}:
-        output_format = "base64"
-    return HttpResponse(
-        render_subscription_cup(cup, output_format=output_format),
-        content_type="text/plain; charset=utf-8",
+    cup = get_object_or_404(
+        SubscriptionCup.objects.select_related("customer", "order", "plan", "vpn_client"),
+        token=token,
     )
+    if wants_dashboard(request):
+        return _render_subscription_dashboard(request, cup)
+
+    if not cup.is_accessible:
+        return _subscription_plain_response("Subscription is not active.\n", status=403)
+
+    output_format = _normalized_subscription_format(request)
+    if output_format == "json":
+        return _no_store(JsonResponse(render_subscription_cup_json(cup)))
+    return _subscription_plain_response(render_subscription_cup(cup, output_format=output_format))
+
+
+@require_GET
+def subscription_cup_dashboard(request, token):
+    cup = get_object_or_404(
+        SubscriptionCup.objects.select_related("customer", "order", "plan", "vpn_client"),
+        token=token,
+    )
+    return _render_subscription_dashboard(request, cup)
 
 
 def get_current_store():

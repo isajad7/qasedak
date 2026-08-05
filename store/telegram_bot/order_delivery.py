@@ -126,6 +126,16 @@ def order_config_link_groups(order):
                 "project_subscription_link": build_subscription_cup_url(cup, store=order.store) if cup else "",
             }
         ]
+    cup = get_subscription_cup_for_order(order)
+    if cup:
+        return [
+            {
+                "label": "",
+                "subscription_link": "",
+                "direct_link": "",
+                "project_subscription_link": build_subscription_cup_url(cup, store=order.store),
+            }
+        ]
     return []
 
 

@@ -43,6 +43,13 @@
 <section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
     <div class="tw-admin-card">
         <div class="tw-section-heading tw-mb-4"><h2>هشدارها و خطاها</h2></div>
+        {% if report_structured_errors %}
+            <div class="tw-mb-3 tw-space-y-3">
+                {% for error in report_structured_errors %}
+                    {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در قابلیت پنل" %}
+                {% endfor %}
+            </div>
+        {% endif %}
         {% if report.warnings or report.errors %}
             <ul class="tw-detail-list">
                 {% for warning in report.warnings %}<li>{{ warning }}</li>{% endfor %}
