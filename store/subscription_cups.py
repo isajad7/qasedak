@@ -20,6 +20,10 @@ SUPPORTED_PROTOCOLS = {
     ConfigLink.Protocol.VMESS,
     ConfigLink.Protocol.TROJAN,
     ConfigLink.Protocol.SS,
+    "ssr",
+    "hysteria2",
+    "hy2",
+    "tuic",
 }
 
 
@@ -102,10 +106,12 @@ def parse_config_link(raw_link):
     remark = ""
 
     try:
-        if protocol in {ConfigLink.Protocol.VLESS, ConfigLink.Protocol.TROJAN}:
+        if protocol in {ConfigLink.Protocol.VLESS, ConfigLink.Protocol.TROJAN, "hysteria2", "hy2", "tuic"}:
             host, port, remark = _parse_standard_url(raw_link)
         elif protocol == ConfigLink.Protocol.SS:
             host, port, remark = _parse_shadowsocks(raw_link)
+        elif protocol == "ssr":
+            host, port, remark = _parse_standard_url(raw_link)
         elif protocol == ConfigLink.Protocol.VMESS:
             data = _decode_vmess_payload(raw_link)
             host = str(data.get("add") or "").strip()
@@ -523,13 +529,14 @@ def build_subscription_cup_path(cup):
 
 
 def build_subscription_cup_dashboard_path(cup):
-    try:
-        return reverse("subscription_cup_dashboard", args=[cup.token])
-    except NoReverseMatch:
-        return f"/sub/{cup.token}/dashboard/"
+    return build_subscription_cup_path(cup)
 
 
 def build_subscription_cup_client_path(cup):
+    return build_subscription_cup_path(cup)
+
+
+def build_subscription_cup_base64_path(cup):
     return f"{build_subscription_cup_path(cup)}?format=base64"
 
 
@@ -559,6 +566,51 @@ def build_subscription_cup_url(cup, *, request=None, store=None):
         or getattr(getattr(cup, "plan", None), "store", None)
     )
     return f"{base_url}{path}" if base_url else path
+
+
+def _build_subscription_cup_url_for_path(cup, path, *, request=None, store=None):
+    if request:
+        return request.build_absolute_uri(path)
+    base_url = build_subscription_cup_url(cup, store=store)
+    cup_path = build_subscription_cup_path(cup)
+    base_prefix = base_url[: -len(cup_path)] if cup_path and base_url.endswith(cup_path) else ""
+    return f"{base_prefix}{path}" if base_prefix else path
+
+
+def build_subscription_cup_dashboard_url(cup, *, request=None, store=None):
+    return _build_subscription_cup_url_for_path(
+        cup,
+        build_subscription_cup_dashboard_path(cup),
+        request=request,
+        store=store,
+    )
+
+
+def build_subscription_cup_client_url(cup, *, request=None, store=None):
+    return _build_subscription_cup_url_for_path(
+        cup,
+        build_subscription_cup_client_path(cup),
+        request=request,
+        store=store,
+    )
+
+
+def build_subscription_cup_base64_url(cup, *, request=None, store=None):
+    return _build_subscription_cup_url_for_path(
+        cup,
+        build_subscription_cup_base64_path(cup),
+        request=request,
+        store=store,
+    )
+
+
+def build_subscription_cup_raw_url(cup, *, request=None, store=None):
+    return _build_subscription_cup_url_for_path(
+        cup,
+        build_subscription_cup_raw_path(cup),
+        request=request,
+        store=store,
+    )
 
 
 def mask_subscription_url(url, token):

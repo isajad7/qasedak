@@ -239,13 +239,20 @@
                     <span class="muted">{{ protocols|join:", "|default:"بدون پروتکل فعال" }}</span>
                 </div>
                 <div class="linkbox">
-                    <span class="field-label">لینک ورود به برنامه</span>
+                    <span class="field-label">لینک مدیریت و ورود به برنامه</span>
                     <code>{{ subscription_url }}</code>
                     <div class="actions">
                         <button type="button" data-copy="{{ subscription_url }}">کپی لینک</button>
                         <button type="button" class="secondary" data-toggle-qr="subscription">نمایش QR</button>
                     </div>
                     <div id="qr-subscription" class="qr-note">QR در این نسخه به صورت تصویری تولید نمی‌شود. همین لینک را در برنامه مقصد import کنید.</div>
+                </div>
+                <div class="linkbox" style="margin-top: 10px;">
+                    <span class="field-label">اگر برنامه خطا داد، از لینک سازگار استفاده کنید</span>
+                    <code>{{ base64_url }}</code>
+                    <div class="actions">
+                        <button type="button" class="secondary" data-copy="{{ base64_url }}">کپی لینک سازگار</button>
+                    </div>
                 </div>
             </section>
 

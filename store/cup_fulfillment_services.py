@@ -226,6 +226,10 @@ def _panel_rule_inbounds(rule):
     return inbounds
 
 
+def _inbound_missing_reality_pbk(inbound):
+    return inbound.security == Inbound.Security.REALITY and not str(inbound.pbk or "").strip()
+
+
 def _create_panel_links_for_rule(order, cup, rule, *, adapter_factory):
     panel = rule.panel
     inbounds = _panel_rule_inbounds(rule)
@@ -246,6 +250,9 @@ def _create_panel_links_for_rule(order, cup, rule, *, adapter_factory):
         return result
     if any(inbound.panel_id != panel.pk for inbound in inbounds):
         result.errors.append("Panel rule contains an inbound from a different panel.")
+        return result
+    if any(_inbound_missing_reality_pbk(inbound) for inbound in inbounds):
+        result.errors.append("Reality inbound is missing public key; source was not provisioned.")
         return result
 
     adapter = adapter_factory(panel)

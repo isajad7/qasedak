@@ -24,12 +24,12 @@
             <div class="cup-stat"><span>Base64 length</span><strong>{{ preview.base64_length }}</strong></div>
         </div>
         <div class="tw-model-list tw-mt-2">
-            <div class="tw-model-row"><span>صفحه کاربر</span><strong dir="ltr">{{ subscription.masked_dashboard_url }}</strong></div>
-            <div class="tw-model-row"><span>لینک ورود به برنامه</span><strong dir="ltr">{{ subscription.masked_client_url }}</strong></div>
+            <div class="tw-model-row"><span>لینک مدیریت و ورود به برنامه</span><strong dir="ltr">{{ subscription.masked_client_url }}</strong></div>
+            <div class="tw-model-row"><span>لینک سازگار جایگزین</span><strong dir="ltr">{{ subscription.masked_base64_url }}</strong></div>
             <div class="tw-model-row"><span>خروجی خام</span><strong dir="ltr">{{ subscription.masked_raw_url }}</strong></div>
         </div>
-        <code class="tw-safe-command">{{ subscription.masked_dashboard_url }}</code>
         <code class="tw-safe-command">{{ subscription.masked_client_url }}</code>
+        <code class="tw-safe-command">{{ subscription.masked_base64_url }}</code>
         <code class="tw-safe-command">{{ subscription.masked_raw_url }}</code>
     </div>
 

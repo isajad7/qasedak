@@ -15,6 +15,14 @@ from .keyboards import build_copy_text_button, copy_text_is_supported, merge_inl
 
 
 CONFIG_LINK_KIND_META = {
+    "dashboard": {
+        "heading": "🧭 لینک مدیریت و ورود به برنامه",
+        "copy_label": "کپی لینک اصلی 🧭",
+    },
+    "client": {
+        "heading": "📲 لینک سازگار جایگزین",
+        "copy_label": "کپی لینک سازگار 📲",
+    },
     "sub": {
         "heading": "🔗 لینک اشتراک",
         "copy_label": "کپی لینک اشتراک 🔗",
@@ -31,10 +39,16 @@ def normalize_config_link(value):
     return str(value or "").strip()
 
 
-def config_link_sections(*, subscription_link="", direct_link=""):
+def config_link_sections(*, subscription_link="", direct_link="", dashboard_link="", client_link=""):
     sections = []
+    dashboard_link = normalize_config_link(dashboard_link)
+    client_link = normalize_config_link(client_link)
     subscription_link = normalize_config_link(subscription_link)
     direct_link = normalize_config_link(direct_link)
+    if dashboard_link:
+        sections.append(("dashboard", dashboard_link))
+    if client_link:
+        sections.append(("client", client_link))
     if subscription_link:
         sections.append(("sub", subscription_link))
     if direct_link:
@@ -103,11 +117,16 @@ def config_copy_navigation_keyboard():
     }
 
 
-def config_delivery_keyboard(config=None, config_link="", *, subscription_link="", direct_link="", extra_keyboard=None):
+def config_delivery_keyboard(config=None, config_link="", *, subscription_link="", direct_link="", dashboard_link="", client_link="", extra_keyboard=None):
     if config_link and not subscription_link and not direct_link:
         direct_link = config_link
     rows = []
-    for kind, link in config_link_sections(subscription_link=subscription_link, direct_link=direct_link):
+    for kind, link in config_link_sections(
+        subscription_link=subscription_link,
+        direct_link=direct_link,
+        dashboard_link=dashboard_link,
+        client_link=client_link,
+    ):
         copy_button = build_config_link_copy_button(config, kind, link)
         if copy_button:
             rows.append([copy_button])
@@ -123,8 +142,13 @@ def default_config_links_title(subscription_link="", direct_link=""):
     return "✅ کانفیگ شما آماده شد"
 
 
-def format_config_links_text(*, subscription_link="", direct_link="", title=None, detail_lines=None):
-    sections = config_link_sections(subscription_link=subscription_link, direct_link=direct_link)
+def format_config_links_text(*, subscription_link="", direct_link="", dashboard_link="", client_link="", title=None, detail_lines=None):
+    sections = config_link_sections(
+        subscription_link=subscription_link,
+        direct_link=direct_link,
+        dashboard_link=dashboard_link,
+        client_link=client_link,
+    )
     title = title or default_config_links_title(subscription_link, direct_link)
     lines = [escape(str(title))]
     for line in detail_lines or []:
@@ -158,22 +182,33 @@ def send_config_links_message(
     *,
     subscription_link="",
     direct_link="",
+    dashboard_link="",
+    client_link="",
     title=None,
     detail_lines=None,
     keyboard=None,
 ):
     subscription_link = normalize_config_link(subscription_link)
     direct_link = normalize_config_link(direct_link)
-    if not config_link_sections(subscription_link=subscription_link, direct_link=direct_link):
+    dashboard_link = normalize_config_link(dashboard_link)
+    client_link = normalize_config_link(client_link)
+    if not config_link_sections(
+        subscription_link=subscription_link,
+        direct_link=direct_link,
+        dashboard_link=dashboard_link,
+        client_link=client_link,
+    ):
         return None
 
     text = format_config_links_text(
         subscription_link=subscription_link,
         direct_link=direct_link,
+        dashboard_link=dashboard_link,
+        client_link=client_link,
         title=title,
         detail_lines=detail_lines,
     )
-    if len(text) > TELEGRAM_MESSAGE_SAFE_LIMIT and subscription_link and direct_link:
+    if len(text) > TELEGRAM_MESSAGE_SAFE_LIMIT and subscription_link and direct_link and not dashboard_link and not client_link:
         return [
             send_config_links_message(
                 client,
@@ -200,6 +235,8 @@ def send_config_links_message(
             client.config,
             subscription_link=subscription_link,
             direct_link=direct_link,
+            dashboard_link=dashboard_link,
+            client_link=client_link,
             extra_keyboard=keyboard,
         ),
         parse_mode="HTML",

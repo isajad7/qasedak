@@ -60,9 +60,11 @@ from store.admin_panel_center.routing_views import (
 )
 from store.admin_cup_center.views import (
     cup_center_add_existing,
+    cup_center_add_inventory,
     cup_center_add_manual,
     cup_center_create_from_inbound,
     cup_center_detail,
+    cup_center_item_link_secret,
     cup_center_index,
     cup_center_new,
     cup_center_preview,
@@ -73,6 +75,14 @@ from store.admin_cup_center.views import (
 from store.admin_config_inventory import (
     config_inventory_dashboard,
     config_inventory_import,
+)
+from store.admin_plan_fulfillment import (
+    plan_fulfillment_dashboard,
+    plan_fulfillment_plan,
+    plan_fulfillment_plans,
+    plan_fulfillment_recipe,
+    plan_fulfillment_recipe_preview,
+    plan_fulfillment_recipe_simulate,
 )
 from store.admin_staff import (
     staff_access_center,
@@ -106,6 +116,36 @@ urlpatterns = [
         'admin/store/config-inventory/import/',
         admin.site.admin_view(config_inventory_import),
         name='admin_store_config_inventory_import',
+    ),
+    path(
+        'admin/store/plan-fulfillment/',
+        admin.site.admin_view(plan_fulfillment_dashboard),
+        name='admin_store_plan_fulfillment',
+    ),
+    path(
+        'admin/store/plan-fulfillment/plans/',
+        admin.site.admin_view(plan_fulfillment_plans),
+        name='admin_store_plan_fulfillment_plans',
+    ),
+    path(
+        'admin/store/plan-fulfillment/plan/<int:plan_id>/',
+        admin.site.admin_view(plan_fulfillment_plan),
+        name='admin_store_plan_fulfillment_plan',
+    ),
+    path(
+        'admin/store/plan-fulfillment/recipe/<int:recipe_id>/',
+        admin.site.admin_view(plan_fulfillment_recipe),
+        name='admin_store_plan_fulfillment_recipe',
+    ),
+    path(
+        'admin/store/plan-fulfillment/recipe/<int:recipe_id>/preview/',
+        admin.site.admin_view(plan_fulfillment_recipe_preview),
+        name='admin_store_plan_fulfillment_recipe_preview',
+    ),
+    path(
+        'admin/store/plan-fulfillment/recipe/<int:recipe_id>/simulate/',
+        admin.site.admin_view(plan_fulfillment_recipe_simulate),
+        name='admin_store_plan_fulfillment_recipe_simulate',
     ),
     path(
         'admin/store/backups/',
@@ -210,6 +250,20 @@ urlpatterns = [
     path(
         'admin/store/cup-center/<int:cup_id>/add-existing-links',
         admin.site.admin_view(cup_center_add_existing),
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/items/<int:item_id>/link-secret/',
+        admin.site.admin_view(cup_center_item_link_secret),
+        name='admin_store_cup_center_item_link_secret',
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/add-inventory-assets/',
+        admin.site.admin_view(cup_center_add_inventory),
+        name='admin_store_cup_center_add_inventory',
+    ),
+    path(
+        'admin/store/cup-center/<int:cup_id>/add-inventory-assets',
+        admin.site.admin_view(cup_center_add_inventory),
     ),
     path(
         'admin/store/cup-center/<int:cup_id>/add-manual-links/',

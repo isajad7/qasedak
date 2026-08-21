@@ -42,6 +42,7 @@ PANEL_LOGIN_TIMEOUT_SECONDS = (5, 30)
 PANEL_LOGIN_ATTEMPTS = 2
 CLIENT_STATS_CACHE_SECONDS = 60
 USAGE_SNAPSHOT_INTERVAL_SECONDS = 300
+REALITY_PUBLIC_KEY_MISSING_MESSAGE = "Reality public key برای ساخت لینک پیدا نشد. لینک تولیدشده ممکن است قابل استفاده نباشد."
 
 
 class XUIError(Exception):
@@ -245,11 +246,38 @@ def build_config_email_prefix(payer_name, total_gb, tracking_code=""):
     return build_client_display_name(preferred_name=payer_name, short_id=tracking_code)
 
 
+def _decoded_json_value(value):
+    if isinstance(value, (dict, list, tuple)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text[0] not in "{[":
+            return value
+        try:
+            return json.loads(text)
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
 def first_value(value):
+    value = _decoded_json_value(value)
     if isinstance(value, list) and value:
-        return value[0]
+        return first_value(value[0])
+    if isinstance(value, tuple) and value:
+        return first_value(value[0])
     if isinstance(value, str):
         return value
+    return ""
+
+
+def first_present_value(*values):
+    for value in values:
+        if value is None or value == "":
+            continue
+        nested = first_value(value)
+        if nested != "":
+            return nested
     return ""
 
 
@@ -259,11 +287,63 @@ def append_param(params, key, value):
     params.append((key, str(value)))
 
 
+def _nested_mapping(value):
+    value = _decoded_json_value(value)
+    return value if isinstance(value, dict) else {}
+
+
+def _native_config_link_from_value(value):
+    value = _decoded_json_value(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if re.match(r"(?i)^(vless|vmess|trojan|ss|ssr|hysteria2|hy2|tuic)://", text):
+            return text
+        return ""
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            native_link = _native_config_link_from_value(item)
+            if native_link:
+                return native_link
+        return ""
+    if isinstance(value, dict):
+        direct_keys = (
+            "direct_link",
+            "directLink",
+            "shareLink",
+            "share_link",
+            "configLink",
+            "config_link",
+            "link",
+            "uri",
+        )
+        for key in direct_keys:
+            native_link = _native_config_link_from_value(value.get(key))
+            if native_link:
+                return native_link
+        return ""
+    return ""
+
+
+def native_config_link_from_sources(*sources):
+    for source in sources:
+        native_link = _native_config_link_from_value(source)
+        if native_link:
+            return native_link
+    return ""
+
+
+def _response_obj_mapping(response):
+    if not isinstance(response, dict):
+        return {}
+    obj = response.get("obj")
+    return obj if isinstance(obj, dict) else {}
+
+
 def build_vless_query_params(stream_settings, client_data=None):
     client_data = client_data or {}
     stream_settings = stream_settings or {}
-    network = stream_settings.get("network") or "tcp"
-    security = stream_settings.get("security") or "none"
+    network = str(stream_settings.get("network") or "tcp").strip().lower()
+    security = str(stream_settings.get("security") or "none").strip().lower()
     params = []
 
     append_param(params, "type", network)
@@ -272,25 +352,78 @@ def build_vless_query_params(stream_settings, client_data=None):
     append_param(params, "flow", client_data.get("flow"))
 
     if security == "reality":
-        reality_settings = stream_settings.get("realitySettings") or {}
-        reality_inner_settings = reality_settings.get("settings") or {}
+        reality_settings = _nested_mapping(stream_settings.get("realitySettings"))
+        reality_inner_settings = _nested_mapping(reality_settings.get("settings"))
+        reality_dest_settings = _nested_mapping(reality_inner_settings.get("dest"))
+        client_reality_settings = _nested_mapping(client_data.get("realitySettings"))
+        public_key = first_present_value(
+            reality_settings.get("publicKey"),
+            reality_inner_settings.get("publicKey"),
+            client_reality_settings.get("publicKey"),
+            client_data.get("publicKey"),
+            client_data.get("pbk"),
+        )
+        if not public_key:
+            raise XUIError(
+                REALITY_PUBLIC_KEY_MISSING_MESSAGE,
+                category="reality_public_key_missing",
+                remediation_hint="Reality inbound streamSettings.realitySettings.settings.publicKey را بررسی کنید یا لینک native پنل را استفاده کنید.",
+            )
         append_param(
             params,
             "pbk",
-            reality_inner_settings.get("publicKey") or reality_settings.get("publicKey"),
+            public_key,
         )
         append_param(
             params,
             "fp",
-            reality_settings.get("fingerprint")
-            or reality_inner_settings.get("fingerprint")
-            or "chrome",
+            first_present_value(
+                reality_settings.get("fingerprint"),
+                reality_inner_settings.get("fingerprint"),
+                client_reality_settings.get("fingerprint"),
+                client_data.get("fingerprint"),
+                "chrome",
+            ),
         )
-        append_param(params, "sni", first_value(reality_settings.get("serverNames")))
-        append_param(params, "sid", first_value(reality_settings.get("shortIds")))
-        append_param(params, "spx", reality_settings.get("spiderX") or "/")
+        append_param(
+            params,
+            "sni",
+            first_present_value(
+                reality_settings.get("serverName"),
+                reality_settings.get("serverNames"),
+                reality_inner_settings.get("serverName"),
+                reality_inner_settings.get("serverNames"),
+                reality_dest_settings.get("serverName"),
+                client_reality_settings.get("serverName"),
+                client_reality_settings.get("serverNames"),
+                client_data.get("sni"),
+            ),
+        )
+        append_param(
+            params,
+            "sid",
+            first_present_value(
+                reality_settings.get("shortId"),
+                reality_settings.get("shortIds"),
+                reality_inner_settings.get("shortId"),
+                reality_inner_settings.get("shortIds"),
+                client_reality_settings.get("shortId"),
+                client_reality_settings.get("shortIds"),
+                client_data.get("sid"),
+            ),
+        )
+        append_param(
+            params,
+            "spx",
+            first_present_value(
+                reality_settings.get("spiderX"),
+                reality_inner_settings.get("spiderX"),
+                client_reality_settings.get("spiderX"),
+                "/",
+            ),
+        )
     elif security == "tls":
-        tls_settings = stream_settings.get("tlsSettings") or {}
+        tls_settings = _nested_mapping(stream_settings.get("tlsSettings"))
         append_param(params, "sni", tls_settings.get("serverName"))
         alpn = tls_settings.get("alpn")
         if isinstance(alpn, list) and alpn:
@@ -298,17 +431,17 @@ def build_vless_query_params(stream_settings, client_data=None):
         append_param(params, "fp", tls_settings.get("fingerprint"))
 
     if network == "ws":
-        ws_settings = stream_settings.get("wsSettings") or {}
+        ws_settings = _nested_mapping(stream_settings.get("wsSettings"))
         headers = ws_settings.get("headers") or {}
         append_param(params, "path", ws_settings.get("path") or "/")
-        append_param(params, "host", headers.get("Host") or ws_settings.get("host"))
+        append_param(params, "host", headers.get("Host") or headers.get("host") or ws_settings.get("host"))
     elif network == "grpc":
-        grpc_settings = stream_settings.get("grpcSettings") or {}
+        grpc_settings = _nested_mapping(stream_settings.get("grpcSettings"))
         append_param(params, "serviceName", grpc_settings.get("serviceName"))
         append_param(params, "authority", grpc_settings.get("authority"))
         append_param(params, "mode", "multi" if grpc_settings.get("multiMode") else "gun")
     elif network == "tcp":
-        tcp_settings = stream_settings.get("tcpSettings") or {}
+        tcp_settings = _nested_mapping(stream_settings.get("tcpSettings"))
         header = tcp_settings.get("header") or {}
         header_type = header.get("type")
         if header_type and header_type != "none":
@@ -316,7 +449,7 @@ def build_vless_query_params(stream_settings, client_data=None):
             request_settings = header.get("request") or {}
             append_param(params, "path", first_value(request_settings.get("path")))
             headers = request_settings.get("headers") or {}
-            append_param(params, "host", first_value(headers.get("Host")))
+            append_param(params, "host", first_present_value(headers.get("Host"), headers.get("host")))
 
     return urlencode(params, doseq=False)
 
@@ -336,8 +469,8 @@ def build_trojan_query_params(stream_settings, client_data=None):
 def build_vmess_payload(*, address, port, stream_settings, client_data, remark):
     stream_settings = stream_settings or {}
     client_data = client_data or {}
-    network = stream_settings.get("network") or "tcp"
-    security = stream_settings.get("security") or "none"
+    network = str(stream_settings.get("network") or "tcp").strip().lower()
+    security = str(stream_settings.get("security") or "none").strip().lower()
     payload = {
         "v": "2",
         "ps": remark or client_data.get("email") or "",
@@ -1689,6 +1822,20 @@ class XUIService:
 
     def build_direct_link(self, *, inbound, inbound_data, client_uuid, client_data, email, hosts=None):
         resolve_inbound_panel(inbound, self.panel, require_active=False)
+        client_data = dict(client_data or {})
+        for target_key, inbound_attr in (
+            ("pbk", "pbk"),
+            ("fingerprint", "fingerprint"),
+            ("sni", "sni"),
+            ("sid", "sid"),
+        ):
+            if not client_data.get(target_key):
+                fallback_value = getattr(inbound, inbound_attr, "") or ""
+                if fallback_value:
+                    client_data[target_key] = fallback_value
+        native_link = native_config_link_from_sources(client_data, inbound_data)
+        if native_link:
+            return native_link
         protocol = (inbound_data.get("protocol") or inbound.protocol or "vless").lower()
         share_strategy = str(inbound_data.get("shareAddrStrategy") or "").strip()
         share_address = str(inbound_data.get("shareAddr") or "").strip()
@@ -1701,10 +1848,9 @@ class XUIService:
         port = str(inbound_data.get("port") or inbound.port).strip()
         remark = email or client_data.get("remark") or client_data.get("email") or ""
 
-        try:
-            stream_settings = json.loads(inbound_data.get("streamSettings") or "{}")
-        except (TypeError, ValueError):
-            stream_settings = {}
+        stream_settings = parse_xui_json_object(inbound_data.get("streamSettings") or {})
+        if inbound_data.get("realitySettings") and not stream_settings.get("realitySettings"):
+            stream_settings["realitySettings"] = inbound_data.get("realitySettings")
 
         host = next(
             (
@@ -2127,15 +2273,18 @@ class XUIService:
             "tgId": 0,
             "subId": sub_id,
         }
-        self._post_client_create(inbound, client_data)
+        create_response = self._post_client_create(inbound, client_data)
+        create_obj = _response_obj_mapping(create_response)
+        create_client = create_obj.get("client") if isinstance(create_obj.get("client"), dict) else {}
 
         inbound_data = self.get_inbound(inbound, use_cache=False)
+        remote_client = {**client_data, **create_obj, **create_client}
         hosts = self.get_hosts_for_inbound(inbound.inbound_id)
         direct_link = self.build_direct_link(
             inbound=inbound,
             inbound_data=inbound_data,
             client_uuid=client_uuid,
-            client_data=client_data,
+            client_data=remote_client,
             email=email,
             hosts=hosts,
         )
@@ -2156,7 +2305,7 @@ class XUIService:
                 "node_id": getattr(inbound, "xui_node_id", "") or "",
                 "inbound_remote_key": inbound_remote_key(inbound, panel=self.panel),
             },
-            "raw": client_data,
+            "raw": remote_client,
         }
 
     def create_enabled_client(
@@ -2191,7 +2340,9 @@ class XUIService:
             "tgId": 0,
             "subId": sub_id,
         }
-        self._post_client_create(inbound, client_data)
+        create_response = self._post_client_create(inbound, client_data)
+        create_obj = _response_obj_mapping(create_response)
+        create_client = create_obj.get("client") if isinstance(create_obj.get("client"), dict) else {}
 
         inbound_data = self.get_inbound(inbound, use_cache=False)
         target_client, target_stats, _matched, _clients, _stats = find_xui_client_and_stats(inbound_data, client_uuid)
@@ -2202,7 +2353,7 @@ class XUIService:
         enabled_value = first_xui_value((target_client or {}).get("enable"), (target_stats or {}).get("enable"))
         if enabled_value is not None and not xui_bool(enabled_value):
             raise XUIError("Client was created but is not enabled on panel.")
-        remote_client = {**client_data, **(target_client or {})}
+        remote_client = {**client_data, **create_obj, **create_client, **(target_client or {})}
         hosts = self.get_hosts_for_inbound(inbound.inbound_id)
         direct_link = self.build_direct_link(
             inbound=inbound,
@@ -2276,7 +2427,9 @@ class XUIService:
             "subId": sub_id,
         }
         inbound_ids = [int(inbound.inbound_id) for inbound in inbounds]
-        self._post_modern_client_create(inbounds[0], client_data, inbound_ids=inbound_ids)
+        create_response = self._post_modern_client_create(inbounds[0], client_data, inbound_ids=inbound_ids)
+        create_obj = _response_obj_mapping(create_response)
+        create_client = create_obj.get("client") if isinstance(create_obj.get("client"), dict) else {}
 
         per_inbound = []
         sub_link = ""
@@ -2290,7 +2443,7 @@ class XUIService:
             enabled_value = first_xui_value((target_client or {}).get("enable"), (target_stats or {}).get("enable"))
             if enabled_value is not None and not xui_bool(enabled_value):
                 raise XUIError("Client was created but is not enabled on every bundle inbound.")
-            remote_client = {**client_data, **(target_client or {})}
+            remote_client = {**client_data, **create_obj, **create_client, **(target_client or {})}
             hosts = self.get_hosts_for_inbound(inbound.inbound_id)
             direct_link = self.build_direct_link(
                 inbound=inbound,

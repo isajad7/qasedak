@@ -1,70 +1,232 @@
-{% extends "admin/base_site.html" %}
-{% load i18n %}
+{% extends "admin/store/config_inventory/_base_inventory.html" %}
 
-{% block content %}
-<div id="content-main">
-  <p>
-    <a class="button" href="{{ dashboard_url }}">{% trans "انبار کانفیگ‌ها" %}</a>
-    <a class="button" href="{{ asset_list_url }}">{% trans "کانفیگ‌های آماده" %}</a>
-  </p>
-
-  <form method="post" novalidate style="display:grid;gap:14px;max-width:980px;">
-    {% csrf_token %}
-
-    <div class="module" style="padding:16px;">
-      <h2 style="margin-top:0;">{% trans "۱. انتخاب مخزن" %}</h2>
-      <div class="form-row">
-        {{ form.pool.errors }}
-        {{ form.pool.label_tag }}
-        {{ form.pool }}
+{% block inventory_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+  <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+    <div class="tw-min-w-0">
+      <div class="tw-mb-3 inventory-badge-row">
+        <span class="tw-status-badge tw-tone-emerald">
+          <i class="fas fa-file-import" aria-hidden="true"></i>
+          وارد کردن کانفیگ
+        </span>
       </div>
-      <div class="form-row">
-        {{ form.source_batch.errors }}
-        {{ form.source_batch.label_tag }}
-        {{ form.source_batch }}
+      <h1 class="tw-m-0 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">وارد کردن کانفیگ</h1>
+      <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+        لینک‌ها را داخل یک مخزن کانفیگ ذخیره کنید تا بعداً برای ساخت Cup یا فروش پلن قابل برداشت باشند.
+      </p>
+    </div>
+    <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row lg:tw-shrink-0">
+      <a class="tw-button tw-button-secondary" href="{{ dashboard_url }}">داشبورد انبار</a>
+      <a class="tw-button tw-button-secondary" href="{{ asset_list_url }}">کانفیگ‌های آماده</a>
+    </div>
+  </div>
+</section>
+
+<section class="tw-section">
+  {% if not has_pools %}
+    <div class="tw-admin-card tw-space-y-3">
+      <div class="inventory-step-title">
+        <span class="inventory-step-number">۱</span>
+        <h2>انتخاب مخزن</h2>
+      </div>
+      <div class="tw-empty-state tw-catalog-empty">
+        <span>هنوز مخزنی ندارید. اول یک مخزن بسازید.</span>
+        <a href="{{ add_pool_url }}" class="tw-button tw-button-primary">ساخت مخزن جدید</a>
       </div>
     </div>
+  {% else %}
+    <form method="post" class="tw-space-y-3" novalidate>
+      {% csrf_token %}
+      {{ form.non_field_errors }}
 
-    <div class="module" style="padding:16px;">
-      <h2 style="margin-top:0;">{% trans "۲. وارد کردن لینک‌ها" %}</h2>
-      <p>{% trans "هر خط یک لینک کانفیگ باشد. لینک‌های تکراری مجازند و به عنوان دارایی جداگانه وارد می‌شوند." %}</p>
-      <div class="form-row">
-        {{ form.raw_text.errors }}
-        {{ form.raw_text.label_tag }}
-        {{ form.raw_text }}
-      </div>
-    </div>
+      <section class="tw-admin-card tw-space-y-3">
+        <div class="inventory-step-title">
+          <span class="inventory-step-number">۱</span>
+          <h2>انتخاب مخزن</h2>
+        </div>
+        <p class="tw-mt-2 tw-mb-0 tw-text-sm tw-leading-7 tw-text-slate-600">
+          لینک‌هایی که وارد می‌کنید داخل این مخزن ذخیره می‌شوند و بعداً می‌توانند برای ساخت Cup یا فروش پلن استفاده شوند.
+        </p>
+        <div class="inventory-form-grid">
+          <div class="inventory-form-field">
+            {{ form.pool.errors }}
+            {{ form.pool.label_tag }}
+            {{ form.pool }}
+            {% if form.pool.help_text %}<span class="inventory-help">{{ form.pool.help_text }}</span>{% endif %}
+          </div>
+          <div class="inventory-form-field">
+            {{ form.source_batch.errors }}
+            {{ form.source_batch.label_tag }}
+            {{ form.source_batch }}
+            {% if form.source_batch.help_text %}<span class="inventory-help">{{ form.source_batch.help_text }}</span>{% endif %}
+          </div>
+        </div>
+        <div class="tw-table-wrap">
+          <table class="tw-catalog-table">
+            <thead>
+              <tr>
+                <th>مخزن</th>
+                <th>نوع تخصیص</th>
+                <th>ظرفیت پیش‌فرض</th>
+                <th>رفتار بعد از import</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in pool_capacity_rows %}
+                <tr data-import-pool-capacity="{{ row.pool_id }}">
+                  <td>{{ row.pool_title }}</td>
+                  <td>{{ row.allocation_mode_label }}</td>
+                  <td>{{ row.max_allocations }}</td>
+                  <td>{{ row.behavior }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
 
-    <div class="submit-row" style="margin:0;">
-      <input type="submit" class="default" value="{% trans 'وارد کردن لینک‌ها' %}">
-    </div>
-  </form>
+      <section class="tw-admin-card tw-space-y-3">
+        <div class="inventory-step-title">
+          <span class="inventory-step-number">۲</span>
+          <h2>روش وارد کردن</h2>
+        </div>
+        <div class="inventory-form-field inventory-form-wide">
+          {{ form.import_mode.errors }}
+          {{ form.import_mode }}
+        </div>
+      </section>
 
-  {% if import_summary %}
-    <h2>{% trans "۳. خلاصه وارد کردن و قدم بعدی" %}</h2>
-    <table>
-      <tbody>
-        <tr><th>{% trans "Pool" %}</th><td>{{ result.pool }}</td></tr>
-        <tr><th>{% trans "total lines" %}</th><td>{{ import_summary.total_lines }}</td></tr>
-        <tr><th>{% trans "created" %}</th><td>{{ import_summary.created }}</td></tr>
-        <tr><th>{% trans "skipped" %}</th><td>{{ import_summary.skipped }}</td></tr>
-        <tr><th>{% trans "duplicates detected" %}</th><td>{{ import_summary.duplicates }}</td></tr>
-        <tr><th>{% trans "invalid" %}</th><td>{{ import_summary.invalid }}</td></tr>
-        <tr><th>{% trans "available stock count" %}</th><td>{{ import_summary.available_stock }}</td></tr>
-      </tbody>
-    </table>
-    <p>
-      <a class="button default" href="{{ quick_build_url }}?inventory_pool={{ import_summary.pool_id }}">{% trans "ساخت Cup سریع با این استخر" %}</a>
-      <a class="button" href="{{ asset_list_url }}?pool__id__exact={{ import_summary.pool_id }}">{% trans "مشاهده کانفیگ‌های این استخر" %}</a>
-    </p>
-    {% if result.warnings %}
-      <h3>{% trans "Warnings" %}</h3>
-      <ul>
-        {% for warning in result.warnings %}
-          <li>{{ warning }}</li>
-        {% endfor %}
-      </ul>
-    {% endif %}
+      <section class="tw-admin-card tw-space-y-3" data-import-section="direct_links">
+        <div class="inventory-step-title">
+          <span class="inventory-step-number">۳</span>
+          <h2>وارد کردن لینک‌های کانفیگ</h2>
+        </div>
+        <div class="inventory-form-field inventory-form-wide">
+          {{ form.raw_text.errors }}
+          {{ form.raw_text.label_tag }}
+          {{ form.raw_text }}
+          {% if form.raw_text.help_text %}<span class="inventory-help">{{ form.raw_text.help_text }}</span>{% endif %}
+        </div>
+      </section>
+
+      <section class="tw-admin-card tw-space-y-3" data-import-section="subscription_url">
+        <div class="inventory-step-title">
+          <span class="inventory-step-number">۳</span>
+          <h2>وارد کردن از لینک Subscription</h2>
+        </div>
+        <div class="inventory-form-grid">
+          <div class="inventory-form-field inventory-form-wide">
+            {{ form.subscription_url.errors }}
+            {{ form.subscription_url.label_tag }}
+            {{ form.subscription_url }}
+            {% if form.subscription_url.help_text %}<span class="inventory-help">{{ form.subscription_url.help_text }}</span>{% endif %}
+          </div>
+          <div class="inventory-form-field">
+            {{ form.fetch_timeout.errors }}
+            {{ form.fetch_timeout.label_tag }}
+            {{ form.fetch_timeout }}
+            {% if form.fetch_timeout.help_text %}<span class="inventory-help">{{ form.fetch_timeout.help_text }}</span>{% endif %}
+          </div>
+        </div>
+      </section>
+
+      <section class="tw-admin-card tw-space-y-3">
+        <div class="inventory-step-title">
+          <span class="inventory-step-number">۴</span>
+          <h2>بررسی و ذخیره</h2>
+        </div>
+        <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row">
+          <button type="submit" class="tw-button tw-button-primary">وارد کردن لینک‌ها</button>
+          <a class="tw-button tw-button-secondary" href="{{ dashboard_url }}">انصراف</a>
+        </div>
+      </section>
+    </form>
   {% endif %}
-</div>
+</section>
+
+{% if import_summary %}
+  <section class="tw-section">
+    <div class="tw-admin-card tw-space-y-3">
+      <div class="tw-section-heading">
+        <h2>خلاصه وارد کردن</h2>
+        <span class="tw-status-badge tw-tone-slate">{{ import_summary.pool_title }}</span>
+      </div>
+      <div class="inventory-summary-grid">
+        {% if import_summary.is_subscription_url %}
+          <div class="tw-metric-card tw-tone-blue">
+            <span class="tw-metric-value">{{ import_summary.fetched_label }}</span>
+            <strong class="tw-metric-label">دریافت شد</strong>
+          </div>
+          <div class="tw-metric-card tw-tone-cyan">
+            <span class="tw-metric-value">{{ import_summary.total_configs_found }}</span>
+            <strong class="tw-metric-label">کانفیگ پیدا شده</strong>
+          </div>
+        {% endif %}
+        <div class="tw-metric-card tw-tone-blue">
+          <span class="tw-metric-value">{{ import_summary.total_lines }}</span>
+          <strong class="tw-metric-label">تعداد خطوط</strong>
+        </div>
+        <div class="tw-metric-card tw-tone-emerald">
+          <span class="tw-metric-value">{{ import_summary.created }}</span>
+          <strong class="tw-metric-label">ایجاد شده</strong>
+        </div>
+        <div class="tw-metric-card tw-tone-amber">
+          <span class="tw-metric-value">{{ import_summary.duplicates }}</span>
+          <strong class="tw-metric-label">تکراری تشخیص داده شده</strong>
+        </div>
+        <div class="tw-metric-card tw-tone-rose">
+          <span class="tw-metric-value">{{ import_summary.invalid }}</span>
+          <strong class="tw-metric-label">نامعتبر/رد شده</strong>
+        </div>
+        <div class="tw-metric-card tw-tone-cyan">
+          <span class="tw-metric-value">{{ import_summary.available_stock }}</span>
+          <strong class="tw-metric-label">موجودی فعلی مخزن</strong>
+        </div>
+      </div>
+      {% if import_summary.source_url_masked %}
+        <div class="tw-model-list">
+          <div class="tw-model-row"><span>Subscription</span><strong dir="ltr">{{ import_summary.source_url_masked }}</strong></div>
+          <div class="tw-model-row"><span>نوع پاسخ</span><strong>{{ import_summary.response_type }}</strong></div>
+          <div class="tw-model-row"><span>Base64</span><strong>{% if import_summary.decoded_as_base64 %}بله{% else %}خیر{% endif %}</strong></div>
+        </div>
+      {% endif %}
+      {% if import_summary.errors %}
+        <div class="tw-space-y-3">
+          {% for error in import_summary.errors %}
+            <div class="cup-warning">{{ error }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% if import_summary.warnings %}
+        <div class="tw-space-y-3">
+          {% for warning in import_summary.warnings %}
+            <div class="cup-warning">{{ warning }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+      <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row">
+        <a class="tw-button tw-button-primary" href="{{ quick_build_url }}?inventory_pool={{ import_summary.pool_id }}">ساخت سریع Cup با این مخزن</a>
+        <a class="tw-button tw-button-secondary" href="{{ recipe_add_url }}">اتصال مخزن به Recipe پلن</a>
+        <a class="tw-button tw-button-secondary" href="{{ asset_list_url }}?pool__id__exact={{ import_summary.pool_id }}">مشاهده کانفیگ‌های این مخزن</a>
+        <a class="tw-button tw-button-secondary" href="{% url 'admin_store_config_inventory_import' %}?pool={{ import_summary.pool_id }}">وارد کردن لینک‌های بیشتر</a>
+      </div>
+    </div>
+  </section>
+{% endif %}
+<script>
+function updateImportModeSections() {
+  const selected = document.querySelector('input[name="import_mode"]:checked');
+  const mode = selected ? selected.value : "direct_links";
+  document.querySelectorAll("[data-import-section]").forEach(function (section) {
+    section.hidden = section.getAttribute("data-import-section") !== mode;
+  });
+}
+
+document.addEventListener("change", function (event) {
+  if (!event.target.matches('input[name="import_mode"]')) return;
+  updateImportModeSections();
+});
+
+updateImportModeSections();
+</script>
 {% endblock %}

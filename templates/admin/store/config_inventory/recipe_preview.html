@@ -1,73 +1,88 @@
-{% extends "admin/base_site.html" %}
-{% load i18n %}
+{% extends "admin/store/config_inventory/_base_inventory.html" %}
 
-{% block content %}
-<div id="content-main">
-  <p>
-    <a class="button" href="{% url 'admin:store_cupfulfillmentrecipe_changelist' %}">{% trans "دستورهای پر کردن Cup" %}</a>
-  </p>
-  <h1>{% trans "پیش‌نمایش دستور تحویل" %}</h1>
-  <p>
-    <strong>{% trans "Plan" %}:</strong> {{ preview.plan }}<br>
-    <strong>{% trans "Failure policy" %}:</strong> {{ preview.failure_policy }}
-  </p>
+{% block inventory_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+  <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+    <div class="tw-min-w-0">
+      <span class="tw-status-badge tw-tone-cyan">
+        <i class="fas fa-eye" aria-hidden="true"></i>
+        پیش‌نمایش Recipe
+      </span>
+      <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">پیش‌نمایش دستور تحویل</h1>
+      <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+        اگر این پلن الان فروخته شود، این قوانین برای ساخت و پر کردن Cup اجرا می‌شوند.
+      </p>
+    </div>
+    <a class="tw-button tw-button-secondary" href="{% url 'admin:store_cupfulfillmentrecipe_changelist' %}">دستورهای پر کردن Cup</a>
+  </div>
+</section>
 
-  {% if preview.warnings %}
-    <h2>{% trans "Warnings" %}</h2>
-    <ul>
+<section class="tw-section">
+  <div class="tw-admin-card">
+    <div class="tw-section-heading tw-mb-4"><h2>پلن و رفتار تحویل</h2></div>
+    <div class="tw-model-list">
+      <div class="tw-model-row"><span>پلن متصل</span><strong>{{ preview.plan }}</strong></div>
+      <div class="tw-model-row"><span>رفتار در خطا</span><strong>{{ preview.failure_policy_label }}</strong></div>
+    </div>
+  </div>
+</section>
+
+{% if preview.warnings %}
+  <section class="tw-section">
+    <div class="tw-admin-card tw-space-y-3">
+      <div class="tw-section-heading"><h2>هشدارها</h2></div>
       {% for warning in preview.warnings %}
-        <li>{{ warning }}</li>
+        <div class="cup-warning">{{ warning }}</div>
       {% endfor %}
-    </ul>
-  {% endif %}
+    </div>
+  </section>
+{% endif %}
 
-  <h2>{% trans "اگر این پلن الان فروخته شود" %}</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>{% trans "Position" %}</th>
-        <th>{% trans "Source" %}</th>
-        <th>{% trans "Quantity" %}</th>
-        <th>{% trans "Required" %}</th>
-        <th>{% trans "Panel / Inbounds" %}</th>
-        <th>{% trans "Inventory stock" %}</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for rule in preview.rules %}
+<section class="tw-section">
+  <div class="tw-table-wrap tw-admin-card">
+    <div class="tw-section-heading tw-mb-4"><h2>اگر این پلن الان فروخته شود</h2></div>
+    <table class="tw-catalog-table">
+      <thead>
         <tr>
-          <td>{{ rule.position }}</td>
-          <td>{{ rule.source_type }}</td>
-          <td>{{ rule.quantity }}</td>
-          <td>{{ rule.required|yesno:"yes,no" }}</td>
-          <td>
-            {% if rule.panel %}<strong>{{ rule.panel }}</strong><br>{% endif %}
-            {% for inbound in rule.inbounds %}
-              {{ inbound }}{% if not forloop.last %}<br>{% endif %}
-            {% empty %}
-              -
-            {% endfor %}
-          </td>
-          <td>
-            {% if rule.stock_summary %}
-              <strong>{{ rule.pool }}</strong><br>
-              {% trans "Mode" %}: {{ rule.stock_summary.allocation_mode }}<br>
-              {% trans "Assets" %}: {{ rule.stock_summary.asset_count }}<br>
-              {% trans "Available capacity" %}:
-              {% if rule.stock_summary.available_capacity == None %}
-                {% trans "Unlimited" %}
-              {% else %}
-                {{ rule.stock_summary.available_capacity }}
-              {% endif %}
-            {% else %}
-              -
-            {% endif %}
-          </td>
+          <th>ترتیب</th>
+          <th>منبع</th>
+          <th>تعداد</th>
+          <th>الزامی</th>
+          <th>پنل / اینباندها</th>
+          <th>موجودی مخزن کانفیگ</th>
         </tr>
-      {% empty %}
-        <tr><td colspan="6">{% trans "No active rules are configured." %}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
+      </thead>
+      <tbody>
+        {% for rule in preview.rules %}
+          <tr>
+            <td>{{ rule.position }}</td>
+            <td>{{ rule.source_type_label }}</td>
+            <td>{{ rule.quantity }}</td>
+            <td>{% if rule.required %}بله{% else %}خیر{% endif %}</td>
+            <td>
+              {% if rule.panel %}<strong>{{ rule.panel }}</strong><br>{% endif %}
+              {% for inbound in rule.inbounds %}
+                {{ inbound }}{% if not forloop.last %}<br>{% endif %}
+              {% empty %}
+                -
+              {% endfor %}
+            </td>
+            <td>
+              {% if rule.stock_summary %}
+                <strong>{{ rule.pool }}</strong><br>
+                نوع تخصیص: {{ rule.stock_summary.allocation_mode_label }}<br>
+                کل کانفیگ‌ها: {{ rule.stock_summary.asset_count }}<br>
+                ظرفیت قابل فروش: {{ rule.stock_summary.available_capacity_label }}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="6"><div class="tw-empty-state">برای این پلن هنوز دستور پر کردن Cup تعریف نشده است.</div></td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
 {% endblock %}

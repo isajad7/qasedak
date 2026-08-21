@@ -1,57 +1,118 @@
-{% extends "admin/base_site.html" %}
-{% load i18n %}
+{% extends "admin/store/config_inventory/_base_inventory.html" %}
 
-{% block content %}
-<div id="content-main">
-  <p>{% trans "از این صفحه مخزن کانفیگ بسازید، لینک‌های آماده را وارد کنید و Recipeهای پر کردن Subscription Cup را مدیریت کنید." %}</p>
+{% block inventory_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+  <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+    <div class="tw-min-w-0">
+      <div class="tw-mb-3 inventory-badge-row">
+        <span class="tw-status-badge tw-tone-blue">
+          <i class="fas fa-warehouse" aria-hidden="true"></i>
+          انبار کانفیگ
+        </span>
+        <span class="tw-status-badge tw-tone-slate">{{ active_pool_count }} مخزن فعال</span>
+      </div>
+      <h1 class="tw-m-0 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">انبار کانفیگ‌ها</h1>
+      <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">{{ subtitle }}</p>
+    </div>
+    <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row lg:tw-shrink-0">
+      <a href="{{ add_pool_url }}" class="tw-button tw-button-primary">
+        <i class="fas fa-plus" aria-hidden="true"></i>
+        ساخت مخزن جدید
+      </a>
+      <a href="{% url 'admin_store_config_inventory_import' %}" class="tw-button tw-button-secondary">
+        <i class="fas fa-file-import" aria-hidden="true"></i>
+        وارد کردن کانفیگ
+      </a>
+    </div>
+  </div>
+</section>
 
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:18px 0;">
+<section class="tw-section">
+  <div class="inventory-action-grid">
     {% for card in action_cards %}
-      <div class="module" style="padding:16px;">
-        <h2 style="margin-top:0;">{{ card.title }}</h2>
-        <p>{{ card.description }}</p>
-        <a class="button" href="{{ card.url }}">{{ card.title }}</a>
+      <a href="{{ card.url }}" class="tw-workspace-card tw-tone-{{ card.tone|default:'slate' }}">
+        <div class="tw-card-topline">
+          <span class="tw-card-icon"><i class="{{ card.icon }}" aria-hidden="true"></i></span>
+        </div>
+        <strong class="tw-workspace-title">{{ card.title }}</strong>
+        <span class="tw-workspace-description">{{ card.description }}</span>
+      </a>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="tw-section">
+  <div class="inventory-summary-grid">
+    {% for card in summary_cards %}
+      <div class="tw-metric-card tw-tone-{{ card.tone|default:'slate' }}">
+        <div class="tw-card-topline">
+          <span class="tw-card-icon"><i class="{{ card.icon }}" aria-hidden="true"></i></span>
+        </div>
+        <span class="tw-metric-value">{{ card.value }}</span>
+        <strong class="tw-metric-label">{{ card.label }}</strong>
+        <span class="tw-metric-description">{{ card.description }}</span>
       </div>
     {% endfor %}
   </div>
+</section>
 
-  <h2>{% trans "خلاصه" %}</h2>
-  <table>
-    <tbody>
-      <tr><th>{% trans "مخزن‌ها" %}</th><td>{{ pool_count }}</td></tr>
-      <tr><th>{% trans "کانفیگ‌های آماده" %}</th><td>{{ asset_count }}</td></tr>
-      <tr><th>{% trans "تخصیص‌ها" %}</th><td>{{ allocation_count }}</td></tr>
-      <tr><th>{% trans "Recipeها" %}</th><td>{{ recipe_count }}</td></tr>
-      <tr><th>{% trans "قوانین" %}</th><td>{{ rule_count }}</td></tr>
-    </tbody>
-  </table>
-
-  <h2>{% trans "موجودی مخزن‌ها" %}</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>{% trans "مخزن" %}</th>
-        <th>{% trans "حالت تخصیص" %}</th>
-        <th>{% trans "دارایی‌ها" %}</th>
-        <th>{% trans "تخصیص فعال" %}</th>
-        <th>{% trans "موجودی قابل استفاده" %}</th>
-        <th>{% trans "عملیات" %}</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in pool_rows %}
-        <tr>
-          <td>{{ row.pool.title }}</td>
-          <td>{{ row.pool.allocation_mode }}</td>
-          <td>{{ row.asset_count }}</td>
-          <td>{{ row.active_allocation_count }}</td>
-          <td>{{ row.available_stock }}</td>
-          <td><a class="button" href="{{ row.import_url }}">{% trans "وارد کردن لینک کانفیگ" %}</a></td>
-        </tr>
-      {% empty %}
-        <tr><td colspan="6">{% trans "هنوز مخزنی ساخته نشده است." %}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
+<section class="tw-section">
+  <div class="tw-admin-card">
+    <div class="tw-section-heading tw-mb-4">
+      <h2>موجودی مخزن‌های کانفیگ</h2>
+      <a href="{{ pool_list_url }}" class="tw-mini-button">مدیریت مخزن‌ها</a>
+    </div>
+    {% if pool_rows %}
+      <div class="tw-table-wrap">
+        <table class="tw-catalog-table">
+          <thead>
+            <tr>
+              <th>نام مخزن</th>
+              <th>نوع تخصیص</th>
+              <th>کل کانفیگ‌ها</th>
+              <th>آماده</th>
+              <th>تخصیص‌داده‌شده</th>
+              <th>غیرفعال/سوخته</th>
+              <th>موجودی قابل فروش</th>
+              <th>عملیات</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in pool_rows %}
+              <tr>
+                <td>
+                  <strong>{{ row.pool.title }}</strong>
+                  {% if row.asset_count == 0 %}
+                    <small>این مخزن هنوز کانفیگی ندارد. از دکمه وارد کردن کانفیگ استفاده کنید.</small>
+                  {% endif %}
+                </td>
+                <td>{{ row.allocation_mode_label }}</td>
+                <td>{{ row.asset_count }}</td>
+                <td>{{ row.available_count }}</td>
+                <td>
+                  {{ row.assigned_count }}
+                  {% if row.active_allocation_count %}<small>{{ row.active_allocation_count }} تخصیص فعال</small>{% endif %}
+                </td>
+                <td>{{ row.inactive_count }}</td>
+                <td>{{ row.available_stock }}</td>
+                <td>
+                  <div class="tw-row-actions">
+                    <a class="tw-mini-button tw-mini-button-success" href="{{ row.import_url }}">وارد کردن کانفیگ</a>
+                    <a class="tw-mini-button" href="{{ row.quick_build_url }}">ساخت Cup سریع</a>
+                    <a class="tw-mini-button" href="{{ row.assets_url }}">مشاهده کانفیگ‌ها</a>
+                  </div>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="tw-empty-state tw-catalog-empty">
+        <span>هنوز مخزن کانفیگ ندارید.</span>
+        <a href="{{ add_pool_url }}" class="tw-button tw-button-primary">ساخت مخزن جدید</a>
+      </div>
+    {% endif %}
+  </div>
+</section>
 {% endblock %}

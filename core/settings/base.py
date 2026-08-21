@@ -250,6 +250,7 @@ TELEGRAM_PROXY_HOST = os.environ.get("TELEGRAM_PROXY_HOST", "").strip()
 TELEGRAM_PROXY_PORT = os.environ.get("TELEGRAM_PROXY_PORT", "").strip()
 TELEGRAM_PROXY_USERNAME = os.environ.get("TELEGRAM_PROXY_USERNAME", "").strip()
 TELEGRAM_PROXY_PASSWORD = os.environ.get("TELEGRAM_PROXY_PASSWORD", "").strip()
+TELEGRAM_API_IP = os.environ.get("TELEGRAM_API_IP", "").strip()
 TELEGRAM_WEBHOOK_RESPONSE_ENABLED = env_bool("TELEGRAM_WEBHOOK_RESPONSE_ENABLED", False)
 BOT_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("BOT_API_CONNECT_TIMEOUT_SECONDS", "3"))
 BOT_API_READ_TIMEOUT_SECONDS = float(os.environ.get("BOT_API_READ_TIMEOUT_SECONDS", "8"))
@@ -297,13 +298,20 @@ JAZZMIN_SETTINGS = {
             {"name": _("Quick Subscription Builder"), "url": "admin_store_cup_center_quick_build", "icon": "fas fa-wand-magic-sparkles", "permissions": ["store.add_subscriptioncup"]},
             {"model": "payments.IncomingPaymentSMS"},
         ],
+        "تحویل ساب": [
+            {"name": _("داشبورد تحویل پلن‌ها"), "url": "admin_store_plan_fulfillment", "icon": "fas fa-chart-line", "permissions": ["store.view_plan"]},
+            {"name": _("اتصال پلن به Cup"), "url": "admin_store_plan_fulfillment_plans", "icon": "fas fa-plug", "permissions": ["store.view_plan"]},
+            {"name": _("دستورهای تحویل"), "url": "admin:store_cupfulfillmentrecipe_changelist", "icon": "fas fa-mug-hot", "permissions": ["store.view_cupfulfillmentrecipe"]},
+            {"name": _("قوانین پرکننده"), "url": "admin:store_cupfillerrule_changelist", "icon": "fas fa-list-ol", "permissions": ["store.view_cupfillerrule"]},
+            {"name": _("تست شبیه‌سازی تحویل"), "url": "admin_store_plan_fulfillment", "icon": "fas fa-vial", "permissions": ["store.view_cupfulfillmentrecipe"]},
+        ],
         "انبار کانفیگ‌ها": [
-            {"name": _("انبار کانفیگ‌ها"), "url": "admin_store_config_inventory", "icon": "fas fa-warehouse", "permissions": ["store.view_configinventorypool"]},
+            {"name": _("داشبورد انبار"), "url": "admin_store_config_inventory", "icon": "fas fa-chart-line", "permissions": ["store.view_configinventorypool"]},
             {"name": _("مخزن‌های کانفیگ"), "url": "admin:store_configinventorypool_changelist", "icon": "fas fa-boxes-stacked", "permissions": ["store.view_configinventorypool"]},
-            {"name": _("وارد کردن لینک کانفیگ"), "url": "admin_store_config_inventory_import", "icon": "fas fa-file-import", "permissions": ["store.add_configinventoryasset"]},
+            {"name": _("وارد کردن کانفیگ"), "url": "admin_store_config_inventory_import", "icon": "fas fa-file-import", "permissions": ["store.add_configinventoryasset"]},
             {"name": _("کانفیگ‌های آماده"), "url": "admin:store_configinventoryasset_changelist", "icon": "fas fa-list-check", "permissions": ["store.view_configinventoryasset"]},
             {"name": _("تخصیص‌های کانفیگ"), "url": "admin:store_configallocation_changelist", "icon": "fas fa-share-nodes", "permissions": ["store.view_configallocation"]},
-            {"name": _("دستور پر کردن Cup"), "url": "admin:store_cupfulfillmentrecipe_changelist", "icon": "fas fa-mug-hot", "permissions": ["store.view_cupfulfillmentrecipe"]},
+            {"name": _("دستورهای پر کردن Cup"), "url": "admin:store_cupfulfillmentrecipe_changelist", "icon": "fas fa-mug-hot", "permissions": ["store.view_cupfulfillmentrecipe"]},
             {"name": _("قوانین پرکننده Cup"), "url": "admin:store_cupfillerrule_changelist", "icon": "fas fa-list-ol", "permissions": ["store.view_cupfillerrule"]},
         ],
         "Customers": [
@@ -342,6 +350,7 @@ JAZZMIN_SETTINGS = {
     "order_with_respect_to": [
         "Dashboard",
         "Sales",
+        "تحویل ساب",
         "انبار کانفیگ‌ها",
         "Customers",
         "Infrastructure",
@@ -361,6 +370,8 @@ JAZZMIN_SETTINGS = {
         "admin_store_panel_center_routing",
         "admin_store_cup_center",
         "admin_store_cup_center_quick_build",
+        "admin_store_plan_fulfillment",
+        "admin_store_plan_fulfillment_plans",
         "admin_store_config_inventory",
         "admin_store_config_inventory_import",
         "store.ConfigInventoryPool",

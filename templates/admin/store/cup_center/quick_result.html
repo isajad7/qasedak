@@ -6,28 +6,30 @@
 <section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
     <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
         <div>
-            {% if result.status == "partial_success" %}
-                {% include "admin/store/panel_center/_badge.html" with tone="amber" label="Quick Sub Partial" icon="fas fa-triangle-exclamation" %}
+            {% if result.status == "partial_success" or result.status == "partial_with_warnings" %}
+                {% include "admin/store/panel_center/_badge.html" with tone="amber" label="ساخته شد با هشدار" icon="fas fa-triangle-exclamation" %}
             {% elif result.status == "failed" %}
-                {% include "admin/store/panel_center/_badge.html" with tone="rose" label="Quick Sub Failed" icon="fas fa-circle-xmark" %}
+                {% include "admin/store/panel_center/_badge.html" with tone="rose" label="ساخت ناموفق" icon="fas fa-circle-xmark" %}
             {% else %}
-                {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="Quick Sub Ready" icon="fas fa-check" %}
+                {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="آماده تحویل" icon="fas fa-check" %}
             {% endif %}
             <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">{{ result.title }}</h1>
             <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
-                {% if result.status == "partial_success" %}
-                    بخشی از پنل‌ها با موفقیت ساخته شدند و خطاهای باقی‌مانده پایین آمده است.
+                {% if result.summary_message %}
+                    {{ result.summary_message }}
+                {% elif result.status == "partial_success" or result.status == "partial_with_warnings" %}
+                    Cup ساخته شد، اما بخشی از منابع با هشدار یا خطا همراه بود.
                 {% elif result.status == "failed" %}
-                    Cup ساخته شد اما هیچ لینک موفقی ذخیره نشد.
+                    Cup ساخته شد اما لینک موفقی داخل آن ذخیره نشد.
                 {% else %}
                     Cup ساخته شد و لینک اشتراک آماده است.
                 {% endif %}
             </p>
         </div>
         <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row lg:tw-shrink-0">
-            <a href="{{ detail_url }}" class="tw-button tw-button-secondary">Open Cup detail</a>
-            <a href="{{ preview_url }}" class="tw-button tw-button-secondary">Preview raw</a>
-            <a href="{{ quick_build_url }}" class="tw-button tw-button-primary">Create another</a>
+            <a href="{{ detail_url }}" class="tw-button tw-button-secondary">جزئیات Cup</a>
+            <a href="{{ preview_url }}" class="tw-button tw-button-secondary">پیش‌نمایش خروجی خام</a>
+            <a href="{{ quick_build_url }}" class="tw-button tw-button-primary">ساخت دوباره</a>
         </div>
     </div>
 </section>
@@ -36,43 +38,55 @@
     <div class="tw-admin-card">
         <div class="tw-section-heading tw-mb-4"><h2>خلاصه</h2></div>
         <div class="cup-summary-grid">
-            <div class="cup-stat"><span>Status</span><strong>{{ result.status }}</strong></div>
-            <div class="cup-stat"><span>Cup ID</span><strong>#{{ cup.pk }}</strong></div>
-            <div class="cup-stat"><span>Item count</span><strong>{{ result.item_count }}</strong></div>
-            <div class="cup-stat"><span>Config links</span><strong>{{ result.config_link_count }}</strong></div>
-            <div class="cup-stat"><span>Selected panels</span><strong>{{ result.selected_panels_count }}</strong></div>
-            <div class="cup-stat"><span>Selected inbounds</span><strong>{{ result.selected_inbounds_count }}</strong></div>
-            <div class="cup-stat"><span>Selected pools</span><strong>{{ result.selected_inventory_pools_count }}</strong></div>
-            <div class="cup-stat"><span>Remote groups</span><strong>{{ result.created_remote_client_groups_count }}</strong></div>
-            <div class="cup-stat"><span>Inventory allocations</span><strong>{{ result.inventory_allocation_count }}</strong></div>
-            <div class="cup-stat"><span>Protocols</span><strong>{{ result.protocols|join:", "|default:"-" }}</strong></div>
+            <div class="cup-stat"><span>وضعیت</span><strong>{{ result.status_label }}</strong></div>
+            <div class="cup-stat"><span>شناسه Cup</span><strong>#{{ cup.pk }}</strong></div>
+            <div class="cup-stat"><span>تعداد آیتم‌ها</span><strong>{{ result.item_count }}</strong></div>
+            <div class="cup-stat"><span>لینک‌های ذخیره‌شده</span><strong>{{ result.config_link_count }}</strong></div>
+            <div class="cup-stat"><span>منابع انتخاب‌شده</span><strong>{{ result.reconciliation.selected_sources_count|default:0 }}</strong></div>
+            <div class="cup-stat"><span>آیتم‌های واردشده به Cup</span><strong>{{ result.reconciliation.cup_items_created|default:result.item_count }}</strong></div>
+            <div class="cup-stat"><span>خطاها / ردشده‌ها</span><strong>{{ result.reconciliation.failed_rejected_skipped_count|default:0 }}</strong></div>
+            <div class="cup-stat"><span>گروه‌های تلاش‌شده</span><strong>{{ result.reconciliation.attempted_panel_groups|default:0 }}</strong></div>
+            <div class="cup-stat"><span>ساخته‌شده از پنل</span><strong>{{ result.panel_generated_count }}</strong></div>
+            <div class="cup-stat"><span>برداشته‌شده از مخزن</span><strong>{{ result.inventory_allocation_count }}</strong></div>
+            <div class="cup-stat"><span>اینباندهای انتخاب‌شده</span><strong>{{ result.selected_inbounds_count }}</strong></div>
+            <div class="cup-stat"><span>مخزن‌های انتخاب‌شده</span><strong>{{ result.selected_inventory_pools_count }}</strong></div>
+            <div class="cup-stat"><span>گروه‌های پنل</span><strong>{{ result.created_remote_client_groups_count }}</strong></div>
+            <div class="cup-stat"><span>پروتکل‌ها</span><strong>{{ result.protocols|join:", "|default:"-" }}</strong></div>
         </div>
     </div>
 
     <div class="tw-admin-card">
-        <div class="tw-section-heading tw-mb-4"><h2>Subscription URL</h2></div>
-        <div class="tw-model-list tw-mb-3">
-            <div class="tw-model-row"><span>صفحه کاربر</span><strong dir="ltr">{{ subscription.masked_dashboard_url }}</strong></div>
-            <div class="tw-model-row"><span>لینک ورود به برنامه</span><strong dir="ltr">{{ subscription.masked_client_url }}</strong></div>
-            <div class="tw-model-row"><span>خروجی خام</span><strong dir="ltr">{{ subscription.masked_raw_url }}</strong></div>
-        </div>
-        <code class="tw-safe-command">{{ subscription.masked_client_url }}</code>
-        <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row tw-mt-2">
-            <button type="button" class="tw-button tw-button-primary" data-cup-copy="{{ subscription.client_url }}" data-cup-copy-label="Copy client URL">Copy client URL</button>
-            <button type="button" class="tw-button tw-button-secondary" data-cup-copy="{{ subscription.dashboard_url }}" data-cup-copy-label="Copy dashboard URL">Copy dashboard URL</button>
-            <a href="{{ detail_url }}" class="tw-button tw-button-secondary">جزئیات Cup</a>
-        </div>
+        <div class="tw-section-heading tw-mb-4"><h2>لینک نهایی کاربر</h2></div>
+        {% if result.customer_link_available %}
+            {% if result.customer_link_warning %}
+                <div class="cup-warning tw-mb-3">{{ result.customer_link_warning }}</div>
+            {% endif %}
+            <div class="tw-model-list tw-mb-3">
+                <div class="tw-model-row"><span>لینک مدیریت و ورود به برنامه</span><strong dir="ltr">{{ subscription.masked_client_url }}</strong></div>
+                <div class="tw-model-row"><span>لینک سازگار جایگزین</span><strong dir="ltr">{{ subscription.masked_base64_url }}</strong></div>
+                <div class="tw-model-row"><span>خروجی خام</span><strong dir="ltr">{{ subscription.masked_raw_url }}</strong></div>
+            </div>
+            <code class="tw-safe-command">{{ subscription.masked_client_url }}</code>
+            <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row tw-mt-2">
+                <button type="button" class="tw-button tw-button-primary" data-cup-copy="{{ subscription.client_url }}" data-cup-copy-label="کپی لینک اصلی">کپی لینک اصلی</button>
+                <button type="button" class="tw-button tw-button-secondary" data-cup-copy="{{ subscription.base64_url }}" data-cup-copy-label="کپی لینک سازگار">کپی لینک سازگار</button>
+                <a href="{{ detail_url }}" class="tw-button tw-button-secondary">جزئیات Cup</a>
+            </div>
+        {% else %}
+            <div class="cup-warning">این Cup لینک قابل تحویل ندارد.</div>
+            <a href="{{ detail_url }}" class="tw-button tw-button-secondary tw-mt-3">جزئیات Cup</a>
+        {% endif %}
     </div>
 </section>
 
-{% if result.errors or result.warnings %}
+{% if result.errors or result.warnings or result.structured_errors %}
 <section class="tw-section">
-    <div class="tw-admin-card tw-space-y-2">
-        <div class="tw-section-heading"><h2>هشدارها و خطاها</h2></div>
+    <div class="tw-admin-card tw-space-y-3">
+        <div class="tw-section-heading"><h2>خطاها / هشدارها</h2></div>
         {% if result.structured_errors %}
-            <div class="tw-mb-3 tw-space-y-3">
+            <div class="tw-space-y-3">
                 {% for error in result.structured_errors %}
-                    {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در ساخت کانفیگ" %}
+                    {% include "admin/store/components/structured_error_card.html" with error=error title="جزئیات خطا" %}
                 {% endfor %}
             </div>
         {% endif %}
@@ -86,20 +100,87 @@
 </section>
 {% endif %}
 
-<section class="tw-section">
-    <div class="tw-table-wrap tw-admin-card">
-        <div class="tw-section-heading tw-mb-4"><h2>نتیجه هر Panel</h2></div>
+<section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
+    <details class="tw-admin-card">
+        <summary class="tw-section-heading tw-cursor-pointer"><h2>وضعیت هر اینباند</h2></summary>
+        <div class="tw-table-wrap tw-mt-4">
         <table class="tw-catalog-table">
             <thead>
                 <tr>
-                    <th>Panel</th>
-                    <th>Family</th>
-                    <th>Capability</th>
-                    <th>Health</th>
-                    <th>Selected inbounds</th>
-                    <th>Create success</th>
-                    <th>Link count</th>
-                    <th>Warnings / Errors</th>
+                    <th>پنل</th>
+                    <th>اینباند</th>
+                    <th>شناسه ریموت</th>
+                    <th>تلاش شد</th>
+                    <th>CupItem</th>
+                    <th>کد خطا</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for inbound in result.reconciliation.inbound_details %}
+                    <tr>
+                        <td>{{ inbound.panel_name|default:"-" }}</td>
+                        <td>#{{ inbound.id }}</td>
+                        <td>#{{ inbound.remote_inbound_id|default:"-" }}</td>
+                        <td>{% if inbound.attempted %}بله{% else %}خیر{% endif %}</td>
+                        <td>{% if inbound.created_cup_item %}بله{% else %}خیر{% endif %}</td>
+                        <td>{{ inbound.error_code|default:"-" }}</td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="6"><div class="tw-empty-state">اینباندی انتخاب نشده است.</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </details>
+
+    <details class="tw-admin-card">
+        <summary class="tw-section-heading tw-cursor-pointer"><h2>وضعیت هر کانفیگ مخزن</h2></summary>
+        <div class="tw-table-wrap tw-mt-4">
+        <table class="tw-catalog-table">
+            <thead>
+                <tr>
+                    <th>مخزن</th>
+                    <th>Asset</th>
+                    <th>تلاش شد</th>
+                    <th>تخصیص</th>
+                    <th>CupItem</th>
+                    <th>کد / دلیل</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for asset in result.reconciliation.inventory_asset_details %}
+                    <tr>
+                        <td>{{ asset.pool_title|default:"-" }}</td>
+                        <td>#{{ asset.asset_id }}</td>
+                        <td>{% if asset.attempted %}بله{% else %}خیر{% endif %}</td>
+                        <td>{% if asset.allocated %}بله{% else %}خیر{% endif %}</td>
+                        <td>{% if asset.created_cup_item %}بله{% else %}خیر{% endif %}</td>
+                        <td>{{ asset.error_code|default:asset.rejection_reason|default:"-" }}</td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="6"><div class="tw-empty-state">کانفیگ دستی از مخزن انتخاب نشده است.</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </details>
+</section>
+
+<section class="tw-section">
+    <details class="tw-admin-card">
+        <summary class="tw-section-heading tw-cursor-pointer"><h2>جزئیات کانفیگ‌های ساخته‌شده از پنل</h2></summary>
+        <div class="tw-table-wrap tw-mt-4">
+        <table class="tw-catalog-table">
+            <thead>
+                <tr>
+                    <th>پنل</th>
+                    <th>نوع پنل</th>
+                    <th>قابلیت</th>
+                    <th>سلامت</th>
+                    <th>اینباندهای انتخاب‌شده</th>
+                    <th>وضعیت ساخت</th>
+                    <th>تعداد لینک</th>
+                    <th>خطاها / هشدارها</th>
                 </tr>
             </thead>
             <tbody>
@@ -111,16 +192,16 @@
                         <td>{{ panel.health_status }}</td>
                         <td>
                             {% for inbound in panel.selected_inbounds %}
-                                <div>#{{ inbound.id }} / remote #{{ inbound.remote_inbound_id }} / {{ inbound.protocol }}</div>
+                                <div>#{{ inbound.id }} / ریموت #{{ inbound.remote_inbound_id }} / {{ inbound.protocol }}</div>
                             {% empty %}
                                 -
                             {% endfor %}
                         </td>
-                        <td>{% if panel.success %}yes{% else %}no{% endif %}</td>
+                        <td>{% if panel.success %}موفق{% else %}ناموفق{% endif %}</td>
                         <td>{{ panel.link_count }}</td>
                         <td>
                             {% if panel.structured_errors %}
-                                <div class="tw-space-y-2">
+                                <div class="tw-space-y-3">
                                     {% for error in panel.structured_errors %}
                                         {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در این پنل" %}
                                     {% endfor %}
@@ -132,71 +213,140 @@
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="8"><div class="tw-empty-state">نتیجه پنلی برای نمایش نیست.</div></td></tr>
+                    <tr><td colspan="8"><div class="tw-empty-state">لینکی از پنل ساخته نشده است.</div></td></tr>
                 {% endfor %}
             </tbody>
         </table>
-    </div>
+        </div>
+    </details>
 </section>
 
-{% if result.inventory_results %}
 <section class="tw-section">
-    <div class="tw-table-wrap tw-admin-card">
-        <div class="tw-section-heading tw-mb-4"><h2>نتیجه هر استخر</h2></div>
+    <details class="tw-admin-card">
+        <summary class="tw-section-heading tw-cursor-pointer"><h2>جزئیات کانفیگ‌های انتخاب‌شده از مخزن</h2></summary>
+        <div class="tw-table-wrap tw-mt-4">
         <table class="tw-catalog-table">
             <thead>
                 <tr>
-                    <th>استخر</th>
-                    <th>قانون</th>
-                    <th>درخواست</th>
+                    <th>مخزن کانفیگ</th>
+                    <th>نوع تخصیص</th>
+                    <th>روش انتخاب</th>
+                    <th>تعداد انتخاب‌شده</th>
+                    <th>تعداد درخواستی</th>
                     <th>موجودی قبل</th>
-                    <th>تخصیص</th>
+                    <th>تعداد تخصیص</th>
+                    <th>CupItem</th>
+                    <th>ردشده</th>
                     <th>وضعیت</th>
-                    <th>Warnings / Errors</th>
+                    <th>خطاها / هشدارها</th>
                 </tr>
             </thead>
             <tbody>
-                {% for pool in result.inventory_results %}
+                {% for pool in result.manual_inventory_results %}
                     <tr>
                         <td>{{ pool.pool_title }}</td>
                         <td>{{ pool.allocation_mode_display }}</td>
+                        <td>{{ pool.selection_mode_display }}</td>
+                        <td>{{ pool.selected_asset_count }}</td>
                         <td>{{ pool.requested_quantity }}</td>
                         <td>{{ pool.available_before }}</td>
                         <td>{{ pool.allocated_count }}</td>
-                        <td>{% if pool.success %}yes{% else %}no{% endif %}</td>
+                        <td>{{ pool.cup_item_count }}</td>
+                        <td>{{ pool.rejected_count }}</td>
+                        <td>{% if pool.success %}موفق{% else %}ناموفق{% endif %}</td>
                         <td>
                             {% if pool.structured_errors %}
-                                <div class="tw-space-y-2">
+                                <div class="tw-space-y-3">
                                     {% for error in pool.structured_errors %}
-                                        {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در این استخر" %}
+                                        {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در این مخزن" %}
                                     {% endfor %}
                                 </div>
                             {% endif %}
                             {% for error in pool.errors %}<div>{{ error }}</div>{% endfor %}
                             {% for warning in pool.warnings %}<div>{{ warning }}</div>{% endfor %}
-                            {% if not pool.errors and not pool.warnings %}-{% endif %}
+                            {% for reason in pool.rejection_reasons %}<div>{{ reason }}</div>{% endfor %}
+                            {% if not pool.errors and not pool.warnings and not pool.rejection_reasons %}-{% endif %}
                         </td>
                     </tr>
+                {% empty %}
+                    <tr><td colspan="11"><div class="tw-empty-state">کانفیگ دستی از مخزن انتخاب نشده است.</div></td></tr>
                 {% endfor %}
             </tbody>
         </table>
-    </div>
+        </div>
+    </details>
 </section>
-{% endif %}
 
 <section class="tw-section">
-    <div class="tw-table-wrap tw-admin-card">
-        <div class="tw-section-heading tw-mb-4"><h2>Inboundهای انتخاب‌شده</h2></div>
+    <details class="tw-admin-card">
+        <summary class="tw-section-heading tw-cursor-pointer"><h2>جزئیات کانفیگ‌های انتخاب‌شده خودکار</h2></summary>
+        <div class="tw-table-wrap tw-mt-4">
         <table class="tw-catalog-table">
             <thead>
                 <tr>
-                    <th>Panel</th>
-                    <th>Inbound</th>
-                    <th>Remote ID</th>
-                    <th>Protocol</th>
-                    <th>Host</th>
-                    <th>Port</th>
-                    <th>Remark</th>
+                    <th>مخزن کانفیگ</th>
+                    <th>نوع تخصیص</th>
+                    <th>روش انتخاب</th>
+                    <th>تعداد انتخاب‌شده</th>
+                    <th>تعداد درخواستی</th>
+                    <th>موجودی قبل</th>
+                    <th>تعداد تخصیص</th>
+                    <th>CupItem</th>
+                    <th>ردشده</th>
+                    <th>وضعیت</th>
+                    <th>خطاها / هشدارها</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for pool in result.auto_inventory_results %}
+                    <tr>
+                        <td>{{ pool.pool_title }}</td>
+                        <td>{{ pool.allocation_mode_display }}</td>
+                        <td>{{ pool.selection_mode_display }}</td>
+                        <td>{{ pool.selected_asset_count }}</td>
+                        <td>{{ pool.requested_quantity }}</td>
+                        <td>{{ pool.available_before }}</td>
+                        <td>{{ pool.allocated_count }}</td>
+                        <td>{{ pool.cup_item_count }}</td>
+                        <td>{{ pool.rejected_count }}</td>
+                        <td>{% if pool.success %}موفق{% else %}ناموفق{% endif %}</td>
+                        <td>
+                            {% if pool.structured_errors %}
+                                <div class="tw-space-y-3">
+                                    {% for error in pool.structured_errors %}
+                                        {% include "admin/store/components/structured_error_card.html" with error=error title="خطا در این مخزن" %}
+                                    {% endfor %}
+                                </div>
+                            {% endif %}
+                            {% for error in pool.errors %}<div>{{ error }}</div>{% endfor %}
+                            {% for warning in pool.warnings %}<div>{{ warning }}</div>{% endfor %}
+                            {% for reason in pool.rejection_reasons %}<div>{{ reason }}</div>{% endfor %}
+                            {% if not pool.errors and not pool.warnings and not pool.rejection_reasons %}-{% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="11"><div class="tw-empty-state">کانفیگی به صورت خودکار از مخزن انتخاب نشده است.</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </details>
+</section>
+
+<section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
+    <details class="tw-admin-card">
+        <summary class="tw-section-heading tw-cursor-pointer"><h2>اینباندهای انتخاب‌شده</h2></summary>
+        <div class="tw-table-wrap tw-mt-4">
+        <table class="tw-catalog-table">
+            <thead>
+                <tr>
+                    <th>پنل</th>
+                    <th>اینباند</th>
+                    <th>شناسه ریموت</th>
+                    <th>پروتکل</th>
+                    <th>میزبان</th>
+                    <th>پورت</th>
+                    <th>نام</th>
                 </tr>
             </thead>
             <tbody>
@@ -211,24 +361,23 @@
                         <td>{{ inbound.remark }}</td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="7"><div class="tw-empty-state">Inbound انتخاب‌شده‌ای برای نمایش نیست.</div></td></tr>
+                    <tr><td colspan="7"><div class="tw-empty-state">اینباندی انتخاب نشده است.</div></td></tr>
                 {% endfor %}
             </tbody>
         </table>
-    </div>
-</section>
+        </div>
+    </details>
 
-{% if result.selected_inventory_pools %}
-<section class="tw-section">
-    <div class="tw-table-wrap tw-admin-card">
-        <div class="tw-section-heading tw-mb-4"><h2>استخرهای انتخاب‌شده</h2></div>
+    <details class="tw-admin-card">
+        <summary class="tw-section-heading tw-cursor-pointer"><h2>مخزن‌های انتخاب‌شده</h2></summary>
+        <div class="tw-table-wrap tw-mt-4">
         <table class="tw-catalog-table">
             <thead>
                 <tr>
-                    <th>استخر</th>
-                    <th>قانون</th>
+                    <th>مخزن کانفیگ</th>
+                    <th>نوع تخصیص</th>
                     <th>موجودی</th>
-                    <th>دارایی قابل استفاده</th>
+                    <th>کانفیگ قابل استفاده</th>
                 </tr>
             </thead>
             <tbody>
@@ -239,10 +388,12 @@
                         <td>{{ pool.available_stock }}</td>
                         <td>{{ pool.usable_asset_count }}</td>
                     </tr>
+                {% empty %}
+                    <tr><td colspan="4"><div class="tw-empty-state">مخزن کانفیگی انتخاب نشده است.</div></td></tr>
                 {% endfor %}
             </tbody>
         </table>
-    </div>
+        </div>
+    </details>
 </section>
-{% endif %}
 {% endblock %}

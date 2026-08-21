@@ -1,0 +1,44 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin_tailwind.css' %}">
+<style>
+  .fulfillment-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .fulfillment-plan-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .fulfillment-form-grid { display: grid; gap: .85rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fulfillment-form-field { display: grid; gap: .35rem; min-width: 0; }
+  .fulfillment-form-field label { color: #334155; font-size: .78rem; font-weight: 900; }
+  .plan-fulfillment-field, .fulfillment-form-field input, .fulfillment-form-field select, .fulfillment-form-field textarea {
+    background: #fff; border: 1px solid #cbd5e1; border-radius: 10px; color: #0f172a; min-height: 42px; padding: .55rem .7rem; width: 100%;
+  }
+  .fulfillment-form-field ul { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; display: grid; gap: .25rem; list-style: none; margin: 0; max-height: 220px; overflow: auto; padding: .6rem; }
+  .fulfillment-form-field li label { align-items: center; display: flex; gap: .45rem; line-height: 1.8; }
+  .fulfillment-form-wide { grid-column: 1 / -1; }
+  .fulfillment-step-number { align-items: center; background: #0f172a; border-radius: 999px; color: #fff; display: inline-flex; font-size: .8rem; font-weight: 900; height: 30px; justify-content: center; width: 30px; }
+  .fulfillment-step-title { align-items: center; display: flex; gap: .6rem; }
+  .fulfillment-step-title h2 { margin: 0; }
+  .fulfillment-diagnostic { border: 1px solid var(--tw-tone-border,#cbd5e1); border-radius: 12px; color: var(--tw-tone-text,#475569); background: var(--tw-tone-bg,#f8fafc); font-weight: 800; line-height: 1.8; padding: .7rem .8rem; }
+  .fulfillment-rule-card { border: 1px solid #e2e8f0; border-radius: 16px; background: #fff; padding: 1rem; display: grid; gap: .8rem; }
+  .fulfillment-radio-list ul { border: 0; padding: 0; }
+  .fulfillment-radio-list li label { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: .7rem .8rem; }
+  @media (max-width: 900px) { .fulfillment-form-grid { grid-template-columns: 1fr; } }
+</style>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">خانه</a>
+  &rsaquo; <a href="{% url 'admin_store_plan_fulfillment' %}">تحویل ساب</a>
+  &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="tw-admin-home tw-catalog-page tw-bg-slate-50 tw-p-4 sm:tw-p-5 lg:tw-p-6" dir="rtl">
+  {% block fulfillment_content %}{% endblock %}
+</div>
+{% endblock %}

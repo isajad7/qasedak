@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from store.xui_api import XUIService, sanitize_xui_operational_text
+from store.xui_api import REALITY_PUBLIC_KEY_MISSING_MESSAGE, XUIService, sanitize_xui_operational_text
 from store.xui_compat import (
     PROFILE_LEGACY_SINGLE_NODE,
     PROFILE_MODERN_MULTI_NODE,
@@ -122,6 +122,19 @@ class XUIPanelAdapter:
         category = str(getattr(exc, "category", "") or "").lower()
         message = str(exc or "").lower()
         error_class = PanelWriteForbiddenError if "403" in message or "forbidden" in message or "csrf" in category else PanelCreateClientFailedError
+        if category == "reality_public_key_missing":
+            return error_class(
+                REALITY_PUBLIC_KEY_MISSING_MESSAGE,
+                error_code="reality_public_key_missing",
+                layer="subscription_render",
+                action=action,
+                technical_detail=str(exc or ""),
+                remediation="Reality inbound streamSettings.realitySettings.settings.publicKey یا لینک native پنل را بررسی کنید.",
+                panel=self.panel,
+                panel_family=self.family,
+                capability_profile=getattr(self.panel, "capability_profile", "") or "",
+                inbound=inbound,
+            )
         return error_class(
             "ساخت client روی پنل X-UI ناموفق بود.",
             action=action,

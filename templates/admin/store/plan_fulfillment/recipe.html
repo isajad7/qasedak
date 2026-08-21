@@ -1,0 +1,61 @@
+{% extends "admin/store/plan_fulfillment/_base_plan_fulfillment.html" %}
+
+{% block fulfillment_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+  <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+    <div>
+      <span class="tw-status-badge tw-tone-{{ readiness.status_tone }}"><i class="fas fa-mug-hot" aria-hidden="true"></i> {{ readiness.status_label }}</span>
+      <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">{{ recipe.title }}</h1>
+      <p class="tw-mt-2 tw-mb-0 tw-text-sm tw-leading-7 tw-text-slate-600">{{ recipe.plan.name }} · {{ failure_policy_label }}</p>
+    </div>
+    <div class="tw-model-actions">
+      <a class="tw-button tw-button-secondary" href="{{ recipe_urls.preview }}">پیش‌نمایش</a>
+      <a class="tw-button tw-button-secondary" href="{{ recipe_urls.simulate }}">تست شبیه‌سازی</a>
+      <a class="tw-button tw-button-primary" href="{% url 'admin_store_plan_fulfillment_plan' recipe.plan_id %}">ویرایش Wizard</a>
+    </div>
+  </div>
+</section>
+
+<section class="tw-section">
+  <div class="tw-admin-card">
+    <div class="tw-section-heading tw-mb-4"><h2>خلاصه دستور</h2></div>
+    <div class="tw-model-list">
+      <div class="tw-model-row"><span>پلن متصل</span><strong>{{ recipe.plan }}</strong></div>
+      <div class="tw-model-row"><span>فعال</span><strong>{% if recipe.is_active %}بله{% else %}خیر{% endif %}</strong></div>
+      <div class="tw-model-row"><span>تعداد کانفیگ مورد انتظار</span><strong>{{ readiness.expected_config_count }}</strong></div>
+      <div class="tw-model-row"><span>منابع پنل</span><strong>{{ readiness.panel_source_count }}</strong></div>
+      <div class="tw-model-row"><span>مخزن‌های کانفیگ</span><strong>{{ readiness.inventory_pool_count }}</strong></div>
+    </div>
+  </div>
+</section>
+
+<section class="tw-section">
+  <div class="tw-section-heading tw-mb-4"><h2>قوانین پرکننده</h2></div>
+  <div class="fulfillment-plan-grid">
+    {% for source in readiness.sources %}
+      <article class="fulfillment-rule-card tw-tone-{{ source.status_tone }}" id="rule-{{ source.rule_id }}">
+        <div class="tw-card-topline">
+          <span class="tw-card-badge">{{ source.status_label }}</span>
+          <strong>{{ source.position }} · {{ source.source_type_label }}</strong>
+        </div>
+        <div class="tw-model-list">
+          <div class="tw-model-row"><span>منبع</span><strong>{{ source.source_name }}</strong></div>
+          <div class="tw-model-row"><span>تعداد</span><strong>{{ source.quantity }}</strong></div>
+          <div class="tw-model-row"><span>اجبار</span><strong>{{ source.required_label }}</strong></div>
+          <div class="tw-model-row"><span>کانفیگ مورد انتظار</span><strong>{{ source.expected_config_count }}</strong></div>
+        </div>
+        {% for item in source.diagnostics %}
+          <div class="fulfillment-diagnostic tw-tone-{{ item.tone }}">{{ item.label }}</div>
+        {% endfor %}
+        <div class="tw-model-actions">
+          <a class="tw-mini-button" href="{{ source.edit_url }}">ویرایش</a>
+          <a class="tw-mini-button" href="{{ source.delete_url }}">حذف</a>
+          <a class="tw-mini-button" href="{{ recipe_urls.simulate }}#rule-{{ source.rule_id }}">تست این منبع</a>
+        </div>
+      </article>
+    {% empty %}
+      <div class="tw-empty-state">برای این دستور هنوز قانون پرکننده فعال تعریف نشده است.</div>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

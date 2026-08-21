@@ -66,6 +66,7 @@ from .referral_services import (
 from .setup_readiness import SETUP_NOT_READY_MESSAGE, store_is_sellable
 from .subscription_cups import (
     active_cup_links,
+    build_subscription_cup_base64_path,
     build_subscription_cup_client_path,
     build_subscription_cup_dashboard_path,
     build_subscription_cup_raw_path,
@@ -90,13 +91,17 @@ SUPPORT_CONTACT_MAX_LENGTH = 120
 logger = logging.getLogger(__name__)
 
 CLIENT_SUBSCRIPTION_USER_AGENTS = (
+    "hiddify",
     "v2ray",
     "v2rayng",
-    "hiddify",
+    "v2rayn",
     "clash",
     "sing-box",
     "shadowrocket",
     "nekoray",
+    "nekobox",
+    "streisand",
+    "karing",
     "surge",
     "quantumult",
     "stash",
@@ -131,7 +136,7 @@ def _subscription_plain_response(body, *, status=200):
 
 
 def _normalized_subscription_format(request):
-    output_format = str(request.GET.get("format") or "base64").strip().lower()
+    output_format = str(request.GET.get("format") or "raw").strip().lower()
     if output_format not in SUBSCRIPTION_OUTPUT_FORMATS:
         return "base64"
     return output_format
@@ -148,10 +153,10 @@ def _is_browser_user_agent(user_agent):
 
 
 def wants_dashboard(request):
-    if "format" in request.GET:
-        return False
     if str(request.GET.get("view") or "").strip().lower() == "dashboard":
         return True
+    if "format" in request.GET:
+        return False
     user_agent = request.META.get("HTTP_USER_AGENT", "")
     if _is_client_user_agent(user_agent):
         return False
@@ -162,6 +167,7 @@ def wants_dashboard(request):
 def _subscription_dashboard_context(request, cup):
     subscription_url = request.build_absolute_uri(build_subscription_cup_client_path(cup))
     dashboard_url = request.build_absolute_uri(build_subscription_cup_dashboard_path(cup))
+    base64_url = request.build_absolute_uri(build_subscription_cup_base64_path(cup))
     raw_url = request.build_absolute_uri(build_subscription_cup_raw_path(cup))
     active_items = list(
         cup.items.filter(is_active=True, config_link__is_active=True)
@@ -206,9 +212,11 @@ def _subscription_dashboard_context(request, cup):
         "config_rows": config_rows if cup.is_accessible else [],
         "subscription_url": subscription_url,
         "dashboard_url": dashboard_url,
+        "base64_url": base64_url,
         "raw_url": raw_url,
         "client_path": build_subscription_cup_client_path(cup),
         "dashboard_path": build_subscription_cup_dashboard_path(cup),
+        "base64_path": build_subscription_cup_base64_path(cup),
         "raw_path": build_subscription_cup_raw_path(cup),
         "has_links": bool(active_cup_links(cup)),
     }

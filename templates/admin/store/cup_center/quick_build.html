@@ -6,16 +6,12 @@
 <section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
     <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
         <div>
-            {% include "admin/store/panel_center/_badge.html" with tone="amber" label="Quick Subscription Builder" icon="fas fa-wand-magic-sparkles" %}
+            {% include "admin/store/panel_center/_badge.html" with tone="amber" label="ساخت سریع اشتراک" icon="fas fa-wand-magic-sparkles" %}
             <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">ساخت سریع لینک اشتراک</h1>
-            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">از پنل‌ها Inbound انتخاب کن، از استخرها کانفیگ آماده بردار، یا هر دو را با هم داخل یک Cup و یک لینک /sub بساز.</p>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">از پنل‌ها اینباند انتخاب کن، از مخزن کانفیگ آماده بردار، یا هر دو را با هم داخل یک Cup و یک لینک اشتراک بساز.</p>
         </div>
-        <a href="{{ cup_center_url }}" class="tw-button tw-button-secondary">بازگشت به Cup Center</a>
+        <a href="{{ cup_center_url }}" class="tw-button tw-button-secondary">بازگشت به مرکز Cup</a>
     </div>
-</section>
-
-<section class="tw-section">
-    <div class="cup-warning">اگر Inbound انتخاب شود روی پنل کانفیگ واقعی ساخته می‌شود. اگر فقط استخر انتخاب شود، لینک آماده طبق قانون همان استخر تخصیص می‌گیرد.</div>
 </section>
 
 <section class="tw-section">
@@ -62,7 +58,8 @@
         </section>
 
         <section class="tw-space-y-3">
-            <div class="tw-section-heading"><h2>۲. منابع پنل</h2></div>
+            <div class="tw-section-heading"><h2>۲. ساخت از پنل‌ها و اینباندها</h2></div>
+            <div class="cup-warning" id="panel-create-warning"{% if not selected_inbound_ids %} hidden{% endif %}>این بخش روی پنل خارجی کانفیگ واقعی می‌سازد.</div>
             <div class="cup-form-field">
                 {{ form.inbounds.errors }}
                 <div class="tw-grid tw-gap-4" id="quick-build-panel-groups">
@@ -72,103 +69,122 @@
                                 <div>
                                     <h2 class="tw-m-0 tw-text-base tw-font-black tw-text-slate-950">{{ group.panel_name }}</h2>
                                     <div class="tw-mt-2 tw-flex tw-flex-wrap tw-gap-2 tw-text-xs tw-font-bold tw-text-slate-600">
-                                        <span>Family: {{ group.family_display }}</span>
-                                        <span>Capability: {{ group.capability_profile_display }}</span>
-                                        <span>Version: {{ group.detected_version }}</span>
-                                        <span>Health: {{ group.health_status }}</span>
+                                        <span>نوع پنل: {{ group.family_display }}</span>
+                                        <span>قابلیت: {{ group.capability_profile_display }}</span>
+                                        <span>نسخه: {{ group.detected_version }}</span>
+                                        <span>سلامت: {{ group.health_status }}</span>
                                     </div>
                                 </div>
                                 <button type="button" class="tw-button tw-button-secondary" data-panel-select="{{ group.panel_id }}">انتخاب همه</button>
                             </div>
-                            <div class="tw-table-wrap">
-                                <table class="tw-catalog-table">
-                                    <thead>
-                                        <tr>
-                                            <th>انتخاب</th>
-                                            <th>Inbound PK</th>
-                                            <th>Remote ID</th>
-                                            <th>Protocol</th>
-                                            <th>Host</th>
-                                            <th>Port</th>
-                                            <th>Remark / Node</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {% for row in group.inbounds %}
-                                            <tr>
-                                                <td>
-                                                    <input type="checkbox" name="inbounds" value="{{ row.id }}" data-panel-id="{{ group.panel_id }}"{% if row.id in selected_inbound_ids %} checked{% endif %}>
-                                                </td>
-                                                <td>#{{ row.id }}</td>
-                                                <td>#{{ row.remote_inbound_id }}</td>
-                                                <td>{{ row.protocol }}</td>
-                                                <td>{{ row.host }}</td>
-                                                <td>{{ row.port }}</td>
-                                                <td>{{ row.remark }}</td>
-                                            </tr>
-                                        {% endfor %}
-                                    </tbody>
-                                </table>
+                            <div class="cup-asset-list">
+                                {% for row in group.inbounds %}
+                                    <label class="cup-asset-card">
+                                        <input class="cup-asset-checkbox" type="checkbox" name="inbounds" value="{{ row.id }}" data-panel-id="{{ group.panel_id }}"{% if row.id in selected_inbound_ids %} checked{% endif %}>
+                                        <span class="cup-asset-body">
+                                            <span class="cup-asset-title">{{ row.remark }}</span>
+                                            <span class="cup-asset-meta">
+                                                <span>#{{ row.id }}</span>
+                                                <span>ریموت #{{ row.remote_inbound_id }}</span>
+                                                <span>{{ row.protocol }}</span>
+                                                <span>{{ row.host }}:{{ row.port }}</span>
+                                            </span>
+                                        </span>
+                                    </label>
+                                {% endfor %}
                             </div>
                         </section>
                     {% empty %}
-                        <div class="tw-empty-state">Inbound فعال، قابل فروش و پشتیبانی‌شده برای ساخت سریع پیدا نشد.</div>
+                        <div class="tw-empty-state">اینباند فعال، قابل فروش و پشتیبانی‌شده برای ساخت سریع پیدا نشد.</div>
                     {% endfor %}
                 </div>
-                <span class="cup-help">برای چند inbound روی یک Panel، همان Panel باید قابلیت modern multi-node داشته باشد. انتخاب inbound از چند Panel به صورت گروه‌های جدا ساخته و داخل یک Cup جمع می‌شود.</span>
+                <span class="cup-help">برای چند اینباند روی یک پنل، همان پنل باید قابلیت چندنودی داشته باشد. انتخاب اینباند از چند پنل به صورت گروه‌های جدا ساخته و داخل یک Cup جمع می‌شود.</span>
             </div>
         </section>
 
         <section class="tw-admin-card tw-space-y-3">
-            <div class="tw-section-heading"><h2>۳. منابع استخر کانفیگ</h2></div>
-            <div class="cup-form-grid">
-                <div class="cup-form-field">
-                    {{ form.inventory_quantity.errors }}
-                    {{ form.inventory_quantity.label_tag }}
-                    {{ form.inventory_quantity }}
-                    <span class="cup-help">این تعداد از هر استخر انتخاب‌شده برداشته می‌شود.</span>
-                </div>
-                <div class="cup-form-field">
-                    {{ form.inventory_pools.errors }}
-                    <label>{{ form.inventory_pools.label }}</label>
-                    <span class="cup-help">{{ form.inventory_pools.help_text }}</span>
-                </div>
-            </div>
-            <div class="tw-table-wrap">
-                <table class="tw-catalog-table">
-                    <thead>
-                        <tr>
-                            <th>انتخاب</th>
-                            <th>استخر</th>
-                            <th>قانون</th>
-                            <th>موجودی</th>
-                            <th>دارایی‌ها</th>
-                            <th>پلن مرتبط</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for row in inventory_pool_rows %}
-                            <tr>
-                                <td>
-                                    <input type="checkbox" name="inventory_pools" value="{{ row.id }}" data-pool-id="{{ row.id }}"{% if row.id in selected_inventory_pool_ids %} checked{% endif %}>
-                                </td>
-                                <td>{{ row.title }}</td>
-                                <td>{{ row.allocation_mode_display }}</td>
-                                <td>{{ row.available_stock }}</td>
-                                <td>{{ row.usable_asset_count }} / {{ row.asset_count }}</td>
-                                <td>{{ row.connected_plan|default:"-" }}</td>
-                            </tr>
-                        {% empty %}
-                            <tr><td colspan="6"><div class="tw-empty-state">استخر فعال برای انتخاب وجود ندارد.</div></td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+            <div class="tw-section-heading"><h2>۳. برداشت از مخزن کانفیگ آماده</h2></div>
+            <p class="tw-mt-2 tw-mb-0 tw-text-sm tw-leading-7 tw-text-slate-600">در این روش از کانفیگ‌های آماده واردشده استفاده می‌شود.</p>
+            {{ form.inventory_pools.errors }}
+            {{ form.inventory_quantity.as_hidden }}
+            <div class="tw-grid tw-gap-4">
+                {% for row in inventory_pool_rows %}
+                    <section class="tw-rounded-xl tw-border tw-border-slate-200 tw-bg-white tw-p-4 tw-space-y-3" data-inventory-pool-card="{{ row.id }}">
+                        <div class="tw-flex tw-flex-col tw-gap-3 lg:tw-flex-row lg:tw-items-start lg:tw-justify-between">
+                            <label class="tw-flex tw-items-start tw-gap-3 tw-font-black tw-text-slate-950">
+                                <input type="checkbox" name="inventory_pools" value="{{ row.id }}" data-pool-id="{{ row.id }}"{% if row.id in selected_inventory_pool_ids %} checked{% endif %}>
+                                <span>
+                                    {{ row.title }}
+                                    <small class="tw-block tw-mt-1 tw-text-xs tw-font-bold tw-text-slate-500">{{ row.connected_plan|default:"بدون پلن مرتبط" }}</small>
+                                </span>
+                            </label>
+                            <div class="tw-flex tw-flex-wrap tw-gap-2 tw-text-xs tw-font-bold tw-text-slate-600">
+                                <span>موجودی: {{ row.available_stock }}</span>
+                                <span>قانون: {{ row.allocation_mode_display }}</span>
+                                <span>قابل استفاده: {{ row.usable_asset_count }} / {{ row.asset_count }}</span>
+                            </div>
+                        </div>
+
+                        <div class="cup-form-grid">
+                            <div class="cup-form-field">
+                                <label>روش تخصیص</label>
+                                <label class="tw-flex tw-items-center tw-gap-2 tw-font-bold">
+                                    <input type="radio" name="inventory_mode_{{ row.id }}" value="auto_pick_from_pool" data-inventory-mode="{{ row.id }}"{% if row.auto_mode_selected %} checked{% endif %}>
+                                    برداشت خودکار از مخزن
+                                </label>
+                                <label class="tw-flex tw-items-center tw-gap-2 tw-font-bold">
+                                    <input type="radio" name="inventory_mode_{{ row.id }}" value="manual_select_assets" data-inventory-mode="{{ row.id }}"{% if row.manual_mode_selected %} checked{% endif %}>
+                                    انتخاب دستی کانفیگ‌ها
+                                </label>
+                            </div>
+                            <div class="cup-form-field" data-auto-quantity="{{ row.id }}">
+                                <label for="inventory_quantity_{{ row.id }}">تعداد برای برداشت خودکار</label>
+                                <input type="number" min="1" max="50" name="inventory_quantity_{{ row.id }}" id="inventory_quantity_{{ row.id }}" value="{{ row.selected_quantity|default:1 }}" class="cup-field">
+                                <span class="cup-help">در حالت خودکار، همین تعداد از این مخزن برداشته می‌شود.</span>
+                            </div>
+                        </div>
+
+                        <div class="tw-space-y-3" data-manual-assets="{{ row.id }}"{% if not row.manual_mode_selected %} hidden{% endif %}>
+                            <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row sm:tw-items-center sm:tw-justify-between">
+                                <div>
+                                    <strong class="tw-text-sm tw-text-slate-900">انتخاب دستی کانفیگ‌ها</strong>
+                                    <span class="tw-block tw-text-xs tw-font-bold tw-text-slate-500" data-inventory-selected-summary="{{ row.id }}">{{ row.selected_asset_ids|length }} انتخاب شده</span>
+                                </div>
+                                <button type="button" class="tw-button tw-button-secondary" data-inventory-select-all="{{ row.id }}">انتخاب همه قابل استفاده‌ها</button>
+                            </div>
+                            <div class="cup-asset-list">
+                                {% for asset in row.asset_rows %}
+                                    <label class="cup-asset-card{% if not asset.selectable %} is-disabled{% endif %}">
+                                        <input class="cup-asset-checkbox" type="checkbox" name="inventory_asset_ids_{{ row.id }}" value="{{ asset.id }}" data-inventory-asset="{{ row.id }}"{% if asset.selected %} checked{% endif %}{% if not asset.selectable %} disabled{% endif %}>
+                                        <span class="cup-asset-body">
+                                            <span class="cup-asset-title">{{ asset.display_name }}</span>
+                                            <span class="cup-asset-meta">
+                                                <span>{{ asset.protocol }}</span>
+                                                <span>{{ asset.host }}</span>
+                                                <span>{{ asset.status_display }}</span>
+                                                <span>استفاده: {{ asset.current_allocations }}</span>
+                                                <span>ظرفیت: {{ asset.capacity_display }}</span>
+                                                <span>قابل استفاده: {{ asset.usable_display }}</span>
+                                            </span>
+                                            <code class="tw-safe-command">{{ asset.masked_link }}</code>
+                                            {% if not asset.selectable %}<span class="cup-asset-reason">{{ asset.disabled_reason }}</span>{% endif %}
+                                        </span>
+                                    </label>
+                                {% empty %}
+                                    <div class="tw-empty-state">کانفیگی برای نمایش در این مخزن نیست.</div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </section>
+                {% empty %}
+                    <div class="tw-empty-state">مخزن کانفیگ فعال برای انتخاب وجود ندارد.</div>
+                {% endfor %}
             </div>
         </section>
 
         <section class="tw-admin-card tw-space-y-3">
             <div class="tw-section-heading"><h2>۴. تایید و ساخت</h2></div>
-            <div class="cup-form-field cup-form-wide">
+            <div class="cup-form-field cup-form-wide" id="panel-confirm-row"{% if not selected_inbound_ids %} hidden{% endif %}>
                 {{ form.confirm_remote_create.errors }}
                 <label>{{ form.confirm_remote_create }} {{ form.confirm_remote_create.label }}</label>
             </div>
@@ -189,6 +205,78 @@ document.addEventListener("click", function (event) {
     const shouldCheck = boxes.some(function (box) { return !box.checked; });
     boxes.forEach(function (box) { box.checked = shouldCheck; });
     button.textContent = shouldCheck ? "لغو انتخاب همه" : "انتخاب همه";
+    updatePanelWarning();
 });
+
+function updatePanelWarning() {
+    const selected = document.querySelectorAll('input[name="inbounds"]:checked').length > 0;
+    const warning = document.getElementById("panel-create-warning");
+    const confirmRow = document.getElementById("panel-confirm-row");
+    if (warning) warning.hidden = !selected;
+    if (confirmRow) confirmRow.hidden = !selected;
+}
+
+document.addEventListener("change", function (event) {
+    if (event.target.matches('input[name="inbounds"]')) {
+        updatePanelWarning();
+        return;
+    }
+    const assetInput = event.target.closest("[data-inventory-asset]");
+    if (assetInput) {
+        const poolId = assetInput.getAttribute("data-inventory-asset");
+        const poolBox = document.querySelector('input[name="inventory_pools"][data-pool-id="' + poolId + '"]');
+        if (poolBox && assetInput.checked) poolBox.checked = true;
+        updateInventorySelectedSummary(poolId);
+    }
+    const modeInput = event.target.closest("[data-inventory-mode]");
+    if (modeInput) {
+        const poolId = modeInput.getAttribute("data-inventory-mode");
+        const poolBox = document.querySelector('input[name="inventory_pools"][data-pool-id="' + poolId + '"]');
+        if (poolBox) poolBox.checked = true;
+        updateInventoryMode(poolId);
+    }
+    if (event.target.matches('input[name^="inventory_quantity_"]')) {
+        const poolId = event.target.name.replace("inventory_quantity_", "");
+        const poolBox = document.querySelector('input[name="inventory_pools"][data-pool-id="' + poolId + '"]');
+        if (poolBox) poolBox.checked = true;
+    }
+});
+
+document.addEventListener("click", function (event) {
+    const button = event.target.closest("[data-inventory-select-all]");
+    if (!button) return;
+    const poolId = button.getAttribute("data-inventory-select-all");
+    const boxes = Array.from(document.querySelectorAll('input[data-inventory-asset="' + poolId + '"]:not(:disabled)'));
+    const shouldCheck = boxes.some(function (box) { return !box.checked; });
+    boxes.forEach(function (box) { box.checked = shouldCheck; });
+    const poolBox = document.querySelector('input[name="inventory_pools"][data-pool-id="' + poolId + '"]');
+    if (poolBox && shouldCheck) poolBox.checked = true;
+    button.textContent = shouldCheck ? "لغو انتخاب همه" : "انتخاب همه قابل استفاده‌ها";
+    updateInventorySelectedSummary(poolId);
+});
+
+function updateInventorySelectedSummary(poolId) {
+    const summary = document.querySelector('[data-inventory-selected-summary="' + poolId + '"]');
+    if (!summary) return;
+    const count = document.querySelectorAll('input[data-inventory-asset="' + poolId + '"]:checked').length;
+    summary.textContent = count + " انتخاب شده";
+}
+
+function updateInventoryMode(poolId) {
+    const selectedMode = document.querySelector('input[name="inventory_mode_' + poolId + '"]:checked');
+    const isManual = selectedMode && selectedMode.value === "manual_select_assets";
+    const manual = document.querySelector('[data-manual-assets="' + poolId + '"]');
+    const autoQuantity = document.querySelector('[data-auto-quantity="' + poolId + '"]');
+    if (manual) manual.hidden = !isManual;
+    if (autoQuantity) autoQuantity.hidden = isManual;
+}
+
+document.querySelectorAll("[data-inventory-pool-card]").forEach(function (card) {
+    const poolId = card.getAttribute("data-inventory-pool-card");
+    updateInventoryMode(poolId);
+    updateInventorySelectedSummary(poolId);
+});
+
+updatePanelWarning();
 </script>
 {% endblock %}

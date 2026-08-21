@@ -1,14 +1,27 @@
 import base64
+import logging
+import sys
 from dataclasses import dataclass, field
 from decimal import Decimal
+from urllib.parse import parse_qs, urlsplit
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, Max, Prefetch, Q
 from django.utils import timezone
 
 from store.config_lookup import mask_identifier
-from store.config_inventory_services import ConfigInventoryError, allocate_assets_from_pool, get_pool_stock_summary
-from store.models import ConfigInventoryPool, ConfigLink, CupItem, Inbound, Panel, SubscriptionCup
+from store.config_inventory_services import (
+    ConfigInventoryError,
+    allocate_assets_from_pool,
+    allocate_selected_assets_from_pool,
+    asset_allocation_limit,
+    get_pool_stock_summary,
+    inventory_allocation_mode_label,
+    inventory_asset_status_label,
+)
+from store.models import ConfigAllocation, ConfigInventoryAsset, ConfigInventoryPool, ConfigLink, CupItem, Inbound, Panel, SubscriptionCup
+from store.jalali import persian_digits
 from store.panels.errors import (
     CupBuildValidationError,
     CupRemoteCreateFailedError,
@@ -20,6 +33,7 @@ from store.panels.errors import (
 from store.panels.factory import get_safe_panel_adapter
 from store.panels.xui.adapter import XUIProvisioningRequest
 from store.subscription_cups import (
+    build_subscription_cup_base64_path,
     build_subscription_cup_client_path,
     build_subscription_cup_dashboard_path,
     build_subscription_cup_path,
@@ -36,8 +50,12 @@ from store.subscription_cups import (
 from store.xui_api import sanitize_xui_operational_text
 
 
+logger = logging.getLogger(__name__)
+
+
 class CupCenterError(Exception):
-    def __init__(self, message="", *, structured_error=None):
+    def __init__(self, message="", *, structured_error=None, code=""):
+        self.code = code or ""
         if isinstance(structured_error, PanelIntegrationError):
             self.structured_error = structured_error.to_safe_dict()
             message = message or structured_error.message
@@ -74,6 +92,20 @@ class AddLinksResult:
 
 
 @dataclass
+class AddInventoryAssetsResult:
+    requested_count: int = 0
+    allocated_count: int = 0
+    created_count: int = 0
+    added_count: int = 0
+    cup_item_count: int = 0
+    rejected_count: int = 0
+    pool_title: str = ""
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    rejection_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
 class PanelConfigResult:
     config_link: ConfigLink
     cup_item: CupItem
@@ -93,13 +125,79 @@ class QuickPanelBuildResult:
     health_status: str
     selected_inbounds: list[dict]
     group_index: int
+    attempted: bool = False
     success: bool = False
     create_success: bool = False
     create_mode: str = ""
     link_count: int = 0
+    inbound_results: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     structured_errors: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class QuickBuildReconciliation:
+    selected_panel_ids: list[int] = field(default_factory=list)
+    selected_inbound_ids: list[int] = field(default_factory=list)
+    selected_inventory_pool_ids: list[int] = field(default_factory=list)
+    selected_manual_asset_ids: list[int] = field(default_factory=list)
+    requested_auto_pick_quantities: dict[str, int] = field(default_factory=dict)
+    attempted_panel_groups: int = 0
+    attempted_inbounds: int = 0
+    attempted_manual_assets: int = 0
+    attempted_auto_pick_assets: int = 0
+    panel_links_created: int = 0
+    inventory_manual_allocated: int = 0
+    inventory_auto_allocated: int = 0
+    cup_items_created: int = 0
+    config_links_created_or_reused: int = 0
+    failed_panel_groups: int = 0
+    failed_inbounds: int = 0
+    rejected_manual_assets: int = 0
+    failed_auto_pick_assets: int = 0
+    skipped_invalid_links: int = 0
+    selected_sources_count: int = 0
+    failed_rejected_skipped_count: int = 0
+    status: str = "failed"
+    summary_message: str = ""
+    customer_link_available: bool = False
+    customer_link_warning: str = ""
+    panel_group_details: list[dict] = field(default_factory=list)
+    inbound_details: list[dict] = field(default_factory=list)
+    inventory_asset_details: list[dict] = field(default_factory=list)
+
+    def to_dict(self):
+        return {
+            "selected_panel_ids": self.selected_panel_ids,
+            "selected_inbound_ids": self.selected_inbound_ids,
+            "selected_inventory_pool_ids": self.selected_inventory_pool_ids,
+            "selected_manual_asset_ids": self.selected_manual_asset_ids,
+            "requested_auto_pick_quantities": self.requested_auto_pick_quantities,
+            "attempted_panel_groups": self.attempted_panel_groups,
+            "attempted_inbounds": self.attempted_inbounds,
+            "attempted_manual_assets": self.attempted_manual_assets,
+            "attempted_auto_pick_assets": self.attempted_auto_pick_assets,
+            "panel_links_created": self.panel_links_created,
+            "inventory_manual_allocated": self.inventory_manual_allocated,
+            "inventory_auto_allocated": self.inventory_auto_allocated,
+            "cup_items_created": self.cup_items_created,
+            "config_links_created_or_reused": self.config_links_created_or_reused,
+            "failed_panel_groups": self.failed_panel_groups,
+            "failed_inbounds": self.failed_inbounds,
+            "rejected_manual_assets": self.rejected_manual_assets,
+            "failed_auto_pick_assets": self.failed_auto_pick_assets,
+            "skipped_invalid_links": self.skipped_invalid_links,
+            "selected_sources_count": self.selected_sources_count,
+            "failed_rejected_skipped_count": self.failed_rejected_skipped_count,
+            "status": self.status,
+            "summary_message": self.summary_message,
+            "customer_link_available": self.customer_link_available,
+            "customer_link_warning": self.customer_link_warning,
+            "panel_group_details": self.panel_group_details,
+            "inbound_details": self.inbound_details,
+            "inventory_asset_details": self.inventory_asset_details,
+        }
 
 
 @dataclass
@@ -121,6 +219,7 @@ class QuickBuildResult:
     config_link_count: int = 0
     panel_results: list[dict] = field(default_factory=list)
     inventory_results: list[dict] = field(default_factory=list)
+    reconciliation: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     structured_errors: list[dict] = field(default_factory=list)
@@ -135,6 +234,14 @@ SUPPORTED_INBOUND_PROTOCOLS = {
     Inbound.Protocol.VMESS,
     Inbound.Protocol.TROJAN,
 }
+
+INVENTORY_SOURCE_AUTO = "auto_pick_from_pool"
+INVENTORY_SOURCE_MANUAL = "manual_select_assets"
+INVENTORY_NO_CUPITEM_ERROR = "هیچ کانفیگی از مخزن وارد Cup نشد. انتخاب‌ها یا ظرفیت‌ها را بررسی کنید."
+MANUAL_INVENTORY_NO_CUPITEM_ERROR = "هیچ‌کدام از کانفیگ‌های انتخاب‌شده از مخزن وارد Cup نشدند."
+QUICK_STATUS_SUCCESS = "success"
+QUICK_STATUS_PARTIAL = "partial_with_warnings"
+QUICK_STATUS_FAILED = "failed"
 
 
 def cup_center_url(name, *args):
@@ -270,8 +377,8 @@ def _inventory_pool_summary(pool):
         "id": pool.pk,
         "title": pool.title,
         "allocation_mode": summary["allocation_mode"],
-        "allocation_mode_display": pool.get_allocation_mode_display(),
-        "available_stock": "Unlimited" if capacity is None else capacity,
+        "allocation_mode_display": inventory_allocation_mode_label(summary["allocation_mode"]),
+        "available_stock": "نامحدود" if capacity is None else capacity,
         "asset_count": summary["asset_count"],
         "usable_asset_count": summary["usable_asset_count"],
         "connected_plan": str(pool.connected_plan) if pool.connected_plan_id else "",
@@ -279,9 +386,95 @@ def _inventory_pool_summary(pool):
     }
 
 
-def quick_builder_inventory_pool_rows():
+def _inventory_asset_row(asset, pool):
+    allocation_limit = asset_allocation_limit(asset, pool)
+    if pool.allocation_mode == ConfigInventoryPool.AllocationMode.EXCLUSIVE:
+        remaining_slots = 1 if asset.status == ConfigInventoryAsset.Status.AVAILABLE and not int(asset.current_allocations or 0) else 0
+    elif pool.allocation_mode == ConfigInventoryPool.AllocationMode.SHARED_LIMITED:
+        remaining_slots = None if allocation_limit is None else max(int(allocation_limit or 0) - int(asset.current_allocations or 0), 0)
+    else:
+        remaining_slots = None
+    selectable = asset.status in {ConfigInventoryAsset.Status.AVAILABLE, ConfigInventoryAsset.Status.ASSIGNED}
+    selectable = selectable and (not asset.expires_at or asset.expires_at > timezone.now())
+    if pool.allocation_mode == ConfigInventoryPool.AllocationMode.EXCLUSIVE:
+        selectable = selectable and asset.status == ConfigInventoryAsset.Status.AVAILABLE and remaining_slots > 0
+    elif pool.allocation_mode == ConfigInventoryPool.AllocationMode.SHARED_LIMITED:
+        selectable = selectable and (remaining_slots is None or remaining_slots > 0)
+    disabled_reason = ""
+    if not selectable:
+        if asset.expires_at and asset.expires_at <= timezone.now():
+            disabled_reason = "منقضی شده"
+        elif asset.status in {ConfigInventoryAsset.Status.DISABLED, ConfigInventoryAsset.Status.BURNED, ConfigInventoryAsset.Status.EXPIRED}:
+            disabled_reason = inventory_asset_status_label(asset.status)
+        elif asset.status == ConfigInventoryAsset.Status.RESERVED:
+            disabled_reason = "رزرو شده"
+        elif pool.allocation_mode == ConfigInventoryPool.AllocationMode.EXCLUSIVE and asset.status == ConfigInventoryAsset.Status.ASSIGNED:
+            disabled_reason = "این کانفیگ قبلاً اختصاص داده شده است."
+        elif pool.allocation_mode == ConfigInventoryPool.AllocationMode.SHARED_LIMITED and remaining_slots == 0:
+            disabled_reason = "ظرفیت تخصیص پر شده"
+        else:
+            disabled_reason = "قابل انتخاب نیست"
+    max_allocations_display = allocation_limit if allocation_limit is not None else "نامحدود"
+    capacity_display = (
+        "نامحدود"
+        if allocation_limit is None
+        else f"{int(asset.current_allocations or 0)} / {allocation_limit}"
+    )
+    return {
+        "id": asset.pk,
+        "display_name": asset.remark or f"Config #{asset.pk}",
+        "remark": asset.remark or "-",
+        "protocol": asset.protocol or ConfigLink.Protocol.UNKNOWN,
+        "host": asset.host or "-",
+        "status": asset.status,
+        "status_display": inventory_asset_status_label(asset.status),
+        "current_allocations": int(asset.current_allocations or 0),
+        "allocation_limit": max_allocations_display,
+        "max_allocations_display": max_allocations_display,
+        "capacity_display": capacity_display,
+        "remaining_slots": "نامحدود" if remaining_slots is None else remaining_slots,
+        "masked_link": mask_link_for_display(asset.raw_link),
+        "selectable": selectable,
+        "usable_display": "بله" if selectable else "خیر",
+        "disabled_reason": disabled_reason,
+    }
+
+
+def inventory_asset_picker_rows(pool, *, limit=100):
+    pool = pool if isinstance(pool, ConfigInventoryPool) else ConfigInventoryPool.objects.get(pk=pool)
+    assets = (
+        ConfigInventoryAsset.objects.filter(pool=pool)
+        .order_by("current_allocations", "created_at", "pk")[:limit]
+    )
+    return [_inventory_asset_row(asset, pool) for asset in assets]
+
+
+def quick_builder_inventory_pool_rows(*, selected_asset_ids_by_pool=None, selected_modes=None, selected_quantities=None):
+    selected_asset_ids_by_pool = selected_asset_ids_by_pool or {}
+    selected_modes = selected_modes or {}
+    selected_quantities = selected_quantities or {}
     pools = ConfigInventoryPool.objects.filter(is_active=True).select_related("connected_plan").order_by("priority", "title", "pk")
-    return [_inventory_pool_summary(pool) for pool in pools]
+    rows = []
+    for pool in pools:
+        row = _inventory_pool_summary(pool)
+        selected_asset_ids = {int(value) for value in selected_asset_ids_by_pool.get(pool.pk, set()) if str(value).isdigit()}
+        mode = selected_modes.get(pool.pk) or INVENTORY_SOURCE_AUTO
+        quantity = selected_quantities.get(pool.pk) or 1
+        row.update(
+            {
+                "selected_mode": mode,
+                "auto_mode_selected": mode != INVENTORY_SOURCE_MANUAL,
+                "manual_mode_selected": mode == INVENTORY_SOURCE_MANUAL,
+                "selected_quantity": quantity,
+                "selected_asset_ids": selected_asset_ids,
+                "asset_rows": [
+                    {**asset_row, "selected": asset_row["id"] in selected_asset_ids}
+                    for asset_row in inventory_asset_picker_rows(pool)
+                ],
+            }
+        )
+        rows.append(row)
+    return rows
 
 
 def inbound_selection_rows():
@@ -319,28 +512,34 @@ def subscription_url_summary(cup, *, request=None):
     dashboard_path = build_subscription_cup_dashboard_path(cup)
     client_path = build_subscription_cup_client_path(cup)
     raw_path = build_subscription_cup_raw_path(cup)
+    base64_path = build_subscription_cup_base64_path(cup)
     if request:
         dashboard_url = request.build_absolute_uri(dashboard_path)
         client_url = request.build_absolute_uri(client_path)
         raw_url = request.build_absolute_uri(raw_path)
+        base64_url = request.build_absolute_uri(base64_path)
     else:
         base_url = build_subscription_cup_url(cup)
         base_prefix = base_url[: -len(path)] if path and base_url.endswith(path) else ""
         dashboard_url = f"{base_prefix}{dashboard_path}" if base_prefix else dashboard_path
         client_url = f"{base_prefix}{client_path}" if base_prefix else client_path
         raw_url = f"{base_prefix}{raw_path}" if base_prefix else raw_path
+        base64_url = f"{base_prefix}{base64_path}" if base_prefix else base64_path
     return {
         "url": url,
         "dashboard_url": dashboard_url,
         "client_url": client_url,
+        "base64_url": base64_url,
         "raw_url": raw_url,
         "masked_url": mask_subscription_url(url, cup.token),
         "masked_dashboard_url": mask_subscription_url(dashboard_url, cup.token),
         "masked_client_url": mask_subscription_url(client_url, cup.token),
+        "masked_base64_url": mask_subscription_url(base64_url, cup.token),
         "masked_raw_url": mask_subscription_url(raw_url, cup.token),
         "path": path,
         "dashboard_path": dashboard_path,
         "client_path": client_path,
+        "base64_path": base64_path,
         "raw_path": raw_path,
     }
 
@@ -511,6 +710,42 @@ def _cup_structured_error(
     ).to_safe_dict()
 
 
+def _remote_create_structured_error(
+    exc,
+    *,
+    message,
+    remediation,
+    panel,
+    inbound,
+    action,
+    safe_context=None,
+):
+    context = dict(safe_context or {})
+    if isinstance(exc, PanelIntegrationError):
+        panel_error = exc.to_safe_dict()
+        context["panel_error"] = panel_error
+        return CupRemoteCreateFailedError(
+            panel_error.get("message") or message,
+            error_code=panel_error.get("error_code") or "cup_remote_create_failed",
+            layer=panel_error.get("layer") or "cup_builder",
+            action=panel_error.get("action") or action,
+            technical_detail=panel_error.get("technical_detail") or str(exc or ""),
+            remediation=panel_error.get("remediation") or remediation,
+            panel=panel,
+            inbound=inbound,
+            safe_context=context,
+        ).to_safe_dict()
+    return CupRemoteCreateFailedError(
+        message,
+        action=action,
+        technical_detail=str(exc or ""),
+        remediation=remediation,
+        panel=panel,
+        inbound=inbound,
+        safe_context=context,
+    ).to_safe_dict()
+
+
 def _raise_cup_error(error_class, message, *, structured_error):
     raise error_class(message, structured_error=structured_error)
 
@@ -601,15 +836,14 @@ def create_panel_config_into_cup(cup, panel, inbound, options, *, adapter=None):
     try:
         remote_result = adapter.create_enabled_client(request)
     except Exception as exc:
-        structured = CupRemoteCreateFailedError(
-            "ساخت کانفیگ روی پنل برای Cup ناموفق بود.",
+        structured = _remote_create_structured_error(
+            exc,
+            message="ساخت کانفیگ روی پنل برای Cup ناموفق بود.",
             action="create_client",
-            technical_detail=str(exc or ""),
             remediation="credentialها، قابلیت supports_create_client، ظرفیت اینباند و وضعیت پنل را بررسی کنید.",
             panel=panel,
             inbound=inbound,
-            safe_context={"panel_error": exc.to_safe_dict() if isinstance(exc, PanelIntegrationError) else ""},
-        ).to_safe_dict()
+        )
         raise CupCenterRemoteCreateError(_safe_panel_error(exc, panel=panel), structured_error=structured) from exc
 
     direct_link = str((remote_result or {}).get("direct_link") or "").strip()
@@ -875,19 +1109,18 @@ def _remote_create_for_quick_build(panel, inbounds, options, adapter):
             return adapter.create_enabled_multi_inbound_client(request)
         return adapter.create_enabled_client(request)
     except Exception as exc:
-        structured = CupRemoteCreateFailedError(
-            "ساخت کانفیگ روی پنل برای Quick Builder ناموفق بود.",
+        structured = _remote_create_structured_error(
+            exc,
+            message="ساخت کانفیگ روی پنل برای Quick Builder ناموفق بود.",
             action="create_multi_inbound_client" if len(inbounds) > 1 else "create_client",
-            technical_detail=str(exc or ""),
             remediation="credentialها، قابلیت‌های پنل، ظرفیت اینباند و وضعیت API نوشتن را بررسی کنید.",
             panel=panel,
             inbound=inbounds[0] if inbounds else None,
             safe_context={
                 "selected_inbound_pks": [getattr(inbound, "pk", None) for inbound in inbounds],
                 "remote_inbound_ids": [getattr(inbound, "inbound_id", None) for inbound in inbounds],
-                "panel_error": exc.to_safe_dict() if isinstance(exc, PanelIntegrationError) else "",
             },
-        ).to_safe_dict()
+        )
         raise CupCenterRemoteCreateError(_safe_panel_error(exc, panel=panel), structured_error=structured) from exc
 
 
@@ -901,6 +1134,7 @@ def _quick_panel_result(panel, inbounds, group_index):
         health_status=_panel_health_status(panel),
         selected_inbounds=[_inbound_summary(inbound) for inbound in inbounds],
         group_index=group_index,
+        inbound_results=[_quick_inbound_detail(inbound) for inbound in inbounds],
     )
 
 
@@ -914,10 +1148,12 @@ def _safe_quick_panel_result_dict(result):
         "health_status": result.health_status,
         "selected_inbounds": result.selected_inbounds,
         "group_index": result.group_index,
+        "attempted": result.attempted,
         "success": result.success,
         "create_success": result.create_success,
         "create_mode": result.create_mode,
         "link_count": result.link_count,
+        "inbound_results": result.inbound_results,
         "warnings": result.warnings,
         "errors": result.errors,
         "structured_errors": result.structured_errors,
@@ -962,45 +1198,308 @@ def _quick_inventory_link_metadata(asset, allocation, *, pool):
     }
 
 
-def _quick_inventory_result(pool, quantity, group_index):
+def _quick_inventory_result(pool, quantity, group_index, *, selection_mode=INVENTORY_SOURCE_AUTO, selected_asset_ids=None):
     summary = get_pool_stock_summary(pool)
     return {
         "pool_id": pool.pk,
         "pool_title": sanitize_error_value(pool.title),
         "allocation_mode": pool.allocation_mode,
-        "allocation_mode_display": pool.get_allocation_mode_display(),
+        "allocation_mode_display": inventory_allocation_mode_label(pool.allocation_mode),
+        "selection_mode": selection_mode,
+        "selection_mode_display": "انتخاب دستی" if selection_mode == INVENTORY_SOURCE_MANUAL else "برداشت خودکار",
         "requested_quantity": quantity,
-        "available_before": "Unlimited" if summary["available_capacity"] is None else summary["available_capacity"],
+        "selected_asset_count": len(selected_asset_ids or []),
+        "available_before": "نامحدود" if summary["available_capacity"] is None else summary["available_capacity"],
         "asset_count_before": summary["asset_count"],
         "usable_asset_count_before": summary["usable_asset_count"],
         "group_index": group_index,
         "success": False,
         "allocated_count": 0,
         "link_count": 0,
+        "cup_item_count": 0,
+        "rejected_count": 0,
+        "rejection_reasons": [],
+        "asset_results": [
+            {
+                "asset_id": int(asset_id),
+                "pool_id": pool.pk,
+                "pool_title": sanitize_error_value(pool.title),
+                "attempted": False,
+                "allocated": False,
+                "created_cup_item": False,
+                "config_link_created": False,
+                "rejection_reason": "",
+                "error_code": "",
+            }
+            for asset_id in (selected_asset_ids or [])
+        ],
         "warnings": [],
         "errors": [],
         "structured_errors": [],
     }
 
 
+def _quick_error_code(structured_errors, default=""):
+    for structured_error in structured_errors or []:
+        if isinstance(structured_error, dict) and structured_error.get("error_code"):
+            return str(structured_error.get("error_code") or "")
+    return default
+
+
+def _quick_inbound_detail(inbound, *, attempted=False, created=False, error_code="", error=""):
+    return {
+        **_inbound_summary(inbound),
+        "attempted": bool(attempted),
+        "created_cup_item": bool(created),
+        "config_link_created": bool(created),
+        "error_code": error_code,
+        "error": sanitize_error_value(error) if error else "",
+    }
+
+
+def _mark_inbound_details(result, inbounds, *, attempted, created=False, error_code="", error=""):
+    result.inbound_results = [
+        _quick_inbound_detail(
+            inbound,
+            attempted=attempted,
+            created=created,
+            error_code=error_code,
+            error=error,
+        )
+        for inbound in inbounds
+    ]
+
+
+def _link_has_reality_without_public_key(raw_link):
+    raw_link = str(raw_link or "").strip()
+    if not raw_link.lower().startswith("vless://"):
+        return False
+    try:
+        query = parse_qs(urlsplit(raw_link).query, keep_blank_values=True)
+    except ValueError:
+        return False
+    lowered = {str(key).lower(): values for key, values in query.items()}
+    security = next((str(value or "").lower() for value in lowered.get("security", []) if str(value or "").strip()), "")
+    if security != "reality":
+        return False
+    return not any(str(value or "").strip() for value in lowered.get("pbk", []))
+
+
+def _validate_panel_generated_direct_link(raw_link, *, panel, inbound, action):
+    if _link_has_reality_without_public_key(raw_link):
+        structured = _cup_structured_error(
+            error_code="reality_public_key_missing",
+            layer="subscription_render",
+            action=action,
+            message="Reality public key برای ساخت لینک پیدا نشد.",
+            remediation="Reality inbound streamSettings.realitySettings.settings.publicKey یا لینک native پنل را بررسی کنید.",
+            panel=panel,
+            inbound=inbound,
+            safe_context={
+                "security": "reality",
+                "public_key_present": False,
+                "inbound_pk": getattr(inbound, "pk", None),
+                "remote_inbound_id": getattr(inbound, "inbound_id", None),
+            },
+        )
+        _raise_cup_error(
+            CupCenterRemoteCreateError,
+            "Reality public key برای ساخت لینک پیدا نشد.",
+            structured_error=structured,
+        )
+
+
+def _selected_sources_count(inbounds, inventory_selections):
+    count = len(inbounds or [])
+    for selection in inventory_selections or []:
+        if selection.get("mode") == INVENTORY_SOURCE_MANUAL:
+            count += len(selection.get("asset_ids") or [])
+        else:
+            count += int(selection.get("quantity") or 0)
+    return count
+
+
+def _quick_build_input_log_payload(inbounds, groups, inventory_pools, inventory_selections):
+    return {
+        "selected_panel_ids": [group["panel"].pk for group in groups],
+        "selected_inbound_ids": [inbound.pk for inbound in inbounds],
+        "selected_remote_inbound_ids": [getattr(inbound, "inbound_id", None) for inbound in inbounds],
+        "selected_inventory_pool_ids": [pool.pk for pool in inventory_pools],
+        "selected_manual_asset_ids": [
+            int(asset_id)
+            for selection in inventory_selections
+            if selection.get("mode") == INVENTORY_SOURCE_MANUAL
+            for asset_id in (selection.get("asset_ids") or [])
+        ],
+        "requested_auto_pick_quantities": {
+            str(getattr(selection.get("pool"), "pk", "")): int(selection.get("quantity") or 0)
+            for selection in inventory_selections
+            if selection.get("mode") != INVENTORY_SOURCE_MANUAL
+        },
+    }
+
+
+def _log_quick_build_input(inbounds, groups, inventory_pools, inventory_selections):
+    if not (settings.DEBUG or "test" in sys.argv):
+        return
+    logger.debug("quick_builder_selected_sources=%s", _quick_build_input_log_payload(inbounds, groups, inventory_pools, inventory_selections))
+
+
+def _quick_inventory_asset_details(inventory_results):
+    details = []
+    for result in inventory_results or []:
+        for asset_result in result.get("asset_results") or []:
+            details.append(asset_result)
+    return details
+
+
+def _build_quick_reconciliation(*, inbounds, groups, inventory_pools, inventory_selections, panel_results, inventory_results, cup_items, config_links):
+    manual_asset_ids = [
+        int(asset_id)
+        for selection in inventory_selections
+        if selection.get("mode") == INVENTORY_SOURCE_MANUAL
+        for asset_id in (selection.get("asset_ids") or [])
+    ]
+    requested_auto_pick_quantities = {
+        str(getattr(selection.get("pool"), "pk", "")): int(selection.get("quantity") or 0)
+        for selection in inventory_selections
+        if selection.get("mode") != INVENTORY_SOURCE_MANUAL
+    }
+    inbound_details = [
+        detail
+        for panel_result in panel_results
+        for detail in (panel_result.get("inbound_results") or [])
+    ]
+    inventory_asset_details = _quick_inventory_asset_details(inventory_results)
+    panel_links_created = sum(int(panel_result.get("link_count") or 0) for panel_result in panel_results)
+    inventory_manual_allocated = sum(
+        int(result.get("allocated_count") or 0)
+        for result in inventory_results
+        if result.get("selection_mode") == INVENTORY_SOURCE_MANUAL
+    )
+    inventory_auto_allocated = sum(
+        int(result.get("allocated_count") or 0)
+        for result in inventory_results
+        if result.get("selection_mode") != INVENTORY_SOURCE_MANUAL
+    )
+    rejected_manual_assets = sum(
+        int(result.get("rejected_count") or 0)
+        for result in inventory_results
+        if result.get("selection_mode") == INVENTORY_SOURCE_MANUAL
+    )
+    failed_auto_pick_assets = sum(
+        int(result.get("rejected_count") or 0)
+        for result in inventory_results
+        if result.get("selection_mode") != INVENTORY_SOURCE_MANUAL
+    )
+    failed_inbounds = sum(1 for detail in inbound_details if detail.get("attempted") and not detail.get("created_cup_item"))
+    failed_panel_groups = sum(1 for panel_result in panel_results if panel_result.get("attempted") and not panel_result.get("success"))
+    skipped_invalid_links = sum(
+        1
+        for detail in [*inbound_details, *inventory_asset_details]
+        if detail.get("error_code") in {"unsupported_config_protocol", "reality_public_key_missing"}
+    )
+    selected_sources = _selected_sources_count(inbounds, inventory_selections)
+    failed_rejected_skipped = failed_inbounds + rejected_manual_assets + failed_auto_pick_assets
+    created_items = len(cup_items)
+    if selected_sources > 0 and created_items == 0:
+        status = QUICK_STATUS_FAILED
+        summary_message = "این Cup لینک قابل تحویل ندارد."
+        customer_link_warning = summary_message
+    elif created_items > 0 and failed_rejected_skipped > 0:
+        status = QUICK_STATUS_PARTIAL
+        summary_message = f"از {persian_digits(selected_sources)} منبع انتخاب‌شده، فقط {persian_digits(created_items)} کانفیگ وارد Cup شد."
+        customer_link_warning = "این Cup ناقص ساخته شده است."
+    else:
+        status = QUICK_STATUS_SUCCESS
+        summary_message = "همه منابع انتخاب‌شده وارد Cup شدند."
+        customer_link_warning = ""
+    return QuickBuildReconciliation(
+        selected_panel_ids=[group["panel"].pk for group in groups],
+        selected_inbound_ids=[inbound.pk for inbound in inbounds],
+        selected_inventory_pool_ids=[pool.pk for pool in inventory_pools],
+        selected_manual_asset_ids=manual_asset_ids,
+        requested_auto_pick_quantities=requested_auto_pick_quantities,
+        attempted_panel_groups=sum(1 for panel_result in panel_results if panel_result.get("attempted")),
+        attempted_inbounds=sum(1 for detail in inbound_details if detail.get("attempted")),
+        attempted_manual_assets=sum(
+            int(result.get("requested_quantity") or 0)
+            for result in inventory_results
+            if result.get("selection_mode") == INVENTORY_SOURCE_MANUAL
+        ),
+        attempted_auto_pick_assets=sum(
+            int(result.get("requested_quantity") or 0)
+            for result in inventory_results
+            if result.get("selection_mode") != INVENTORY_SOURCE_MANUAL
+        ),
+        panel_links_created=panel_links_created,
+        inventory_manual_allocated=inventory_manual_allocated,
+        inventory_auto_allocated=inventory_auto_allocated,
+        cup_items_created=created_items,
+        config_links_created_or_reused=len(config_links),
+        failed_panel_groups=failed_panel_groups,
+        failed_inbounds=failed_inbounds,
+        rejected_manual_assets=rejected_manual_assets,
+        failed_auto_pick_assets=failed_auto_pick_assets,
+        skipped_invalid_links=skipped_invalid_links,
+        selected_sources_count=selected_sources,
+        failed_rejected_skipped_count=failed_rejected_skipped,
+        status=status,
+        summary_message=summary_message,
+        customer_link_available=created_items > 0,
+        customer_link_warning=customer_link_warning,
+        panel_group_details=panel_results,
+        inbound_details=inbound_details,
+        inventory_asset_details=inventory_asset_details,
+    )
+
+
+def _inventory_selections_from_request_data(request_data, inventory_pools, inventory_quantity):
+    explicit_selections = list(request_data.get("inventory_selections") or [])
+    if explicit_selections:
+        return explicit_selections
+    return [
+        {
+            "pool": pool,
+            "mode": INVENTORY_SOURCE_AUTO,
+            "quantity": inventory_quantity,
+            "asset_ids": [],
+        }
+        for pool in inventory_pools
+    ]
+
+
 def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, adapter_factory=None, request=None):
     inbounds = list(request_data.get("inbounds") or [])
     inventory_pools = list(request_data.get("inventory_pools") or [])
     inventory_quantity = int(request_data.get("inventory_quantity") or 1)
+    inventory_selections = _inventory_selections_from_request_data(request_data, inventory_pools, inventory_quantity)
     if not inbounds and not inventory_pools:
-        message = "حداقل یک Inbound یا یک استخر کانفیگ آماده انتخاب کنید."
+        message = "حداقل یک اینباند یا یک مخزن کانفیگ آماده انتخاب کنید."
         structured = _cup_structured_error(
             error_code="quick_builder_source_required",
             layer="cup_builder",
             action="validate_quick_builder",
             message=message,
-            remediation="از بخش منابع پنل یک Inbound یا از بخش استخرها یک Pool انتخاب کنید.",
+            remediation="از بخش منابع پنل یک اینباند یا از بخش مخزن‌های کانفیگ یک مخزن انتخاب کنید.",
         )
         _raise_cup_error(CupCenterValidationError, message, structured_error=structured)
     adapter_factory = adapter_factory or get_safe_panel_adapter
-    groups = _validated_quick_build_groups(inbounds, adapter_factory) if inbounds else []
+    groups = _group_quick_build_inbounds(inbounds) if inbounds else []
+    _log_quick_build_input(inbounds, groups, inventory_pools, inventory_selections)
     selected_inbounds = [_inbound_summary(inbound) for inbound in inbounds]
-    selected_inventory_pools = [_inventory_pool_summary(pool) for pool in inventory_pools]
+    selected_inventory_pools = []
+    for selection in inventory_selections:
+        pool = selection["pool"]
+        selected_inventory_pools.append(
+            {
+                **_inventory_pool_summary(pool),
+                "selection_mode": selection.get("mode") or INVENTORY_SOURCE_AUTO,
+                "selection_mode_display": "انتخاب دستی" if selection.get("mode") == INVENTORY_SOURCE_MANUAL else "برداشت خودکار",
+                "requested_quantity": selection.get("quantity") or len(selection.get("asset_ids") or []),
+                "selected_asset_count": len(selection.get("asset_ids") or []),
+            }
+        )
     panel_results = []
     inventory_results = []
     config_links = []
@@ -1023,6 +1522,15 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
                 "inbound_pks": [inbound.pk for inbound in inbounds],
                 "inventory_pool_ids": [pool.pk for pool in inventory_pools],
                 "inventory_quantity_per_pool": inventory_quantity,
+                "inventory_selections": [
+                    {
+                        "pool_id": getattr(selection.get("pool"), "pk", None),
+                        "mode": selection.get("mode"),
+                        "quantity": selection.get("quantity"),
+                        "asset_ids": list(selection.get("asset_ids") or []),
+                    }
+                    for selection in inventory_selections
+                ],
                 "volume_gb": str(request_data.get("volume_gb") or ""),
                 "duration_days": int(request_data.get("duration_days") or 30),
                 "admin_user_id": getattr(admin_user, "pk", None),
@@ -1034,10 +1542,26 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
     for group_index, group in enumerate(groups, start=1):
         panel = group["panel"]
         group_inbounds = group["inbounds"]
-        adapter = group["adapter"]
         result = _quick_panel_result(panel, group_inbounds, group_index)
+        result.attempted = True
+        _mark_inbound_details(result, group_inbounds, attempted=True)
         result.create_mode = "multi_inbound" if len(group_inbounds) > 1 else "single_inbound"
         try:
+            adapter = adapter_factory(panel)
+            try:
+                report = adapter.get_capability_report()
+            except Exception as exc:
+                structured = safe_error_dict(
+                    exc,
+                    error_code="capability_detection_failed",
+                    layer="capability_detection",
+                    action="detect_capabilities",
+                    message="خواندن قابلیت‌های پنل برای Quick Builder ناموفق بود.",
+                    remediation="از Panel Center گزینه Test connection / Sync capabilities را اجرا کنید.",
+                    panel=panel,
+                )
+                raise CupCenterValidationError(_safe_panel_error(exc, panel=panel), structured_error=structured) from exc
+            _validate_quick_build_panel_group(panel, group_inbounds, report=report)
             remote_result = _remote_create_for_quick_build(panel, group_inbounds, request_data, adapter)
             result.create_success = True
             entries = _direct_link_entries_from_remote(remote_result, group_inbounds)
@@ -1058,7 +1582,15 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
                     },
                 )
                 raise CupCenterRemoteCreateError(message, structured_error=structured)
+            for entry in entries:
+                _validate_panel_generated_direct_link(
+                    entry["direct_link"],
+                    panel=panel,
+                    inbound=entry["inbound"],
+                    action=result.create_mode,
+                )
 
+            created_inbound_pks = set()
             with transaction.atomic():
                 for entry in entries:
                     inbound = entry["inbound"]
@@ -1086,14 +1618,27 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
                     )
                     config_links.append(config_link)
                     cup_items.append(cup_item)
+                    created_inbound_pks.add(inbound.pk)
                     position += 1
             result.success = True
             result.link_count = len(entries)
+            result.inbound_results = [
+                _quick_inbound_detail(inbound, attempted=True, created=inbound.pk in created_inbound_pks)
+                for inbound in group_inbounds
+            ]
             created_remote_client_groups_count += 1
+        except CupCenterValidationError as exc:
+            result.errors.append(str(exc))
+            if getattr(exc, "structured_error", None):
+                result.structured_errors.append(exc.structured_error)
+            error_code = _quick_error_code(result.structured_errors, "quick_builder_validation_failed")
+            _mark_inbound_details(result, group_inbounds, attempted=True, created=False, error_code=error_code, error=str(exc))
         except (CupCenterRemoteCreateError, CupCenterRemoteSaveError) as exc:
             result.errors.append(str(exc))
             if getattr(exc, "structured_error", None):
                 result.structured_errors.append(exc.structured_error)
+            error_code = _quick_error_code(result.structured_errors, "cup_remote_create_failed")
+            _mark_inbound_details(result, group_inbounds, attempted=True, created=False, error_code=error_code, error=str(exc))
         except Exception as exc:
             result.errors.append(_safe_panel_error(exc, panel=panel))
             result.structured_errors.append(
@@ -1108,45 +1653,84 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
                     inbound=group_inbounds[0] if group_inbounds else None,
                 )
             )
+            error_code = _quick_error_code(result.structured_errors, "cup_remote_create_failed")
+            _mark_inbound_details(result, group_inbounds, attempted=True, created=False, error_code=error_code, error=_safe_panel_error(exc, panel=panel))
         panel_results.append(_safe_quick_panel_result_dict(result))
 
-    for pool_index, pool in enumerate(inventory_pools, start=1):
-        result = _quick_inventory_result(pool, inventory_quantity, pool_index)
+    for pool_index, selection in enumerate(inventory_selections, start=1):
+        pool = selection["pool"]
+        selection_mode = selection.get("mode") or INVENTORY_SOURCE_AUTO
+        selected_asset_ids = list(selection.get("asset_ids") or [])
+        requested_quantity = len(selected_asset_ids) if selection_mode == INVENTORY_SOURCE_MANUAL else int(selection.get("quantity") or inventory_quantity)
+        result = _quick_inventory_result(
+            pool,
+            requested_quantity,
+            pool_index,
+            selection_mode=selection_mode,
+            selected_asset_ids=selected_asset_ids,
+        )
+        for asset_result in result["asset_results"]:
+            asset_result["attempted"] = True
         try:
             with transaction.atomic():
-                allocation_result = allocate_assets_from_pool(pool, inventory_quantity, cup=cup)
-                for asset, allocation in zip(allocation_result.assets, allocation_result.allocations, strict=False):
-                    config_link = create_config_link_from_raw(
-                        asset.raw_link,
-                        source_type=ConfigLink.SourceType.IMPORTED_SUBSCRIPTION,
-                        metadata={**_quick_inventory_link_metadata(asset, allocation, pool=pool), "cup_id": cup.pk},
-                    )
-                    cup_item = CupItem.objects.create(
-                        cup=cup,
-                        config_link=config_link,
-                        position=position,
-                        is_active=True,
-                        added_reason="quick_builder_inventory",
-                        metadata={
-                            "source": "quick_builder_inventory_pool",
-                            "generated_by": "quick_builder_multi_panel",
-                            "pool_id": pool.pk,
-                            "asset_id": asset.pk,
-                            "allocation_id": allocation.pk,
-                            "allocation_mode": allocation.allocation_mode,
-                            "group_index": pool_index,
-                        },
-                    )
-                    config_links.append(config_link)
-                    cup_items.append(cup_item)
-                    position += 1
-                result["success"] = True
+                if selection_mode == INVENTORY_SOURCE_MANUAL:
+                    allocation_result = allocate_selected_assets_from_pool(pool, selected_asset_ids, cup=cup)
+                    added_reason = "quick_builder_inventory_manual"
+                else:
+                    allocation_result = allocate_assets_from_pool(pool, requested_quantity, cup=cup)
+                    added_reason = "quick_builder_inventory"
+                pool_config_links, pool_cup_items = _create_cup_items_from_inventory_allocation(
+                    cup,
+                    allocation_result,
+                    added_reason=added_reason,
+                    source="quick_builder_inventory_pool",
+                    group_index=pool_index,
+                    item_metadata={
+                        "generated_by": "quick_builder_multi_panel",
+                        "selection_mode": selection_mode,
+                    },
+                )
                 result["allocated_count"] = allocation_result.allocated_count
-                result["link_count"] = allocation_result.allocated_count
+                result["link_count"] = len(pool_config_links)
+                result["cup_item_count"] = len(pool_cup_items)
+                result["rejected_count"] = max(requested_quantity - len(pool_cup_items), 0)
+                result["asset_results"] = [
+                    {
+                        "asset_id": asset.pk,
+                        "pool_id": pool.pk,
+                        "pool_title": sanitize_error_value(pool.title),
+                        "attempted": True,
+                        "allocated": True,
+                        "created_cup_item": index < len(pool_cup_items),
+                        "config_link_created": index < len(pool_config_links),
+                        "rejection_reason": "" if index < len(pool_cup_items) else INVENTORY_NO_CUPITEM_ERROR,
+                        "error_code": "" if index < len(pool_cup_items) else "config_inventory_no_cup_item_created",
+                    }
+                    for index, asset in enumerate(allocation_result.assets)
+                ]
+                if requested_quantity and not pool_cup_items:
+                    message = MANUAL_INVENTORY_NO_CUPITEM_ERROR if selection_mode == INVENTORY_SOURCE_MANUAL else INVENTORY_NO_CUPITEM_ERROR
+                    raise CupCenterError(message)
+                if selection_mode == INVENTORY_SOURCE_MANUAL and len(pool_cup_items) != requested_quantity:
+                    raise CupCenterError(MANUAL_INVENTORY_NO_CUPITEM_ERROR)
+                config_links.extend(pool_config_links)
+                cup_items.extend(pool_cup_items)
+                result["success"] = True
                 inventory_allocation_count += allocation_result.allocated_count
         except ConfigInventoryError as exc:
-            message = sanitize_error_value(getattr(exc, "safe_message", str(exc)))
+            if getattr(exc, "code", "") == "insufficient_stock":
+                message = "موجودی مخزن کانفیگ برای تعداد درخواستی کافی نیست."
+                requested = getattr(exc, "requested", requested_quantity)
+                available = getattr(exc, "available", "-")
+                message = f"{message} تعداد درخواستی: {requested}، موجودی: {available}."
+            else:
+                message = sanitize_error_value(getattr(exc, "safe_message", str(exc)))
+            result["allocated_count"] = 0
+            result["link_count"] = 0
+            result["cup_item_count"] = 0
             result["errors"].append(message)
+            result["rejected_count"] = requested_quantity
+            result["rejection_reasons"].append(message)
             result["structured_errors"].append(
                 _cup_structured_error(
                     exc,
@@ -1154,27 +1738,92 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
                     layer="inventory_allocation",
                     action="allocate_inventory_pool",
                     message=message,
-                    remediation="موجودی استخر، فعال بودن Pool و مقدار درخواستی را بررسی کنید.",
+                    remediation="موجودی مخزن کانفیگ، فعال بودن مخزن و مقدار درخواستی را بررسی کنید.",
                     safe_context={
                         "pool_id": pool.pk,
                         "pool_title": sanitize_error_value(pool.title),
-                        "requested_quantity": inventory_quantity,
+                        "requested_quantity": requested_quantity,
+                        "selection_mode": selection_mode,
                     },
                 )
             )
+            error_code = f"config_inventory_{getattr(exc, 'code', 'allocation_failed')}"
+            for asset_result in result["asset_results"]:
+                asset_result.update(
+                    {
+                        "attempted": True,
+                        "allocated": False,
+                        "created_cup_item": False,
+                        "config_link_created": False,
+                        "rejection_reason": message,
+                        "error_code": error_code,
+                    }
+                )
+        except CupCenterError as exc:
+            message = str(exc) or INVENTORY_NO_CUPITEM_ERROR
+            error_code = getattr(exc, "code", "") or "config_inventory_no_cup_item_created"
+            result["allocated_count"] = 0
+            result["link_count"] = 0
+            result["cup_item_count"] = 0
+            result["errors"].append(message)
+            result["rejected_count"] = requested_quantity
+            result["rejection_reasons"].append(message)
+            result["structured_errors"].append(
+                _cup_structured_error(
+                    exc,
+                    error_code=error_code,
+                    layer="inventory_allocation",
+                    action="create_inventory_cup_items",
+                    message=message,
+                    remediation="انتخاب‌ها، ظرفیت کانفیگ‌ها و صحت raw_linkهای مخزن را بررسی کنید.",
+                    safe_context={
+                        "pool_id": pool.pk,
+                        "pool_title": sanitize_error_value(pool.title),
+                        "requested_quantity": requested_quantity,
+                        "selection_mode": selection_mode,
+                    },
+                )
+            )
+            for asset_result in result["asset_results"]:
+                asset_result.update(
+                    {
+                        "attempted": True,
+                        "allocated": False,
+                        "created_cup_item": False,
+                        "config_link_created": False,
+                        "rejection_reason": message,
+                        "error_code": error_code,
+                    }
+                )
         except Exception as exc:
             message = sanitize_error_value(exc)
+            result["allocated_count"] = 0
+            result["link_count"] = 0
+            result["cup_item_count"] = 0
             result["errors"].append(message)
+            result["rejected_count"] = requested_quantity
+            result["rejection_reasons"].append(message)
             result["structured_errors"].append(
                 safe_error_dict(
                     exc,
                     error_code="config_inventory_allocation_failed",
                     layer="inventory_allocation",
                     action="allocate_inventory_pool",
-                    message="تخصیص کانفیگ از استخر برای Quick Builder ناموفق بود.",
-                    remediation="موجودی استخر و سلامت لینک‌های واردشده را بررسی کنید و دوباره تلاش کنید.",
+                    message="تخصیص کانفیگ از مخزن کانفیگ برای Quick Builder ناموفق بود.",
+                    remediation="موجودی مخزن کانفیگ و سلامت لینک‌های واردشده را بررسی کنید و دوباره تلاش کنید.",
                 )
             )
+            for asset_result in result["asset_results"]:
+                asset_result.update(
+                    {
+                        "attempted": True,
+                        "allocated": False,
+                        "created_cup_item": False,
+                        "config_link_created": False,
+                        "rejection_reason": message,
+                        "error_code": "config_inventory_allocation_failed",
+                    }
+                )
         inventory_results.append(result)
 
     panel_errors = [error for panel_result in panel_results for error in panel_result.get("errors", [])]
@@ -1192,12 +1841,29 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
     warnings = [warning for panel_result in panel_results for warning in panel_result.get("warnings", [])] + [
         warning for inventory_result in inventory_results for warning in inventory_result.get("warnings", [])
     ]
-    if errors and config_links:
-        status = "partial_success"
-    elif errors:
-        status = "failed"
-    else:
-        status = "success"
+    reconciliation = _build_quick_reconciliation(
+        inbounds=inbounds,
+        groups=groups,
+        inventory_pools=inventory_pools,
+        inventory_selections=inventory_selections,
+        panel_results=panel_results,
+        inventory_results=inventory_results,
+        cup_items=cup_items,
+        config_links=config_links,
+    )
+    reconciliation_dict = reconciliation.to_dict()
+    if reconciliation.selected_manual_asset_ids and reconciliation.inventory_manual_allocated == 0 and MANUAL_INVENTORY_NO_CUPITEM_ERROR not in errors:
+        errors.append(MANUAL_INVENTORY_NO_CUPITEM_ERROR)
+    if not cup_items and not errors:
+        errors.append(INVENTORY_NO_CUPITEM_ERROR if inventory_pools else "هیچ لینک موفقی داخل Cup ذخیره نشد.")
+    if reconciliation.status == QUICK_STATUS_PARTIAL and reconciliation.summary_message not in warnings:
+        warnings.insert(0, reconciliation.summary_message)
+    if reconciliation.status == QUICK_STATUS_FAILED and reconciliation.summary_message not in errors:
+        errors.insert(0, reconciliation.summary_message)
+    if reconciliation.customer_link_warning and reconciliation.status == QUICK_STATUS_PARTIAL and reconciliation.customer_link_warning not in warnings:
+        warnings.insert(1, reconciliation.customer_link_warning)
+    status = reconciliation.status
+    panel_generated_count = reconciliation.panel_links_created
 
     SubscriptionCup.objects.filter(pk=cup.pk).update(
         metadata={
@@ -1208,10 +1874,12 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
             "selected_inbound_count": len(inbounds),
             "selected_inventory_pool_count": len(inventory_pools),
             "created_remote_client_groups_count": created_remote_client_groups_count,
+            "panel_generated_count": panel_generated_count,
             "inventory_allocation_count": inventory_allocation_count,
             "config_link_count": len(config_links),
             "panel_results": panel_results,
             "inventory_results": inventory_results,
+            "reconciliation": reconciliation_dict,
             "updated_at": timezone.now().isoformat(),
         }
     )
@@ -1235,6 +1903,7 @@ def quick_build_multi_panel_subscription_cup(request_data, admin_user=None, *, a
         config_link_count=len(config_links),
         panel_results=panel_results,
         inventory_results=inventory_results,
+        reconciliation=reconciliation_dict,
         warnings=warnings,
         errors=errors,
         structured_errors=structured_errors,
@@ -1281,6 +1950,171 @@ def set_cup_item_active(cup, item_id, is_active):
     item.is_active = bool(is_active)
     item.save(update_fields=["is_active", "updated_at"])
     return item
+
+
+def update_cup_item_display_name(cup, item_id, display_name):
+    item = CupItem.objects.select_related("config_link").get(cup=cup, pk=item_id)
+    config_link = item.config_link
+    config_link.remark = str(display_name or "").strip()[:255]
+    config_link.save(update_fields=["remark", "updated_at"])
+    return item
+
+
+def _item_inventory_identity(item):
+    metadata_sources = [item.metadata or {}]
+    config_link = getattr(item, "config_link", None)
+    if config_link:
+        metadata_sources.append(config_link.metadata or {})
+    for metadata in metadata_sources:
+        allocation_id = metadata.get("allocation_id")
+        asset_id = metadata.get("asset_id")
+        if allocation_id or asset_id:
+            return allocation_id, asset_id
+    return None, None
+
+
+def release_inventory_allocation_for_cup_item(item):
+    allocation_id, asset_id = _item_inventory_identity(item)
+    if not allocation_id and not asset_id:
+        return 0
+    allocations = ConfigAllocation.objects.filter(cup=item.cup, status=ConfigAllocation.Status.ACTIVE)
+    if allocation_id:
+        allocations = allocations.filter(pk=allocation_id)
+    elif asset_id:
+        allocations = allocations.filter(asset_id=asset_id)
+    released_count = 0
+    with transaction.atomic():
+        for allocation in allocations.select_for_update().select_related("asset"):
+            allocation.status = ConfigAllocation.Status.RELEASED
+            allocation.released_at = timezone.now()
+            allocation.save(update_fields=["status", "released_at", "updated_at"])
+            asset = ConfigInventoryAsset.objects.select_for_update().get(pk=allocation.asset_id)
+            asset.current_allocations = max(int(asset.current_allocations or 0) - 1, 0)
+            has_active_allocations = ConfigAllocation.objects.filter(asset=asset, status=ConfigAllocation.Status.ACTIVE).exists()
+            if not has_active_allocations and asset.status == ConfigInventoryAsset.Status.ASSIGNED:
+                asset.status = ConfigInventoryAsset.Status.AVAILABLE
+                asset.save(update_fields=["status", "current_allocations", "updated_at"])
+            else:
+                asset.save(update_fields=["current_allocations", "updated_at"])
+            released_count += 1
+    return released_count
+
+
+def remove_cup_item(cup, item_id):
+    item = CupItem.objects.select_related("config_link").get(cup=cup, pk=item_id)
+    release_inventory_allocation_for_cup_item(item)
+    item.delete()
+    return item
+
+
+def replace_cup_item_config_link(cup, item_id, config_link_id):
+    item = CupItem.objects.select_related("config_link").get(cup=cup, pk=item_id)
+    try:
+        config_link_id = int(config_link_id)
+    except (TypeError, ValueError) as exc:
+        raise CupCenterError("شناسه ConfigLink جایگزین معتبر نیست.") from exc
+    config_link = ConfigLink.objects.get(pk=config_link_id)
+    release_inventory_allocation_for_cup_item(item)
+    item.config_link = config_link
+    item.metadata = {
+        **(item.metadata or {}),
+        "source": "cup_center_replace_config_link",
+        "replaced_at": timezone.now().isoformat(),
+        "replacement_config_link_id": config_link.pk,
+    }
+    item.save(update_fields=["config_link", "metadata", "updated_at"])
+    return item
+
+
+def _create_cup_items_from_inventory_allocation(cup, allocation_result, *, added_reason, source, group_index=None, item_metadata=None):
+    config_links = []
+    cup_items = []
+    position = _next_position(cup)
+    pool = allocation_result.pool
+    if len(allocation_result.assets) != len(allocation_result.allocations):
+        raise CupCenterError(INVENTORY_NO_CUPITEM_ERROR)
+    for asset, allocation in zip(allocation_result.assets, allocation_result.allocations, strict=False):
+        parsed = parse_config_link(asset.raw_link)
+        if parsed.protocol == ConfigLink.Protocol.UNKNOWN:
+            raise CupCenterError("لینک خام کانفیگ مخزن قابل شناسایی نیست.", code="unsupported_config_protocol")
+        if _link_has_reality_without_public_key(asset.raw_link):
+            raise CupCenterError("Reality public key برای لینک مخزن پیدا نشد.", code="reality_public_key_missing")
+        config_link = create_config_link_from_raw(
+            asset.raw_link,
+            source_type=ConfigLink.SourceType.IMPORTED_SUBSCRIPTION,
+            metadata={**_quick_inventory_link_metadata(asset, allocation, pool=pool), "cup_id": cup.pk, "source": source},
+        )
+        cup_item = CupItem.objects.create(
+            cup=cup,
+            config_link=config_link,
+            position=position,
+            is_active=True,
+            added_reason=added_reason,
+            metadata={
+                "source": source,
+                "pool_id": pool.pk,
+                "asset_id": asset.pk,
+                "allocation_id": allocation.pk,
+                "allocation_mode": allocation.allocation_mode,
+                "group_index": group_index,
+                **(item_metadata or {}),
+            },
+        )
+        config_links.append(config_link)
+        cup_items.append(cup_item)
+        position += 1
+    if allocation_result.allocated_count != len(cup_items):
+        raise CupCenterError(INVENTORY_NO_CUPITEM_ERROR)
+    return config_links, cup_items
+
+
+def _inventory_error_message(exc):
+    safe_message = str(getattr(exc, "safe_message", exc))
+    error_code = str(getattr(exc, "code", "") or "").strip()
+    return f"{error_code}: {safe_message}" if error_code else safe_message
+
+
+def add_inventory_assets_to_cup(cup, pool, asset_ids):
+    requested_ids = [value for value in asset_ids or [] if str(value).strip()]
+    result = AddInventoryAssetsResult(requested_count=len(requested_ids), pool_title=str(pool or ""))
+    if not requested_ids:
+        result.warnings.append("هیچ کانفیگی انتخاب نشده بود.")
+        return result
+    try:
+        with transaction.atomic():
+            allocation_result = allocate_selected_assets_from_pool(pool, requested_ids, cup=cup)
+            config_links, cup_items = _create_cup_items_from_inventory_allocation(
+                cup,
+                allocation_result,
+                added_reason="cup_center_inventory_manual",
+                source="cup_center_inventory_manual",
+            )
+    except ConfigInventoryError as exc:
+        message = _inventory_error_message(exc)
+        result.rejected_count = result.requested_count
+        result.errors.append(message)
+        result.rejection_reasons.append(message)
+        return result
+    except CupCenterError as exc:
+        message = str(exc) or INVENTORY_NO_CUPITEM_ERROR
+        result.rejected_count = result.requested_count
+        result.errors.append(message)
+        result.rejection_reasons.append(message)
+        return result
+    result.pool_title = allocation_result.pool.title
+    result.allocated_count = allocation_result.allocated_count
+    result.created_count = len(config_links)
+    result.added_count = len(cup_items)
+    result.cup_item_count = len(cup_items)
+    result.rejected_count = max(result.requested_count - result.added_count, 0)
+    if result.requested_count and not result.added_count:
+        result.errors.append(INVENTORY_NO_CUPITEM_ERROR)
+        result.rejection_reasons.append(INVENTORY_NO_CUPITEM_ERROR)
+    elif result.rejected_count:
+        reason = f"{result.rejected_count} کانفیگ انتخاب‌شده به Cup اضافه نشد."
+        result.warnings.append(reason)
+        result.rejection_reasons.append(reason)
+    return result
 
 
 def move_cup_item(cup, item_id, direction):

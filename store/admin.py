@@ -158,8 +158,14 @@ from .plan_route_services import (
     preview_bulk_plan_routes,
 )
 from .admin_config_inventory import config_inventory_import, fulfillment_recipe_preview
-from .config_inventory_services import get_pool_stock_summary
-from .subscription_cups import apply_config_link_parse, build_subscription_cup_url, mask_config_link_for_display, mask_subscription_url, parse_config_link
+from .config_inventory_services import (
+    config_allocation_status_label,
+    get_pool_stock_summary,
+    inventory_allocation_mode_label,
+    inventory_asset_status_label,
+)
+from .plan_fulfillment_services import plan_fulfillment_status_for_plan
+from .subscription_cups import build_subscription_cup_url, mask_config_link_for_display, mask_subscription_url, parse_config_link
 from .xui_api import mask_xui_value, sync_inbound_data
 
 
@@ -1880,7 +1886,41 @@ class PlanAdmin(ImportExportModelAdmin):
         "catalog_inbound_destination",
         "routing_builder_link",
         "quick_review_link",
+        "fulfillment_status_badge",
         "fulfillment_recipe_actions",
+    )
+    readonly_fields = ("fulfillment_recipe_summary",)
+    fieldsets = (
+        (
+            _("Plan"),
+            {
+                "fields": (
+                    "store",
+                    "operators",
+                    "name",
+                    "slug",
+                    "description",
+                    "volume_gb",
+                    "duration_days",
+                    "price",
+                    "currency",
+                    "device_limit",
+                )
+            },
+        ),
+        (
+            _("Sales"),
+            {
+                "fields": (
+                    "is_active",
+                    "is_public",
+                    "is_custom_volume",
+                    "sort_order",
+                    "multi_inbound_bundle",
+                )
+            },
+        ),
+        (_("تحویل خودکار ساب"), {"fields": ("fulfillment_recipe_summary",)}),
     )
     list_filter = (
         "store",
@@ -1975,30 +2015,84 @@ class PlanAdmin(ImportExportModelAdmin):
         url = reverse("admin_store_panel_center_routing_detail", args=[obj.pk])
         return format_html('<a class="button" href="{}">{}</a>', url, _("تنظیم مسیر"))
 
+    @admin.display(description=_("تحویل خودکار ساب"))
+    def fulfillment_status_badge(self, obj):
+        status = plan_fulfillment_status_for_plan(obj)
+        css = {
+            "success": "bg-success",
+            "warning": "bg-warning text-dark",
+            "danger": "bg-danger",
+            "slate": "bg-secondary",
+        }.get(status["status_tone"], "bg-secondary")
+        return format_html('<span class="badge {}">{}</span>', css, status["status_label"])
+
     @admin.display(description=_("Cup fulfillment"))
     def fulfillment_recipe_actions(self, obj):
-        add_url = f"{reverse('admin:store_cupfulfillmentrecipe_add')}?{urlencode({'plan': obj.pk})}"
+        setup_url = reverse("admin_store_plan_fulfillment_plan", args=[obj.pk])
         recipe = obj.cup_fulfillment_recipes.filter(is_active=True).order_by("priority", "pk").first()
-        create_button = format_html(
+        setup_button = format_html(
             '<a class="button" href="{}">{}</a>',
-            add_url,
-            _("ساخت دستور پر کردن Cup برای این پلن"),
+            setup_url,
+            _("تنظیم تحویل ساب"),
         )
         if recipe:
-            preview_url = reverse("admin:store_cupfulfillmentrecipe_preview", args=[recipe.pk])
+            preview_url = reverse("admin_store_plan_fulfillment_recipe_preview", args=[recipe.pk])
+            simulate_url = reverse("admin_store_plan_fulfillment_recipe_simulate", args=[recipe.pk])
             preview_button = format_html(
                 ' <a class="button" href="{}">{}</a>',
                 preview_url,
                 _("پیش‌نمایش دستور تحویل"),
             )
-            return format_html("{}{}", create_button, preview_button)
-        recipe_list_url = f"{reverse('admin:store_cupfulfillmentrecipe_changelist')}?{urlencode({'plan__id__exact': obj.pk})}"
-        list_button = format_html(
+            simulate_button = format_html(
+                ' <a class="button" href="{}">{}</a>',
+                simulate_url,
+                _("تست شبیه‌سازی"),
+            )
+            return format_html("{}{}{}", setup_button, preview_button, simulate_button)
+        add_url = f"{reverse('admin:store_cupfulfillmentrecipe_add')}?{urlencode({'plan': obj.pk})}"
+        create_button = format_html(
             ' <a class="button" href="{}">{}</a>',
-            recipe_list_url,
-            _("دستورهای این پلن"),
+            add_url,
+            _("ساخت Recipe جدید"),
         )
-        return format_html("{}{}", create_button, list_button)
+        return format_html("{}{}", setup_button, create_button)
+
+    @admin.display(description=_("خلاصه تحویل خودکار"))
+    def fulfillment_recipe_summary(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        status = plan_fulfillment_status_for_plan(obj)
+        setup_url = reverse("admin_store_plan_fulfillment_plan", args=[obj.pk])
+        if not status["recipe"]:
+            return format_html(
+                '<div><span class="badge bg-secondary">{}</span></div><p><a class="button" href="{}">{}</a></p>',
+                _("بدون تحویل خودکار"),
+                setup_url,
+                _("تنظیم تحویل ساب"),
+            )
+        recipe = status["recipe"]
+        readiness = status["readiness"] or {}
+        preview_url = reverse("admin_store_plan_fulfillment_recipe_preview", args=[recipe.pk])
+        simulate_url = reverse("admin_store_plan_fulfillment_recipe_simulate", args=[recipe.pk])
+        return format_html(
+            '<div><span class="badge bg-info">{}</span> <strong>{}</strong></div>'
+            '<div>{}: {} · {}: {} · {}: {}</div>'
+            '<p><a class="button" href="{}">{}</a> <a class="button" href="{}">{}</a> <a class="button" href="{}">{}</a></p>',
+            status["status_label"],
+            recipe.title,
+            _("منبع پنل"),
+            readiness.get("panel_source_count", 0),
+            _("مخزن"),
+            readiness.get("inventory_pool_count", 0),
+            _("کانفیگ مورد انتظار"),
+            readiness.get("expected_config_count", 0),
+            setup_url,
+            _("تنظیم تحویل ساب"),
+            preview_url,
+            _("پیش‌نمایش دستور تحویل"),
+            simulate_url,
+            _("تست شبیه‌سازی"),
+        )
 
     def get_queryset(self, request):
         return (
@@ -2381,6 +2475,7 @@ class PanelAdmin(ImportExportModelAdmin):
         "panel_center_link",
         "latest_health_details",
         "inbounds_link",
+        "plan_fulfillment_links",
         "compatibility_metadata_summary",
         "created_at",
         "updated_at",
@@ -2411,7 +2506,7 @@ class PanelAdmin(ImportExportModelAdmin):
         (
             _("Operations"),
             {
-                "fields": ("panel_center_link", "inbounds_link", "latest_health_details", "last_sync_at", "created_at", "updated_at"),
+                "fields": ("panel_center_link", "inbounds_link", "plan_fulfillment_links", "latest_health_details", "last_sync_at", "created_at", "updated_at"),
             },
         ),
         (
@@ -2454,7 +2549,7 @@ class PanelAdmin(ImportExportModelAdmin):
             (
                 _("Operations"),
                 {
-                    "fields": ("inbounds_link", "latest_health_details", "last_sync_at", "created_at", "updated_at"),
+                    "fields": ("inbounds_link", "plan_fulfillment_links", "latest_health_details", "last_sync_at", "created_at", "updated_at"),
                 },
             ),
         )
@@ -2484,6 +2579,25 @@ class PanelAdmin(ImportExportModelAdmin):
             return _("Save first to open Panel Center.")
         url = reverse("admin_store_panel_center_detail", args=[obj.pk])
         return format_html('<a class="button" href="{}">{}</a>', url, _("مرکز اتصال پنل"))
+
+    @admin.display(description=_("تحویل خودکار پلن"))
+    def plan_fulfillment_links(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        add_url = f"{reverse('admin:store_cupfillerrule_add')}?{urlencode({'source_type': CupFillerRule.SourceType.PANEL_INBOUNDS, 'panel': obj.pk})}"
+        rules_url = f"{reverse('admin:store_cupfillerrule_changelist')}?{urlencode({'panel__id__exact': obj.pk})}"
+        readiness_url = reverse("admin_store_panel_center_test", args=[obj.pk])
+        return format_html(
+            '<a class="button" href="{}">{}</a> '
+            '<a class="button" href="{}">{}</a> '
+            '<a class="button" href="{}">{}</a>',
+            add_url,
+            _("استفاده در Recipe پلن"),
+            rules_url,
+            _("مشاهده پلن‌های متصل"),
+            readiness_url,
+            _("تست readiness"),
+        )
 
     @admin.display(description=_("Proxy"), boolean=True)
     def uses_proxy(self, obj):
@@ -3705,6 +3819,7 @@ class InboundAdmin(ImportExportModelAdmin):
     readonly_fields = (
         "sales_readiness",
         "active_plan_route_count",
+        "plan_fulfillment_links",
         "active_route_warning",
         "xui_remote_scope",
         "created_at",
@@ -3721,6 +3836,7 @@ class InboundAdmin(ImportExportModelAdmin):
                     "protocol",
                     "sales_readiness",
                     "active_plan_route_count",
+                    "plan_fulfillment_links",
                     "is_active",
                 )
             },
@@ -3800,6 +3916,7 @@ class InboundAdmin(ImportExportModelAdmin):
                         "protocol",
                         "sales_readiness",
                         "active_plan_route_count",
+                        "plan_fulfillment_links",
                         "is_active",
                     )
                 },
@@ -3931,6 +4048,26 @@ class InboundAdmin(ImportExportModelAdmin):
     def catalog_link(self, obj):
         store = getattr(getattr(obj, "panel", None), "store", None)
         return format_html('<a class="button" href="{}">{}</a>', catalog_url(store), _("Catalog"))
+
+    @admin.display(description=_("تحویل خودکار پلن"))
+    def plan_fulfillment_links(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        panel_id = getattr(obj, "panel_id", None)
+        add_url = f"{reverse('admin:store_cupfillerrule_add')}?{urlencode({'source_type': CupFillerRule.SourceType.PANEL_INBOUNDS, 'panel': panel_id, 'inbounds': obj.pk})}"
+        rules_url = f"{reverse('admin:store_cupfillerrule_changelist')}?{urlencode({'inbounds__id__exact': obj.pk})}"
+        readiness_url = reverse("admin_store_panel_center_inbounds", args=[panel_id]) if panel_id else reverse("admin_store_plan_fulfillment")
+        return format_html(
+            '<a class="button" href="{}">{}</a> '
+            '<a class="button" href="{}">{}</a> '
+            '<a class="button" href="{}">{}</a>',
+            add_url,
+            _("استفاده در Recipe پلن"),
+            rules_url,
+            _("مشاهده پلن‌های متصل"),
+            readiness_url,
+            _("تست readiness"),
+        )
 
     @admin.action(description=_("Mark as legacy / exclude from sales and health monitor"))
     def mark_as_legacy(self, request, queryset):
@@ -4293,28 +4430,135 @@ class VPNClientAdmin(ImportExportModelAdmin):
         return getattr(obj, "admin_last_reminder_sent_at", None) or "-"
 
 
+def _inventory_required_label(value):
+    return _("الزامی") if value else _("اختیاری")
+
+
+def _cup_rule_source_type_label(value):
+    return {
+        CupFillerRule.SourceType.PANEL_INBOUNDS: _("پنل‌ها و اینباندها"),
+        CupFillerRule.SourceType.INVENTORY_POOL: _("مخزن کانفیگ"),
+    }.get(value, value or "-")
+
+
+def _cup_recipe_failure_policy_label(value):
+    return {
+        CupFulfillmentRecipe.FailurePolicy.STRICT: _("سخت‌گیرانه"),
+        CupFulfillmentRecipe.FailurePolicy.PARTIAL_ALLOWED: _("اجازه تحویل ناقص"),
+    }.get(value, value or "-")
+
+
+def _apply_admin_form_labels(form, labels, choices=None):
+    for field_name, label in labels.items():
+        if field_name in form.base_fields:
+            form.base_fields[field_name].label = label
+    for field_name, field_choices in (choices or {}).items():
+        if field_name in form.base_fields:
+            form.base_fields[field_name].choices = field_choices
+    return form
+
+
+def _safe_metadata_for_admin(value, key=""):
+    if isinstance(value, dict):
+        return {item_key: _safe_metadata_for_admin(item_value, item_key) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [_safe_metadata_for_admin(item, key) for item in value[:50]]
+    lowered_key = str(key or "").lower()
+    if "masked" not in lowered_key and any(marker in lowered_key for marker in ("raw_link", "direct_link", "sub_link", "subscription_url", "token", "secret", "password", "private", "key")):
+        return "***"
+    return value
+
+
+def _admin_metadata_safe_summary(metadata):
+    safe_metadata = _safe_metadata_for_admin(metadata or {})
+    if not safe_metadata:
+        return "-"
+    return format_html(
+        '<pre dir="ltr" style="white-space:pre-wrap;overflow-wrap:anywhere;max-width:960px">{}</pre>',
+        json.dumps(safe_metadata, ensure_ascii=False, indent=2, default=str),
+    )
+
+
+def _raw_link_reveal_controls(obj, *, masked_link):
+    if not obj or not getattr(obj, "pk", None) or not getattr(obj, "raw_link", ""):
+        return "-"
+    target_id = f"config-full-link-{obj._meta.model_name}-{obj.pk}"
+    return format_html(
+        '<div class="config-link-reveal-controls">'
+        '<code dir="ltr" class="config-link-masked">{}</code>'
+        '<div class="config-link-actions">'
+        '<button type="button" class="button" data-config-link-reveal="{}" data-config-full-link="{}">{}</button> '
+        '<button type="button" class="button" data-config-link-copy="{}">{}</button> '
+        '<button type="button" class="button" data-config-link-copy="{}">{}</button>'
+        '</div>'
+        '<code id="{}" dir="ltr" class="config-link-full" hidden></code>'
+        '</div>',
+        masked_link,
+        target_id,
+        obj.raw_link,
+        _("نمایش لینک کامل"),
+        obj.raw_link,
+        _("کپی لینک کامل"),
+        masked_link,
+        _("کپی لینک ماسک‌شده"),
+        target_id,
+    )
+
+
+def _style_raw_link_secret_widget(formfield):
+    formfield.widget = forms.PasswordInput(
+        render_value=True,
+        attrs={
+            "dir": "ltr",
+            "autocomplete": "off",
+            "class": "vLargeTextField config-link-secret-input",
+        },
+    )
+    formfield.help_text = _("لینک کامل برای ویرایش ذخیره شده اما به صورت masked نمایش داده می‌شود. برای مشاهده از دکمه نمایش لینک کامل استفاده کنید.")
+    return formfield
+
+
+def _apply_parsed_link_fields(obj, *, form, change):
+    raw_link = str(getattr(obj, "raw_link", "") or "").strip()
+    parsed = parse_config_link(raw_link)
+    obj.raw_link = parsed.raw_link
+    obj.normalized_link = parsed.normalized_link
+    obj.normalized_hash = parsed.normalized_hash
+    obj.protocol = parsed.protocol
+    obj.host = parsed.host
+    obj.port = parsed.port
+    changed_fields = set(getattr(form, "changed_data", []) or [])
+    if (not change or "raw_link" in changed_fields) and "remark" not in changed_fields and parsed.remark:
+        obj.remark = parsed.remark
+    else:
+        obj.remark = str(getattr(obj, "remark", "") or "").strip()[:255]
+    return parsed
+
+
 @admin.register(ConfigInventoryPool)
 class ConfigInventoryPoolAdmin(ImportExportModelAdmin):
     change_list_template = "admin/store/config_inventory/pool_change_list.html"
     list_display = (
         "id",
-        "title",
-        "connected_plan",
-        "allocation_mode",
+        "pool_title",
+        "connected_plan_label",
+        "allocation_mode_label",
         "available_stock",
-        "is_active",
-        "priority",
-        "import_assets_link",
+        "ready_assets",
+        "assigned_assets",
+        "active_status",
+        "priority_label",
+        "pool_action_links",
         "created_at",
     )
     list_filter = ("allocation_mode", "is_active", "connected_plan", "created_at")
     search_fields = ("title", "description", "connected_plan__name")
     autocomplete_fields = ("connected_plan",)
-    readonly_fields = ("import_assets_action", "stock_summary", "created_at", "updated_at")
+    readonly_fields = ("pool_action_links", "stock_summary", "created_at", "updated_at")
     fieldsets = (
-        (_("Pool"), {"fields": ("title", "description", "connected_plan", "is_active", "priority", "import_assets_action")}),
+        (_("مخزن کانفیگ"), {"fields": ("title", "description", "connected_plan", "is_active", "priority", "pool_action_links")}),
         (
-            _("Allocation"),
+            _("قانون تخصیص"),
             {
                 "fields": (
                     "allocation_mode",
@@ -4325,7 +4569,7 @@ class ConfigInventoryPoolAdmin(ImportExportModelAdmin):
                 )
             },
         ),
-        (_("Metadata"), {"classes": ("collapse",), "fields": ("metadata", "created_at", "updated_at")}),
+        (_("داده‌های فنی"), {"classes": ("collapse",), "fields": ("metadata", "created_at", "updated_at")}),
     )
 
     def get_urls(self):
@@ -4335,40 +4579,119 @@ class ConfigInventoryPoolAdmin(ImportExportModelAdmin):
         ]
         return custom + urls
 
-    @admin.display(description=_("Available stock"))
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj=obj, **kwargs)
+        form = _apply_admin_form_labels(
+            form,
+            {
+                "title": _("نام مخزن"),
+                "description": _("توضیحات"),
+                "connected_plan": _("پلن متصل"),
+                "is_active": _("فعال"),
+                "priority": _("اولویت"),
+                "allocation_mode": _("نوع تخصیص"),
+                "max_allocations_per_asset": _("حداکثر استفاده از هر کانفیگ"),
+                "traffic_limit_gb": _("حجم هر کانفیگ (GB)"),
+                "duration_days": _("مدت اعتبار (روز)"),
+                "metadata": _("داده‌های فنی"),
+            },
+            {
+                "allocation_mode": [(value, inventory_allocation_mode_label(value)) for value, _label in ConfigInventoryPool.AllocationMode.choices],
+            },
+        )
+        if "max_allocations_per_asset" in form.base_fields:
+            form.base_fields["max_allocations_per_asset"].help_text = _("اگر خالی باشد، در حالت اشتراکی نامحدود محدودیتی اعمال نمی‌شود.")
+        return form
+
+    @admin.display(description=_("نام مخزن"), ordering="title")
+    def pool_title(self, obj):
+        return obj.title
+
+    @admin.display(description=_("پلن متصل"), ordering="connected_plan__name")
+    def connected_plan_label(self, obj):
+        return obj.connected_plan or "-"
+
+    @admin.display(description=_("نوع تخصیص"), ordering="allocation_mode")
+    def allocation_mode_label(self, obj):
+        return inventory_allocation_mode_label(obj.allocation_mode)
+
+    @admin.display(description=_("موجودی قابل فروش"))
     def available_stock(self, obj):
         summary = get_pool_stock_summary(obj)
         capacity = summary["available_capacity"]
         if capacity is None:
-            return _("Unlimited (%(count)s reusable assets)") % {"count": summary["usable_asset_count"]}
+            return _("نامحدود (%(count)s کانفیگ قابل استفاده)") % {"count": summary["usable_asset_count"]}
         return capacity
 
-    @admin.display(description=_("Import"))
-    def import_assets_link(self, obj):
-        url = reverse("admin_store_config_inventory_import")
-        return format_html('<a class="button" href="{}?pool={}">{}</a>', url, obj.pk, _("وارد کردن لینک کانفیگ"))
+    @admin.display(description=_("آماده"))
+    def ready_assets(self, obj):
+        return ConfigInventoryAsset.objects.filter(pool=obj, status=ConfigInventoryAsset.Status.AVAILABLE).count()
 
-    @admin.display(description=_("Import config links"))
-    def import_assets_action(self, obj):
+    @admin.display(description=_("تخصیص‌داده‌شده"))
+    def assigned_assets(self, obj):
+        return ConfigInventoryAsset.objects.filter(pool=obj, status=ConfigInventoryAsset.Status.ASSIGNED).count()
+
+    @admin.display(description=_("فعال"), boolean=True, ordering="is_active")
+    def active_status(self, obj):
+        return obj.is_active
+
+    @admin.display(description=_("اولویت"), ordering="priority")
+    def priority_label(self, obj):
+        return obj.priority
+
+    @admin.display(description=_("عملیات"))
+    def pool_action_links(self, obj):
+        import_url = reverse("admin_store_config_inventory_import")
         if not obj or not obj.pk:
-            url = reverse("admin_store_config_inventory_import")
-            return format_html('<a class="button" href="{}">{}</a>', url, _("وارد کردن لینک کانفیگ"))
-        return self.import_assets_link(obj)
+            return format_html('<a class="button" href="{}">{}</a>', import_url, _("وارد کردن کانفیگ"))
+        quick_url = reverse("admin_store_cup_center_quick_build")
+        assets_url = reverse("admin:store_configinventoryasset_changelist")
+        recipe_add_url = f"{reverse('admin:store_cupfillerrule_add')}?{urlencode({'source_type': CupFillerRule.SourceType.INVENTORY_POOL, 'inventory_pool': obj.pk})}"
+        recipe_rules_url = f"{reverse('admin:store_cupfillerrule_changelist')}?{urlencode({'inventory_pool__id__exact': obj.pk})}"
+        return format_html(
+            '<a class="button" href="{}?pool={}">{}</a> '
+            '<a class="button" href="{}?inventory_pool={}">{}</a> '
+            '<a class="button" href="{}?pool__id__exact={}">{}</a> '
+            '<a class="button" href="{}">{}</a> '
+            '<a class="button" href="{}">{}</a>',
+            import_url,
+            obj.pk,
+            _("وارد کردن کانفیگ"),
+            quick_url,
+            obj.pk,
+            _("ساخت سریع Cup با این مخزن"),
+            assets_url,
+            obj.pk,
+            _("مشاهده کانفیگ‌های مخزن"),
+            recipe_add_url,
+            _("استفاده در Recipe پلن"),
+            recipe_rules_url,
+            _("مشاهده پلن‌های متصل"),
+        )
 
-    @admin.display(description=_("Stock summary"))
+    @admin.display(description=_("خلاصه موجودی"))
     def stock_summary(self, obj):
         if not obj or not obj.pk:
             return "-"
         summary = get_pool_stock_summary(obj)
+        if not summary["asset_count"]:
+            import_url = reverse("admin_store_config_inventory_import")
+            return format_html(
+                '<div class="help">{}</div><p><a class="button" href="{}?pool={}">{}</a></p>',
+                _("این مخزن هنوز کانفیگی ندارد. از دکمه وارد کردن کانفیگ استفاده کنید."),
+                import_url,
+                obj.pk,
+                _("وارد کردن کانفیگ"),
+            )
         rows = [
-            (_("Mode"), summary["allocation_mode"]),
-            (_("Assets"), summary["asset_count"]),
-            (_("Usable assets"), summary["usable_asset_count"]),
-            (_("Available capacity"), _("Unlimited") if summary["available_capacity"] is None else summary["available_capacity"]),
+            (_("نوع تخصیص"), inventory_allocation_mode_label(summary["allocation_mode"])),
+            (_("کل کانفیگ‌ها"), summary["asset_count"]),
+            (_("کانفیگ‌های قابل استفاده"), summary["usable_asset_count"]),
+            (_("ظرفیت قابل فروش"), _("نامحدود") if summary["available_capacity"] is None else summary["available_capacity"]),
         ]
         for status, count in summary["status_counts"].items():
             if count:
-                rows.append((status, count))
+                rows.append((inventory_asset_status_label(status), count))
         return format_html_join("", "<div><strong>{}</strong>: {}</div>", rows)
 
     def import_assets_view(self, request):
@@ -4379,14 +4702,14 @@ class ConfigInventoryPoolAdmin(ImportExportModelAdmin):
 class ConfigInventoryAssetAdmin(ImportExportModelAdmin):
     list_display = (
         "id",
-        "pool",
-        "protocol",
+        "asset_pool",
+        "protocol_label",
         "masked_raw_link",
-        "status",
-        "current_allocations",
-        "max_allocations",
-        "source_batch",
-        "expires_at",
+        "asset_status",
+        "current_allocations_label",
+        "max_allocations_label",
+        "source_batch_label",
+        "expires_at_label",
         "created_at",
     )
     list_filter = ("status", "protocol", "pool", "source_batch", "created_at", "expires_at")
@@ -4394,20 +4717,22 @@ class ConfigInventoryAssetAdmin(ImportExportModelAdmin):
     autocomplete_fields = ("pool",)
     readonly_fields = (
         "masked_raw_link",
+        "raw_link_reveal_controls",
+        "normalized_link_masked",
         "normalized_link",
         "normalized_hash",
         "protocol",
-        "remark",
         "host",
         "port",
         "current_allocations",
+        "metadata_safe_summary",
         "created_at",
         "updated_at",
     )
     fieldsets = (
-        (_("Link"), {"fields": ("pool", "raw_link", "masked_raw_link", "protocol", "remark", "host", "port", "status")}),
+        (_("لینک کانفیگ"), {"fields": ("pool", "raw_link", "raw_link_reveal_controls", "masked_raw_link", "protocol", "remark", "host", "port", "status")}),
         (
-            _("Allocation"),
+            _("تخصیص"),
             {
                 "fields": (
                     "traffic_limit_gb",
@@ -4418,38 +4743,116 @@ class ConfigInventoryAssetAdmin(ImportExportModelAdmin):
                 )
             },
         ),
-        (_("Metadata"), {"classes": ("collapse",), "fields": ("normalized_link", "normalized_hash", "metadata", "created_at", "updated_at")}),
+        (_("داده‌های فنی"), {"classes": ("collapse",), "fields": ("normalized_link_masked", "normalized_hash", "metadata_safe_summary", "created_at", "updated_at")}),
     )
     list_select_related = ("pool",)
 
-    @admin.display(description=_("Config link"))
+    class Media:
+        js = ("admin/config_link_reveal.js",)
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj=obj, **kwargs)
+        return _apply_admin_form_labels(
+            form,
+            {
+                "pool": _("مخزن کانفیگ"),
+                "raw_link": _("لینک کانفیگ"),
+                "raw_link_reveal_controls": _("نمایش / کپی کنترل‌شده"),
+                "protocol": _("پروتکل"),
+                "remark": _("نام/Remark"),
+                "host": _("میزبان"),
+                "port": _("پورت"),
+                "status": _("وضعیت"),
+                "traffic_limit_gb": _("حجم (GB)"),
+                "expires_at": _("انقضا"),
+                "max_allocations": _("حداکثر استفاده"),
+                "current_allocations": _("تعداد استفاده"),
+                "source_batch": _("نام دسته / Batch"),
+                "normalized_link_masked": _("لینک نرمال‌شده masked"),
+                "normalized_hash": _("هش نرمال‌شده"),
+                "metadata_safe_summary": _("داده‌های فنی امن"),
+            },
+            {
+                "status": [(value, inventory_asset_status_label(value)) for value, _label in ConfigInventoryAsset.Status.choices],
+            },
+        )
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        formfield = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if db_field.name == "raw_link" and formfield:
+            return _style_raw_link_secret_widget(formfield)
+        return formfield
+
+    @admin.display(description=_("مخزن کانفیگ"), ordering="pool__title")
+    def asset_pool(self, obj):
+        return obj.pool
+
+    @admin.display(description=_("پروتکل"), ordering="protocol")
+    def protocol_label(self, obj):
+        return obj.protocol
+
+    @admin.display(description=_("لینک کانفیگ"))
     def masked_raw_link(self, obj):
         if not obj or not obj.raw_link:
             return "-"
         return mask_config_link_for_display(obj.raw_link)
 
+    @admin.display(description=_("نمایش / کپی کنترل‌شده"))
+    def raw_link_reveal_controls(self, obj):
+        return _raw_link_reveal_controls(obj, masked_link=self.masked_raw_link(obj))
+
+    @admin.display(description=_("لینک نرمال‌شده masked"))
+    def normalized_link_masked(self, obj):
+        if not obj or not obj.normalized_link:
+            return "-"
+        return mask_config_link_for_display(obj.normalized_link)
+
+    @admin.display(description=_("داده‌های فنی امن"))
+    def metadata_safe_summary(self, obj):
+        return _admin_metadata_safe_summary(getattr(obj, "metadata", {}) or {})
+
+    @admin.display(description=_("وضعیت"), ordering="status")
+    def asset_status(self, obj):
+        return inventory_asset_status_label(obj.status)
+
+    @admin.display(description=_("تعداد استفاده"), ordering="current_allocations")
+    def current_allocations_label(self, obj):
+        return obj.current_allocations
+
+    @admin.display(description=_("حداکثر استفاده"), ordering="max_allocations")
+    def max_allocations_label(self, obj):
+        return obj.max_allocations if obj.max_allocations is not None else _("نامحدود")
+
+    @admin.display(description=_("نام دسته / Batch"), ordering="source_batch")
+    def source_batch_label(self, obj):
+        return obj.source_batch or "-"
+
+    @admin.display(description=_("انقضا"), ordering="expires_at")
+    def expires_at_label(self, obj):
+        return obj.expires_at or "-"
+
     def save_model(self, request, obj, form, change):
-        parsed = parse_config_link(obj.raw_link)
-        obj.normalized_link = parsed.normalized_link
-        obj.normalized_hash = parsed.normalized_hash
-        obj.protocol = parsed.protocol
-        obj.remark = parsed.remark
-        obj.host = parsed.host
-        obj.port = parsed.port
+        parsed = _apply_parsed_link_fields(obj, form=form, change=change)
         super().save_model(request, obj, form, change)
+        if not change or "raw_link" in (getattr(form, "changed_data", []) or []):
+            messages.success(
+                request,
+                _("لینک دوباره parse شد: پروتکل %(protocol)s، میزبان %(host)s، پایان هش %(suffix)s.")
+                % {"protocol": parsed.protocol, "host": parsed.host or "-", "suffix": (parsed.normalized_hash or "")[-8:] or "-"},
+            )
 
 
 @admin.register(ConfigAllocation)
 class ConfigAllocationAdmin(ImportExportModelAdmin):
     list_display = (
         "id",
-        "asset",
-        "allocation_mode",
-        "status",
-        "cup",
-        "order",
-        "allocated_at",
-        "released_at",
+        "asset_label",
+        "allocation_mode_label",
+        "allocation_status",
+        "cup_label",
+        "order_label",
+        "allocated_at_label",
+        "released_at_label",
     )
     list_filter = ("status", "allocation_mode", "allocated_at", "released_at")
     search_fields = ("asset__normalized_hash", "asset__remark", "cup__token", "order__order_tracking_code")
@@ -4457,9 +4860,59 @@ class ConfigAllocationAdmin(ImportExportModelAdmin):
     readonly_fields = ("allocated_at", "created_at", "updated_at")
     list_select_related = ("asset", "cup", "order")
 
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj=obj, **kwargs)
+        return _apply_admin_form_labels(
+            form,
+            {
+                "asset": _("کانفیگ آماده"),
+                "cup": _("SubscriptionCup"),
+                "order": _("سفارش"),
+                "allocation_mode": _("نوع تخصیص"),
+                "status": _("وضعیت"),
+                "allocated_at": _("زمان تخصیص"),
+                "released_at": _("زمان آزادسازی"),
+                "metadata": _("داده‌های فنی"),
+            },
+            {
+                "allocation_mode": [(value, inventory_allocation_mode_label(value)) for value, _label in ConfigInventoryPool.AllocationMode.choices],
+                "status": [(value, config_allocation_status_label(value)) for value, _label in ConfigAllocation.Status.choices],
+            },
+        )
+
+    @admin.display(description=_("کانفیگ آماده"), ordering="asset")
+    def asset_label(self, obj):
+        return obj.asset
+
+    @admin.display(description=_("نوع تخصیص"), ordering="allocation_mode")
+    def allocation_mode_label(self, obj):
+        return inventory_allocation_mode_label(obj.allocation_mode)
+
+    @admin.display(description=_("وضعیت"), ordering="status")
+    def allocation_status(self, obj):
+        return config_allocation_status_label(obj.status)
+
+    @admin.display(description=_("SubscriptionCup"), ordering="cup")
+    def cup_label(self, obj):
+        return obj.cup or "-"
+
+    @admin.display(description=_("سفارش"), ordering="order")
+    def order_label(self, obj):
+        return obj.order or "-"
+
+    @admin.display(description=_("زمان تخصیص"), ordering="allocated_at")
+    def allocated_at_label(self, obj):
+        return obj.allocated_at
+
+    @admin.display(description=_("زمان آزادسازی"), ordering="released_at")
+    def released_at_label(self, obj):
+        return obj.released_at or "-"
+
 
 class CupFillerRuleInline(admin.TabularInline):
     model = CupFillerRule
+    verbose_name = _("قانون پرکننده Cup")
+    verbose_name_plural = _("قوانین پرکننده Cup")
     extra = 0
     show_change_link = True
     autocomplete_fields = ("panel", "inventory_pool")
@@ -4476,17 +4929,44 @@ class CupFillerRuleInline(admin.TabularInline):
         "is_active",
     )
 
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        formfield = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if formfield:
+            labels = {
+                "position": _("ترتیب"),
+                "source_type": _("منبع"),
+                "quantity": _("تعداد"),
+                "required": _("الزامی"),
+                "panel": _("پنل"),
+                "inventory_pool": _("مخزن کانفیگ"),
+                "allocation_mode": _("نوع تخصیص"),
+                "is_active": _("فعال"),
+            }
+            if db_field.name in labels:
+                formfield.label = labels[db_field.name]
+            if db_field.name == "source_type":
+                formfield.choices = [(value, _cup_rule_source_type_label(value)) for value, _label in CupFillerRule.SourceType.choices]
+            if db_field.name == "allocation_mode":
+                formfield.choices = [("", "---------"), *[(value, inventory_allocation_mode_label(value)) for value, _label in ConfigInventoryPool.AllocationMode.choices]]
+        return formfield
+
+    def formfield_for_manytomany(self, db_field, request, **kwargs):
+        formfield = super().formfield_for_manytomany(db_field, request, **kwargs)
+        if formfield and db_field.name == "inbounds":
+            formfield.label = _("اینباندها")
+        return formfield
+
 
 @admin.register(CupFulfillmentRecipe)
 class CupFulfillmentRecipeAdmin(ImportExportModelAdmin):
     inlines = (CupFillerRuleInline,)
     list_display = (
         "id",
-        "title",
-        "plan",
-        "is_active",
-        "priority",
-        "failure_policy",
+        "recipe_title",
+        "plan_label",
+        "active_status",
+        "priority_label",
+        "failure_policy_label",
         "active_rule_count",
         "preview_link",
         "created_at",
@@ -4496,8 +4976,8 @@ class CupFulfillmentRecipeAdmin(ImportExportModelAdmin):
     autocomplete_fields = ("plan",)
     readonly_fields = ("preview_link", "created_at", "updated_at")
     fieldsets = (
-        (_("Recipe"), {"fields": ("title", "plan", "is_active", "priority", "failure_policy", "preview_link")}),
-        (_("Metadata"), {"classes": ("collapse",), "fields": ("metadata", "created_at", "updated_at")}),
+        (_("دستور پر کردن Cup"), {"fields": ("title", "plan", "is_active", "priority", "failure_policy", "preview_link")}),
+        (_("داده‌های فنی"), {"classes": ("collapse",), "fields": ("metadata", "created_at", "updated_at")}),
     )
 
     def get_urls(self):
@@ -4510,16 +4990,65 @@ class CupFulfillmentRecipeAdmin(ImportExportModelAdmin):
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("plan").annotate(admin_active_rule_count=Count("rules", filter=Q(rules__is_active=True)))
 
-    @admin.display(description=_("Active rules"), ordering="admin_active_rule_count")
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj=obj, **kwargs)
+        return _apply_admin_form_labels(
+            form,
+            {
+                "title": _("عنوان دستور"),
+                "plan": _("پلن متصل"),
+                "is_active": _("فعال"),
+                "priority": _("اولویت"),
+                "failure_policy": _("رفتار در خطا"),
+                "metadata": _("داده‌های فنی"),
+            },
+            {
+                "failure_policy": [(value, _cup_recipe_failure_policy_label(value)) for value, _label in CupFulfillmentRecipe.FailurePolicy.choices],
+            },
+        )
+
+    @admin.display(description=_("عنوان دستور"), ordering="title")
+    def recipe_title(self, obj):
+        return obj.title
+
+    @admin.display(description=_("پلن متصل"), ordering="plan__name")
+    def plan_label(self, obj):
+        return obj.plan
+
+    @admin.display(description=_("فعال"), boolean=True, ordering="is_active")
+    def active_status(self, obj):
+        return obj.is_active
+
+    @admin.display(description=_("اولویت"), ordering="priority")
+    def priority_label(self, obj):
+        return obj.priority
+
+    @admin.display(description=_("رفتار در خطا"), ordering="failure_policy")
+    def failure_policy_label(self, obj):
+        return _cup_recipe_failure_policy_label(obj.failure_policy)
+
+    @admin.display(description=_("قوانین فعال"), ordering="admin_active_rule_count")
     def active_rule_count(self, obj):
         return getattr(obj, "admin_active_rule_count", None) if getattr(obj, "admin_active_rule_count", None) is not None else obj.rules.filter(is_active=True).count()
 
-    @admin.display(description=_("Preview"))
+    @admin.display(description=_("عملیات"))
     def preview_link(self, obj):
         if not obj or not obj.pk:
             return "-"
-        url = reverse("admin:store_cupfulfillmentrecipe_preview", args=[obj.pk])
-        return format_html('<a class="button" href="{}">{}</a>', url, _("پیش‌نمایش دستور تحویل"))
+        builder_url = reverse("admin_store_plan_fulfillment_recipe", args=[obj.pk])
+        preview_url = reverse("admin_store_plan_fulfillment_recipe_preview", args=[obj.pk])
+        simulate_url = reverse("admin_store_plan_fulfillment_recipe_simulate", args=[obj.pk])
+        return format_html(
+            '<a class="button" href="{}">{}</a> '
+            '<a class="button" href="{}">{}</a> '
+            '<a class="button" href="{}">{}</a>',
+            builder_url,
+            _("دستور تحویل"),
+            preview_url,
+            _("پیش‌نمایش دستور تحویل"),
+            simulate_url,
+            _("تست شبیه‌سازی"),
+        )
 
     def preview_view(self, request, recipe_id):
         return fulfillment_recipe_preview(request, recipe_id)
@@ -4529,21 +5058,80 @@ class CupFulfillmentRecipeAdmin(ImportExportModelAdmin):
 class CupFillerRuleAdmin(ImportExportModelAdmin):
     list_display = (
         "id",
-        "recipe",
-        "position",
-        "source_type",
-        "quantity",
-        "required",
-        "panel",
-        "inventory_pool",
-        "allocation_mode",
-        "is_active",
+        "recipe_label",
+        "position_label",
+        "source_type_label",
+        "quantity_label",
+        "required_label",
+        "panel_label",
+        "inventory_pool_label",
+        "allocation_mode_label",
+        "active_status",
     )
     list_filter = ("source_type", "required", "is_active", "panel", "inventory_pool", "created_at")
     search_fields = ("recipe__title", "recipe__plan__name", "panel__name", "inventory_pool__title")
     autocomplete_fields = ("recipe", "panel", "inventory_pool")
     filter_horizontal = ("inbounds",)
     list_select_related = ("recipe", "panel", "inventory_pool")
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj=obj, **kwargs)
+        return _apply_admin_form_labels(
+            form,
+            {
+                "recipe": _("دستور پر کردن Cup"),
+                "position": _("ترتیب"),
+                "source_type": _("منبع"),
+                "quantity": _("تعداد"),
+                "required": _("الزامی"),
+                "panel": _("پنل"),
+                "inbounds": _("اینباندها"),
+                "inventory_pool": _("مخزن کانفیگ"),
+                "allocation_mode": _("نوع تخصیص"),
+                "is_active": _("فعال"),
+                "metadata": _("داده‌های فنی"),
+            },
+            {
+                "source_type": [(value, _cup_rule_source_type_label(value)) for value, _label in CupFillerRule.SourceType.choices],
+                "allocation_mode": [("", "---------"), *[(value, inventory_allocation_mode_label(value)) for value, _label in ConfigInventoryPool.AllocationMode.choices]],
+            },
+        )
+
+    @admin.display(description=_("دستور"), ordering="recipe__title")
+    def recipe_label(self, obj):
+        return obj.recipe
+
+    @admin.display(description=_("ترتیب"), ordering="position")
+    def position_label(self, obj):
+        return obj.position
+
+    @admin.display(description=_("منبع"), ordering="source_type")
+    def source_type_label(self, obj):
+        return _cup_rule_source_type_label(obj.source_type)
+
+    @admin.display(description=_("تعداد"), ordering="quantity")
+    def quantity_label(self, obj):
+        return obj.quantity
+
+    @admin.display(description=_("الزامی"), ordering="required")
+    def required_label(self, obj):
+        return _inventory_required_label(obj.required)
+
+    @admin.display(description=_("پنل"), ordering="panel__name")
+    def panel_label(self, obj):
+        return obj.panel or "-"
+
+    @admin.display(description=_("مخزن کانفیگ"), ordering="inventory_pool__title")
+    def inventory_pool_label(self, obj):
+        return obj.inventory_pool or "-"
+
+    @admin.display(description=_("نوع تخصیص"), ordering="allocation_mode")
+    def allocation_mode_label(self, obj):
+        return inventory_allocation_mode_label(obj.allocation_mode) if obj.allocation_mode else "-"
+
+    @admin.display(description=_("فعال"), boolean=True, ordering="is_active")
+    def active_status(self, obj):
+        return obj.is_active
 
 
 @admin.register(ConfigLink)
@@ -4574,13 +5162,14 @@ class ConfigLinkAdmin(ImportExportModelAdmin):
     )
     autocomplete_fields = ("source_panel", "source_inbound", "vpn_client")
     readonly_fields = (
-        "normalized_link",
+        "normalized_link_masked",
         "normalized_hash",
         "protocol",
-        "remark",
         "host",
         "port",
         "masked_raw_link",
+        "raw_link_reveal_controls",
+        "raw_link_change_warning",
         "created_at",
         "updated_at",
     )
@@ -4590,6 +5179,8 @@ class ConfigLinkAdmin(ImportExportModelAdmin):
             {
                 "fields": (
                     "raw_link",
+                    "raw_link_change_warning",
+                    "raw_link_reveal_controls",
                     "masked_raw_link",
                     "protocol",
                     "remark",
@@ -4615,7 +5206,7 @@ class ConfigLinkAdmin(ImportExportModelAdmin):
             {
                 "classes": ("collapse",),
                 "fields": (
-                    "normalized_link",
+                    "normalized_link_masked",
                     "normalized_hash",
                     "metadata",
                     "created_at",
@@ -4625,24 +5216,58 @@ class ConfigLinkAdmin(ImportExportModelAdmin):
         ),
     )
 
+    class Media:
+        js = ("admin/config_link_reveal.js",)
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj=obj, **kwargs)
+        return _apply_admin_form_labels(
+            form,
+            {
+                "raw_link": _("لینک کانفیگ"),
+                "raw_link_change_warning": _("هشدار"),
+                "raw_link_reveal_controls": _("نمایش / کپی کنترل‌شده"),
+                "remark": _("نام/Remark"),
+                "is_active": _("فعال"),
+                "metadata": _("Metadata"),
+            },
+        )
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        formfield = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if db_field.name == "raw_link" and formfield:
+            return _style_raw_link_secret_widget(formfield)
+        return formfield
+
     @admin.display(description=_("Config link"))
     def masked_raw_link(self, obj):
         if not obj or not obj.raw_link:
             return "-"
-        suffix = (obj.normalized_hash or "")[-8:] or str(obj.pk or "-")
-        return _("Config link saved (hidden), hash ending %(suffix)s") % {"suffix": suffix}
+        return mask_config_link_for_display(obj.raw_link)
+
+    @admin.display(description=_("نمایش / کپی کنترل‌شده"))
+    def raw_link_reveal_controls(self, obj):
+        return _raw_link_reveal_controls(obj, masked_link=self.masked_raw_link(obj))
+
+    @admin.display(description=_("هشدار"))
+    def raw_link_change_warning(self, obj):
+        return _("تغییر این لینک روی خروجی Cupهایی که از آن استفاده می‌کنند اثر می‌گذارد.")
+
+    @admin.display(description=_("Normalized link"))
+    def normalized_link_masked(self, obj):
+        if not obj or not obj.normalized_link:
+            return "-"
+        return mask_config_link_for_display(obj.normalized_link)
 
     def save_model(self, request, obj, form, change):
-        apply_config_link_parse(
-            obj,
-            obj.raw_link,
-            source_type=obj.source_type,
-            source_panel=obj.source_panel,
-            source_inbound=obj.source_inbound,
-            vpn_client=obj.vpn_client,
-            metadata=obj.metadata,
-        )
+        parsed = _apply_parsed_link_fields(obj, form=form, change=change)
         super().save_model(request, obj, form, change)
+        if not change or "raw_link" in (getattr(form, "changed_data", []) or []):
+            messages.success(
+                request,
+                _("لینک دوباره parse شد: پروتکل %(protocol)s، میزبان %(host)s، پایان هش %(suffix)s.")
+                % {"protocol": parsed.protocol, "host": parsed.host or "-", "suffix": (parsed.normalized_hash or "")[-8:] or "-"},
+            )
 
 
 class SubscriptionCupItemInline(admin.TabularInline):

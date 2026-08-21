@@ -1,0 +1,54 @@
+{% extends "admin/store/plan_fulfillment/_base_plan_fulfillment.html" %}
+
+{% block fulfillment_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+  <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+    <div>
+      <span class="tw-status-badge tw-tone-{{ simulation.final_status_tone }}"><i class="fas fa-vial" aria-hidden="true"></i> Dry-run</span>
+      <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">تست شبیه‌سازی تحویل</h1>
+      <p class="tw-mt-2 tw-mb-0 tw-text-sm tw-leading-7 tw-text-slate-600">{{ recipe.title }} · {{ simulation.final_status_fa }}</p>
+    </div>
+    <div class="tw-model-actions">
+      <a class="tw-button tw-button-secondary" href="{{ recipe_urls.preview }}">پیش‌نمایش readiness</a>
+      <a class="tw-button tw-button-primary" href="{{ recipe_urls.builder }}">دستور تحویل</a>
+    </div>
+  </div>
+</section>
+
+<section class="tw-section">
+  <div class="tw-admin-card">
+    <div class="tw-section-heading tw-mb-4"><h2>خروجی dry-run</h2></div>
+    <div class="tw-model-list">
+      <div class="tw-model-row"><span>وضعیت نهایی</span><strong>{{ simulation.final_status_label }} · {{ simulation.final_status_fa }}</strong></div>
+      <div class="tw-model-row"><span>CupItem پیش‌بینی‌شده</span><strong>{{ simulation.predicted_cup_item_count }}</strong></div>
+      <div class="tw-model-row"><span>ConfigAllocation واقعی</span><strong>ساخته نمی‌شود</strong></div>
+      <div class="tw-model-row"><span>تغییر سفارش</span><strong>انجام نمی‌شود</strong></div>
+      <div class="tw-model-row"><span>ارسال پیام مشتری</span><strong>انجام نمی‌شود</strong></div>
+    </div>
+  </div>
+</section>
+
+<section class="tw-section">
+  <div class="tw-section-heading tw-mb-4"><h2>منابع انتخاب‌شده</h2></div>
+  <div class="fulfillment-plan-grid">
+    {% for source in simulation.sources %}
+      <article class="fulfillment-rule-card tw-tone-{{ source.status_tone }}" id="rule-{{ source.rule_id }}">
+        <div class="tw-card-topline">
+          <span class="tw-card-badge">{{ source.status_label }}</span>
+          <strong>{{ source.source_type_label }}</strong>
+        </div>
+        <div class="tw-model-list">
+          <div class="tw-model-row"><span>اقدام شبیه‌سازی‌شده</span><strong>{{ source.dry_run_action }}</strong></div>
+          <div class="tw-model-row"><span>کانفیگ قابل انتظار</span><strong>{{ source.expected_config_count }}</strong></div>
+          <div class="tw-model-row"><span>اجبار</span><strong>{{ source.required_label }}</strong></div>
+        </div>
+        {% for item in source.diagnostics %}
+          <div class="fulfillment-diagnostic tw-tone-{{ item.tone }}">{{ item.label }}</div>
+        {% endfor %}
+      </article>
+    {% empty %}
+      <div class="tw-empty-state">منبعی برای dry-run وجود ندارد.</div>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

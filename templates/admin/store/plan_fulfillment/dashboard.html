@@ -1,0 +1,74 @@
+{% extends "admin/store/plan_fulfillment/_base_plan_fulfillment.html" %}
+
+{% block fulfillment_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+  <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+    <div class="tw-min-w-0">
+      <span class="tw-status-badge tw-tone-cyan"><i class="fas fa-link" aria-hidden="true"></i> تحویل ساب</span>
+      <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">تحویل خودکار ساب برای پلن‌ها</h1>
+      <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">{{ subtitle }}</p>
+    </div>
+    <a class="tw-button tw-button-primary" href="{% url 'admin_store_plan_fulfillment_plans' %}">اتصال پلن به Cup</a>
+  </div>
+</section>
+
+<section class="tw-section">
+  <div class="fulfillment-grid">
+    {% for card in summary_cards %}
+      <div class="tw-metric-card tw-tone-{{ card.tone }}">
+        <div class="tw-card-topline">
+          <span class="tw-card-badge">{{ card.label }}</span>
+          <span class="tw-card-icon"><i class="{{ card.icon }}" aria-hidden="true"></i></span>
+        </div>
+        <strong class="tw-metric-value">{{ card.value }}</strong>
+        <span class="tw-metric-description">{{ card.description }}</span>
+      </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="tw-section">
+  <div class="fulfillment-grid">
+    {% for card in action_cards %}
+      <a class="tw-workspace-card tw-tone-{{ card.tone }}" href="{{ card.url }}">
+        <div class="tw-card-topline">
+          <span class="tw-workspace-title">{{ card.title }}</span>
+          <span class="tw-card-icon"><i class="{{ card.icon }}" aria-hidden="true"></i></span>
+        </div>
+        <span class="tw-workspace-description">{{ card.description }}</span>
+      </a>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="tw-section" id="plans">
+  <div class="tw-section-heading tw-mb-4"><h2>پلن‌های فعال فروش</h2></div>
+  <div class="fulfillment-plan-grid">
+    {% for card in plan_cards %}
+      <article class="tw-workspace-card tw-tone-{{ card.status.status_tone }}">
+        <div class="tw-card-topline">
+          <span class="tw-card-badge">{{ card.status.status_label }}</span>
+          <span class="tw-card-icon"><i class="fas fa-box-open" aria-hidden="true"></i></span>
+        </div>
+        <strong class="tw-workspace-title">{{ card.plan.name }}</strong>
+        <span class="tw-workspace-description">{{ card.price }} · {{ card.volume }} · {{ card.duration }}</span>
+        <div class="tw-model-list">
+          <div class="tw-model-row"><span>دستور متصل</span><strong>{% if card.recipe %}{{ card.recipe.title }}{% else %}-{% endif %}</strong></div>
+          <div class="tw-model-row"><span>منابع پنل</span><strong>{{ card.panel_source_count }}</strong></div>
+          <div class="tw-model-row"><span>مخزن‌ها</span><strong>{{ card.inventory_pool_count }}</strong></div>
+          <div class="tw-model-row"><span>کانفیگ مورد انتظار</span><strong>{{ card.expected_config_count }}</strong></div>
+        </div>
+        <div class="tw-model-actions">
+          <a class="tw-mini-button" href="{{ card.setup_url }}">تنظیم تحویل</a>
+          {% if card.recipe %}
+            <a class="tw-mini-button" href="{{ card.recipe_urls.preview }}">پیش‌نمایش</a>
+            <a class="tw-mini-button" href="{{ card.recipe_urls.simulate }}">تست شبیه‌سازی</a>
+          {% endif %}
+        </div>
+      </article>
+    {% empty %}
+      <div class="tw-empty-state">پلن فعال و عمومی برای نمایش وجود ندارد.</div>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

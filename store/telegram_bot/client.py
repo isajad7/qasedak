@@ -7,6 +7,7 @@ from django.conf import settings
 
 from store.bot_proxy import bot_request_kwargs, capture_telegram_webhook_response, mask_proxy_secrets
 from store.models import BotConfiguration
+from store.telegram_bot.transport import telegram_api_request
 
 
 class BotDeliveryError(Exception):
@@ -57,12 +58,21 @@ class BotClient:
             return {"ok": True, "result": {}}
 
         try:
-            response = requests.post(
-                f"{self.base_url}/{method}",
-                json=payload,
+            url = f"{self.base_url}/{method}"
+            response = telegram_api_request(
+                self.config,
+                "POST",
+                url,
+                json_payload=payload,
                 timeout=timeout or bot_api_timeout(),
-                **bot_request_kwargs(self.config.provider),
             )
+            if response is None:
+                response = requests.post(
+                    url,
+                    json=payload,
+                    timeout=timeout or bot_api_timeout(),
+                    **bot_request_kwargs(self.config.provider),
+                )
             try:
                 data = response.json()
             except ValueError:
@@ -84,13 +94,23 @@ class BotClient:
 
     def call_multipart(self, method, *, data, files):
         try:
-            response = requests.post(
-                f"{self.base_url}/{method}",
+            url = f"{self.base_url}/{method}"
+            response = telegram_api_request(
+                self.config,
+                "POST",
+                url,
                 data=data,
                 files=files,
                 timeout=bot_api_timeout(),
-                **bot_request_kwargs(self.config.provider),
             )
+            if response is None:
+                response = requests.post(
+                    url,
+                    data=data,
+                    files=files,
+                    timeout=bot_api_timeout(),
+                    **bot_request_kwargs(self.config.provider),
+                )
             try:
                 payload = response.json()
             except ValueError:
@@ -226,11 +246,13 @@ class BotClient:
         file_base = self.FILE_BASE_URLS[self.config.provider].format(token=self.bot_token).rstrip("/")
         file_url = f"{file_base}/{file_path.lstrip('/')}"
         try:
-            response = requests.get(
-                file_url,
-                timeout=bot_api_timeout(),
-                **bot_request_kwargs(self.config.provider),
-            )
+            response = telegram_api_request(self.config, "GET", file_url, timeout=bot_api_timeout())
+            if response is None:
+                response = requests.get(
+                    file_url,
+                    timeout=bot_api_timeout(),
+                    **bot_request_kwargs(self.config.provider),
+                )
             response.raise_for_status()
         except Exception as exc:
             raise BotDeliveryError(self.sanitized_error(exc)) from None

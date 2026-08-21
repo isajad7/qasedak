@@ -1,0 +1,114 @@
+{% extends "admin/store/plan_fulfillment/_base_plan_fulfillment.html" %}
+
+{% block fulfillment_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+  <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+    <div>
+      <span class="tw-status-badge tw-tone-blue"><i class="fas fa-plug" aria-hidden="true"></i> اتصال پلن به Cup</span>
+      <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">{{ plan.name }}</h1>
+      <p class="tw-mt-2 tw-mb-0 tw-text-sm tw-leading-7 tw-text-slate-600">بعد از تایید سفارش، برای مشتری ظرف ساب مشتری ساخته می‌شود و لینک /sub اختصاصی تحویل داده می‌شود.</p>
+    </div>
+    <div class="tw-model-actions">
+      {% if recipe %}<a class="tw-button tw-button-secondary" href="{{ recipe_urls.preview }}">پیش‌نمایش</a>{% endif %}
+      <a class="tw-button tw-button-secondary" href="{% url 'admin_store_plan_fulfillment' %}">داشبورد تحویل</a>
+    </div>
+  </div>
+</section>
+
+<form method="post" novalidate>
+  {% csrf_token %}
+  {{ form.non_field_errors }}
+
+  <section class="tw-section">
+    <div class="tw-admin-card">
+      <div class="fulfillment-step-title tw-mb-4"><span class="fulfillment-step-number">1</span><h2>انتخاب پلن</h2></div>
+      <div class="tw-model-list">
+        <div class="tw-model-row"><span>نام پلن</span><strong>{{ plan.name }}</strong></div>
+        <div class="tw-model-row"><span>قیمت</span><strong>{{ plan_summary.price }}</strong></div>
+        <div class="tw-model-row"><span>حجم</span><strong>{{ plan_summary.volume }}</strong></div>
+        <div class="tw-model-row"><span>مدت</span><strong>{{ plan_summary.duration }}</strong></div>
+        <div class="tw-model-row"><span>وضعیت فروش</span><strong>{{ plan_summary.sales_status }}</strong></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="tw-section">
+    <div class="tw-admin-card">
+      <div class="fulfillment-step-title tw-mb-4"><span class="fulfillment-step-number">2</span><h2>انتخاب نوع تحویل</h2></div>
+      <div class="fulfillment-form-field fulfillment-radio-list fulfillment-form-wide">
+        {{ form.fulfillment_type }}
+        {{ form.fulfillment_type.errors }}
+      </div>
+      <div class="fulfillment-form-grid tw-mt-2">
+        <div class="fulfillment-form-field">{{ form.recipe_title.label_tag }}{{ form.recipe_title }}{{ form.recipe_title.errors }}</div>
+        <div class="fulfillment-form-field">{{ form.failure_policy.label_tag }}{{ form.failure_policy }}{{ form.failure_policy.errors }}</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="tw-section">
+    <div class="tw-admin-card">
+      <div class="fulfillment-step-title tw-mb-4"><span class="fulfillment-step-number">3</span><h2>انتخاب منابع ساخت Cup</h2></div>
+      <div class="fulfillment-grid">
+        <div class="fulfillment-rule-card">
+          <span class="tw-card-badge tw-tone-blue">ساخت از پنل‌ها</span>
+          <div class="fulfillment-form-grid">
+            <div class="fulfillment-form-field">{{ form.panel.label_tag }}{{ form.panel }}{{ form.panel.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.panel_quantity.label_tag }}{{ form.panel_quantity }}{{ form.panel_quantity.errors }}</div>
+            <div class="fulfillment-form-field fulfillment-form-wide">{{ form.inbounds.label_tag }}{{ form.inbounds }}{{ form.inbounds.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.panel_priority.label_tag }}{{ form.panel_priority }}{{ form.panel_priority.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.panel_label_prefix.label_tag }}{{ form.panel_label_prefix }}{{ form.panel_label_prefix.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.panel_required.label_tag }}{{ form.panel_required }}{{ form.panel_required.errors }}</div>
+          </div>
+        </div>
+        <div class="fulfillment-rule-card">
+          <span class="tw-card-badge tw-tone-emerald">برداشت خودکار از مخزن کانفیگ</span>
+          <div class="fulfillment-form-grid">
+            <div class="fulfillment-form-field">{{ form.inventory_pool.label_tag }}{{ form.inventory_pool }}{{ form.inventory_pool.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.inventory_quantity.label_tag }}{{ form.inventory_quantity }}{{ form.inventory_quantity.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.inventory_allocation_mode.label_tag }}{{ form.inventory_allocation_mode }}{{ form.inventory_allocation_mode.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.inventory_priority.label_tag }}{{ form.inventory_priority }}{{ form.inventory_priority.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.inventory_required.label_tag }}{{ form.inventory_required }}{{ form.inventory_required.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.inventory_fallback_allowed.label_tag }}{{ form.inventory_fallback_allowed }}{{ form.inventory_fallback_allowed.errors }}</div>
+          </div>
+        </div>
+        <div class="fulfillment-rule-card">
+          <span class="tw-card-badge tw-tone-amber">منبع اختیاری / fallback</span>
+          <div class="fulfillment-form-grid">
+            <div class="fulfillment-form-field">{{ form.fallback_type.label_tag }}{{ form.fallback_type }}{{ form.fallback_type.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.fallback_quantity.label_tag }}{{ form.fallback_quantity }}{{ form.fallback_quantity.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.fallback_pool.label_tag }}{{ form.fallback_pool }}{{ form.fallback_pool.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.fallback_panel.label_tag }}{{ form.fallback_panel }}{{ form.fallback_panel.errors }}</div>
+            <div class="fulfillment-form-field fulfillment-form-wide">{{ form.fallback_inbounds.label_tag }}{{ form.fallback_inbounds }}{{ form.fallback_inbounds.errors }}</div>
+            <div class="fulfillment-form-field">{{ form.fallback_priority.label_tag }}{{ form.fallback_priority }}{{ form.fallback_priority.errors }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="tw-section">
+    <div class="tw-admin-card">
+      <div class="fulfillment-step-title tw-mb-4"><span class="fulfillment-step-number">4</span><h2>سیاست شکست</h2></div>
+      <div class="tw-model-list">
+        <div class="tw-model-row"><span>سخت‌گیرانه</span><strong>اگر هر منبع الزامی شکست خورد، سفارش provision نشود.</strong></div>
+        <div class="tw-model-row"><span>نیمه‌سخت‌گیرانه</span><strong>اگر حداقل یک کانفیگ معتبر ساخته شد، Cup با هشدار قابل تحویل است.</strong></div>
+        <div class="tw-model-row"><span>اختیاری</span><strong>شکست منابع optional فقط هشدار می‌دهد.</strong></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="tw-section">
+    <div class="tw-admin-card">
+      <div class="fulfillment-step-title tw-mb-4"><span class="fulfillment-step-number">5</span><h2>پیش‌نمایش و ذخیره</h2></div>
+      <div class="tw-model-list">
+        <div class="tw-model-row"><span>پلن متصل</span><strong>{{ plan.name }}</strong></div>
+        <div class="tw-model-row"><span>رفتار لینک تحویل</span><strong>مشتری لینک /sub/&lt;token&gt; و جایگزین ?format=base64 می‌گیرد.</strong></div>
+      </div>
+      <div class="tw-model-actions tw-mt-2">
+        <button class="tw-button tw-button-primary" type="submit">ذخیره و اتصال به پلن</button>
+      </div>
+    </div>
+  </section>
+</form>
+{% endblock %}

@@ -1,0 +1,161 @@
+{% extends "admin/store/cup_center/_base_cup_center.html" %}
+
+{% block cup_breadcrumb %}&rsaquo; افزودن از مخزن{% endblock %}
+
+{% block cup_center_content %}
+<section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
+    <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
+        <div>
+            {% include "admin/store/panel_center/_badge.html" with tone="emerald" label="Inventory Picker" icon="fas fa-list-check" %}
+            <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">افزودن کانفیگ از مخزن به Cup #{{ cup.pk }}</h1>
+            <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">کانفیگ‌های قابل استفاده را انتخاب کن؛ لینک کامل در این لیست نمایش داده نمی‌شود.</p>
+        </div>
+        <a href="{{ detail_url }}" class="tw-button tw-button-secondary">بازگشت به Cup</a>
+    </div>
+</section>
+
+{% if errors %}
+<section class="tw-section">
+    <div class="tw-admin-card tw-space-y-2">
+        {% for error in errors %}
+            <div class="cup-warning">{{ error }}</div>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+{% if result %}
+<section class="tw-section">
+    <div class="tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>نتیجه</h2></div>
+        <div class="cup-summary-grid">
+            <div class="cup-stat"><span>Requested</span><strong>{{ result.requested_count }}</strong></div>
+            <div class="cup-stat"><span>Allocated</span><strong>{{ result.allocated_count }}</strong></div>
+            <div class="cup-stat"><span>CupItems</span><strong>{{ result.cup_item_count }}</strong></div>
+            <div class="cup-stat"><span>Rejected</span><strong>{{ result.rejected_count }}</strong></div>
+            <div class="cup-stat"><span>Added</span><strong>{{ result.added_count }}</strong></div>
+            <div class="cup-stat"><span>Pool</span><strong>{{ result.pool_title|default:"-" }}</strong></div>
+        </div>
+        {% if result.errors %}
+            <div class="tw-space-y-2 tw-mt-3">
+                {% for error in result.errors %}
+                    <div class="cup-warning">{{ error }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+        {% if result.rejection_reasons %}
+            <div class="tw-space-y-2 tw-mt-3">
+                {% for reason in result.rejection_reasons %}
+                    <div class="cup-warning">{{ reason }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
+<section class="tw-section">
+    <form method="post" class="tw-admin-card tw-space-y-4" id="cup-inventory-picker-form">
+        {% csrf_token %}
+        <div class="tw-section-heading">
+            <h2>افزودن کانفیگ از مخزن</h2>
+            <button type="submit" class="tw-button tw-button-primary">افزودن انتخاب‌شده‌ها</button>
+        </div>
+
+        <div class="tw-grid tw-gap-4">
+            {% for row in pool_rows %}
+                <section class="tw-rounded-xl tw-border tw-border-slate-200 tw-bg-white tw-p-4 tw-space-y-3" data-picker-pool-card="{{ row.id }}">
+                    <div class="tw-flex tw-flex-col tw-gap-3 lg:tw-flex-row lg:tw-items-start lg:tw-justify-between">
+                        <label class="tw-flex tw-items-start tw-gap-3 tw-font-black tw-text-slate-950">
+                            <input type="radio" name="pool" value="{{ row.id }}" data-picker-pool="{{ row.id }}"{% if row.id == selected_pool_id %} checked{% endif %}>
+                            <span>
+                                {{ row.title }}
+                                <small class="tw-block tw-mt-1 tw-text-xs tw-font-bold tw-text-slate-500">{{ row.connected_plan|default:"بدون پلن مرتبط" }}</small>
+                            </span>
+                        </label>
+                        <div class="tw-flex tw-flex-wrap tw-gap-2 tw-text-xs tw-font-bold tw-text-slate-600">
+                            <span>موجودی: {{ row.available_stock }}</span>
+                            <span>قانون: {{ row.allocation_mode_display }}</span>
+                            <span>قابل استفاده: {{ row.usable_asset_count }} / {{ row.asset_count }}</span>
+                        </div>
+                    </div>
+
+                    <div class="tw-space-y-3" data-picker-assets="{{ row.id }}"{% if row.id != selected_pool_id %} hidden{% endif %}>
+                        <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row sm:tw-items-center sm:tw-justify-between">
+                            <div>
+                                <strong class="tw-text-sm tw-text-slate-900">کانفیگ‌های قابل انتخاب</strong>
+                                <span class="tw-block tw-text-xs tw-font-bold tw-text-slate-500" data-picker-selected-summary="{{ row.id }}">{{ row.selected_asset_ids|length }} انتخاب شده</span>
+                            </div>
+                            <button type="button" class="tw-button tw-button-secondary" data-picker-select-all="{{ row.id }}">انتخاب همه قابل استفاده‌ها</button>
+                        </div>
+                        <div class="cup-asset-list">
+                            {% for asset in row.asset_rows %}
+                                <label class="cup-asset-card{% if not asset.selectable %} is-disabled{% endif %}">
+                                    <input class="cup-asset-checkbox" type="checkbox" name="inventory_asset_ids_{{ row.id }}" value="{{ asset.id }}" data-picker-asset="{{ row.id }}"{% if asset.selected %} checked{% endif %}{% if not asset.selectable %} disabled{% endif %}>
+                                    <span class="cup-asset-body">
+                                        <span class="cup-asset-title">{{ asset.display_name }}</span>
+                                        <span class="cup-asset-meta">
+                                            <span>{{ asset.protocol }}</span>
+                                            <span>{{ asset.host }}</span>
+                                            <span>{{ asset.status_display }}</span>
+                                            <span>استفاده: {{ asset.current_allocations }}</span>
+                                            <span>ظرفیت: {{ asset.capacity_display }}</span>
+                                            <span>قابل استفاده: {{ asset.usable_display }}</span>
+                                        </span>
+                                        <code class="tw-safe-command">{{ asset.masked_link }}</code>
+                                        {% if not asset.selectable %}<span class="cup-asset-reason">{{ asset.disabled_reason }}</span>{% endif %}
+                                    </span>
+                                </label>
+                            {% empty %}
+                                <div class="tw-empty-state">کانفیگی برای نمایش در این مخزن نیست.</div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </section>
+            {% empty %}
+                <div class="tw-empty-state">مخزن کانفیگ فعال برای انتخاب وجود ندارد.</div>
+            {% endfor %}
+        </div>
+    </form>
+</section>
+
+<script>
+function updatePickerPool(poolId) {
+    document.querySelectorAll("[data-picker-assets]").forEach(function (section) {
+        section.hidden = section.getAttribute("data-picker-assets") !== poolId;
+    });
+}
+
+document.addEventListener("change", function (event) {
+    const pool = event.target.closest("[data-picker-pool]");
+    if (pool) updatePickerPool(pool.getAttribute("data-picker-pool"));
+    const assetInput = event.target.closest("[data-picker-asset]");
+    if (assetInput) updatePickerSelectedSummary(assetInput.getAttribute("data-picker-asset"));
+});
+
+document.addEventListener("click", function (event) {
+    const button = event.target.closest("[data-picker-select-all]");
+    if (!button) return;
+    const poolId = button.getAttribute("data-picker-select-all");
+    const boxes = Array.from(document.querySelectorAll('input[data-picker-asset="' + poolId + '"]:not(:disabled)'));
+    const shouldCheck = boxes.some(function (box) { return !box.checked; });
+    boxes.forEach(function (box) { box.checked = shouldCheck; });
+    button.textContent = shouldCheck ? "لغو انتخاب همه" : "انتخاب همه قابل استفاده‌ها";
+    updatePickerSelectedSummary(poolId);
+});
+
+const checkedPool = document.querySelector("[data-picker-pool]:checked");
+if (checkedPool) updatePickerPool(checkedPool.getAttribute("data-picker-pool"));
+
+function updatePickerSelectedSummary(poolId) {
+    const summary = document.querySelector('[data-picker-selected-summary="' + poolId + '"]');
+    if (!summary) return;
+    const count = document.querySelectorAll('input[data-picker-asset="' + poolId + '"]:checked').length;
+    summary.textContent = count + " انتخاب شده";
+}
+
+document.querySelectorAll("[data-picker-pool-card]").forEach(function (card) {
+    updatePickerSelectedSummary(card.getAttribute("data-picker-pool-card"));
+});
+</script>
+{% endblock %}
