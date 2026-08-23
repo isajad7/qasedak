@@ -3062,6 +3062,112 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertContains(response, "تنظیم تحویل ساب")
         self.assertContains(response, "بدون تنظیم")
 
+    def test_plan_admin_change_page_shows_service_delivery_cards(self):
+        from .config_inventory_services import import_config_assets
+
+        raw_link = self.direct_link(312, host="admin-plan-safe.example.com")
+        pool = self.create_inventory_pool(title="Plan Admin Stock")
+        import_config_assets(pool, raw_link)
+        recipe = self.create_inventory_recipe(pool, quantity=1)
+        PlanInboundRoute.objects.create(store=self.store, plan=self.plan, inbound=self.inbound, is_active=True)
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(reverse("admin:store_plan_change", args=[self.plan.pk]))
+        body = response.content.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "تحویل سرویس")
+        self.assertContains(response, "اتصال مستقیم به اینباندها")
+        self.assertContains(response, "تحویل با ساب اختصاصی قاصدک")
+        self.assertContains(response, "این پلن با ساب اختصاصی قاصدک تحویل داده می‌شود.")
+        self.assertContains(response, "مدیریت اینباندهای پلن")
+        self.assertContains(response, "تست مسیر اینباندها")
+        self.assertContains(response, "ساخت / ویرایش دستور تحویل")
+        self.assertContains(response, "پیش‌نمایش آمادگی")
+        self.assertContains(response, "تست شبیه‌سازی")
+        self.assertContains(response, "مشاهده Recipe")
+        self.assertContains(response, reverse("admin_store_plan_fulfillment_plan", args=[self.plan.pk]))
+        self.assertContains(response, reverse("admin_store_plan_fulfillment_recipe", args=[recipe.pk]))
+        self.assertContains(response, reverse("admin_store_plan_fulfillment_recipe_preview", args=[recipe.pk]))
+        self.assertContains(response, reverse("admin_store_plan_fulfillment_recipe_simulate", args=[recipe.pk]))
+        self.assertNotIn(raw_link, body)
+        self.assertNotIn("vless://", body)
+
+    def test_plan_admin_change_page_without_recipe_preserves_inbound_path(self):
+        PlanInboundRoute.objects.create(store=self.store, plan=self.plan, inbound=self.inbound, is_active=True)
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(reverse("admin:store_plan_change", args=[self.plan.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "برای این پلن هنوز دستور تحویل ساب تعریف نشده است.")
+        self.assertContains(response, "این پلن با مسیر قدیمی اینباند تحویل داده می‌شود.")
+        self.assertContains(response, "ساخت / ویرایش دستور تحویل")
+        self.assertContains(response, reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]))
+
+    def test_plan_admin_add_page_shows_next_step_and_redirect_button(self):
+        self.client.force_login(self.admin_user)
+        add_url = reverse("admin:store_plan_add")
+
+        response = self.client.get(add_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "مرحله بعد از ساخت پلن")
+        self.assertContains(response, "ذخیره و تنظیم تحویل ساب")
+
+        post_response = self.client.post(
+            add_url,
+            {
+                "store": str(self.store.pk),
+                "name": "After Save Fulfillment",
+                "slug": "after-save-fulfillment",
+                "description": "",
+                "volume_gb": "5.000",
+                "duration_days": "30",
+                "price": "120000",
+                "currency": Plan.Currency.TOMAN,
+                "device_limit": "2",
+                "is_active": "on",
+                "is_public": "on",
+                "sort_order": "0",
+                "inbound_routes-TOTAL_FORMS": "0",
+                "inbound_routes-INITIAL_FORMS": "0",
+                "inbound_routes-MIN_NUM_FORMS": "0",
+                "inbound_routes-MAX_NUM_FORMS": "1000",
+                "_save_and_configure_fulfillment": "1",
+            },
+        )
+
+        plan = Plan.objects.get(slug="after-save-fulfillment")
+        self.assertRedirects(post_response, reverse("admin_store_plan_fulfillment_plan", args=[plan.pk]), fetch_redirect_response=False)
+
+    def test_plan_admin_list_delivery_columns_and_filters(self):
+        pool = self.create_inventory_pool(title="Plan List Stock")
+        self.create_inventory_recipe(pool, quantity=1)
+        PlanInboundRoute.objects.create(store=self.store, plan=self.plan, inbound=self.inbound, is_active=True)
+        self.client.force_login(self.admin_user)
+        changelist_url = reverse("admin:store_plan_changelist")
+
+        response = self.client.get(changelist_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "تحویل اینباند")
+        self.assertContains(response, "تحویل ساب")
+        self.assertContains(response, "وضعیت تحویل")
+        self.assertContains(response, "منابع تحویل")
+        self.assertContains(response, "Recipe فعال")
+
+        for query in (
+            {"cup_delivery": "active"},
+            {"cup_delivery": "none"},
+            {"cup_readiness": "error"},
+            {"inbound_delivery": "has"},
+            {"inbound_delivery": "none"},
+        ):
+            with self.subTest(query=query):
+                filtered = self.client.get(changelist_url, query)
+                self.assertEqual(filtered.status_code, 200)
+
     def test_reality_missing_pbk_fails_before_panel_create(self):
         from .cup_fulfillment_services import fulfill_order_with_recipe
 
@@ -5517,6 +5623,27 @@ class PanelHealthServiceTests(TestCase):
         }.get(path, {"success": True, "obj": []})
         return service
 
+    def enable_panel_health_alerts(self, *, threshold=2, repeat_interval=60, recovery=True, quiet=False, quiet_start=None, quiet_end=None):
+        self.store.panel_health_alerts_enabled = True
+        self.store.panel_health_alert_failure_threshold_count = threshold
+        self.store.panel_health_alert_repeat_interval_minutes = repeat_interval
+        self.store.panel_health_recovery_alert_enabled = recovery
+        self.store.panel_health_quiet_hours_enabled = quiet
+        self.store.panel_health_quiet_hours_start = quiet_start
+        self.store.panel_health_quiet_hours_end = quiet_end
+        self.store.save(
+            update_fields=[
+                "panel_health_alerts_enabled",
+                "panel_health_alert_failure_threshold_count",
+                "panel_health_alert_repeat_interval_minutes",
+                "panel_health_recovery_alert_enabled",
+                "panel_health_quiet_hours_enabled",
+                "panel_health_quiet_hours_start",
+                "panel_health_quiet_hours_end",
+                "updated_at",
+            ]
+        )
+
     def test_panel_ok_records_status_and_log(self):
         from .panel_health_services import check_panel_health
 
@@ -5661,6 +5788,90 @@ class PanelHealthServiceTests(TestCase):
         self.assertContains(response, "CSRF/login flow mismatch")
         self.assertNotContains(response, "csrf-secret-token")
 
+    def test_store_admin_shows_alert_settings_with_masked_recipients(self):
+        User = get_user_model()
+        User.objects.create_superuser("owner", "owner@example.com", "password")
+        self.client.login(username="owner", password="password")
+        BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            bot_token="123:secret-token",
+            admin_user_id="1234567890",
+            additional_admin_user_ids="9876543210",
+        )
+
+        response = self.client.get(reverse("admin:store_store_change", args=[self.store.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "هشدار سلامت پنل‌ها")
+        self.assertContains(response, "فعال‌سازی هشدار خرابی پنل")
+        self.assertContains(response, "1234...7890")
+        self.assertContains(response, "9876...3210")
+        self.assertNotContains(response, "1234567890")
+        self.assertNotContains(response, "9876543210")
+        self.assertNotContains(response, "123:secret-token")
+
+    def test_panel_health_alert_settings_admin_page_loads(self):
+        User = get_user_model()
+        User.objects.create_superuser("owner", "owner@example.com", "password")
+        self.client.login(username="owner", password="password")
+
+        response = self.client.get(reverse("admin:store_panelhealthalertsettings_changelist"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "هشدار سلامت پنل")
+
+    def test_alert_settings_validate_positive_intervals(self):
+        self.store.panel_health_alert_check_interval_minutes = 0
+        self.store.panel_health_alert_repeat_interval_minutes = 0
+        self.store.panel_health_alert_failure_threshold_count = 0
+
+        with self.assertRaises(ValidationError) as ctx:
+            self.store.full_clean()
+
+        self.assertIn("panel_health_alert_check_interval_minutes", ctx.exception.message_dict)
+        self.assertIn("panel_health_alert_repeat_interval_minutes", ctx.exception.message_dict)
+        self.assertIn("panel_health_alert_failure_threshold_count", ctx.exception.message_dict)
+
+    def test_alert_settings_quiet_hours_require_both_times(self):
+        self.store.panel_health_quiet_hours_enabled = True
+        self.store.panel_health_quiet_hours_start = time(23, 0)
+        self.store.panel_health_quiet_hours_end = None
+
+        with self.assertRaises(ValidationError) as ctx:
+            self.store.full_clean()
+
+        self.assertIn("panel_health_quiet_hours_enabled", ctx.exception.message_dict)
+
+    def test_panel_admin_alert_buttons_toggle_panel(self):
+        User = get_user_model()
+        User.objects.create_superuser("owner", "owner@example.com", "password")
+        self.client.login(username="owner", password="password")
+
+        disable_response = self.client.get(reverse("admin:store_panel_health_alert_disable", args=[self.panel.pk]))
+        self.panel.refresh_from_db()
+        self.assertEqual(disable_response.status_code, 302)
+        self.assertFalse(self.panel.health_alert_enabled)
+
+        enable_response = self.client.get(reverse("admin:store_panel_health_alert_enable", args=[self.panel.pk]))
+        self.panel.refresh_from_db()
+        self.assertEqual(enable_response.status_code, 302)
+        self.assertTrue(self.panel.health_alert_enabled)
+
+    def test_panel_admin_test_message_uses_admin_alert_service(self):
+        User = get_user_model()
+        User.objects.create_superuser("owner", "owner@example.com", "password")
+        self.client.login(username="owner", password="password")
+
+        with patch(
+            "store.panel_health_services.send_admin_message_to_telegram_admins",
+            return_value={"attempted": 1, "sent": 1, "failed": 0},
+        ) as send_mock:
+            response = self.client.get(reverse("admin:store_panel_health_alert_test", args=[self.panel.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        send_mock.assert_called_once()
+
     def test_panel_admin_health_action_message_uses_safe_reason(self):
         from .xui_api import XUIError
 
@@ -5780,6 +5991,15 @@ class PanelHealthServiceTests(TestCase):
         from .panel_health_services import check_panel_health
         from .xui_api import XUIError
 
+        self.store.panel_health_alerts_enabled = True
+        self.store.panel_health_alert_failure_threshold_count = 1
+        self.store.save(
+            update_fields=[
+                "panel_health_alerts_enabled",
+                "panel_health_alert_failure_threshold_count",
+                "updated_at",
+            ]
+        )
         BotConfiguration.objects.create(
             store=self.store,
             provider=BotConfiguration.Provider.TELEGRAM,
@@ -5802,17 +6022,85 @@ class PanelHealthServiceTests(TestCase):
         send_mock.assert_called_once()
         health = PanelHealthStatus.objects.get(panel=self.panel)
         self.assertIsNotNone(health.last_alert_sent_at)
+        self.assertEqual(health.last_alert_error_code, "auth_failed")
+        self.assertTrue(health.last_alert_message_hash)
         self.assertTrue(PanelHealthCheckLog.objects.get(panel=self.panel).alert_sent)
+
+    def test_alerts_disabled_never_sends(self):
+        from .panel_health_services import check_panel_health
+        from .xui_api import XUIError
+
+        service = self.service_mock(login_side_effect=XUIError("Panel login failed."))
+        with (
+            patch("store.panel_health_services.XUIService", return_value=service),
+            patch("store.panel_health_services.send_admin_message_to_telegram_admins") as send_mock,
+        ):
+            result = check_panel_health(self.panel, send_alerts=True)
+
+        send_mock.assert_not_called()
+        self.assertTrue(result["alert_skipped"])
+        self.assertEqual(result["alert_skip_reason"], "alerts_disabled")
+
+    def test_failure_below_threshold_does_not_alert(self):
+        from .panel_health_services import check_panel_health
+        from .xui_api import XUIError
+
+        self.enable_panel_health_alerts(threshold=2)
+        service = self.service_mock(login_side_effect=XUIError("Panel login failed."))
+        with (
+            patch("store.panel_health_services.XUIService", return_value=service),
+            patch("store.panel_health_services.send_admin_message_to_telegram_admins") as send_mock,
+        ):
+            result = check_panel_health(self.panel, send_alerts=True)
+
+        send_mock.assert_not_called()
+        self.assertEqual(result["consecutive_failure_count"], 1)
+        self.assertEqual(result["alert_skip_reason"], "failure_threshold")
+
+    def test_failure_reaching_threshold_sends_alert(self):
+        from .panel_health_services import check_panel_health
+        from .xui_api import XUIError
+
+        self.enable_panel_health_alerts(threshold=2)
+        PanelHealthStatus.objects.create(
+            panel=self.panel,
+            status=PanelHealthStatus.Status.ERROR,
+            last_error_at=timezone.now() - timedelta(minutes=5),
+            consecutive_failures=1,
+        )
+        service = self.service_mock(login_side_effect=XUIError("Panel login failed."))
+        with (
+            patch("store.panel_health_services.XUIService", return_value=service),
+            patch(
+                "store.panel_health_services.send_admin_message_to_telegram_admins",
+                return_value={"attempted": 1, "sent": 1, "failed": 0},
+            ) as send_mock,
+        ):
+            result = check_panel_health(self.panel, send_alerts=True)
+
+        self.assertEqual(result["consecutive_failure_count"], 2)
+        self.assertEqual(result["alert_sent_count"], 1)
+        send_mock.assert_called_once()
 
     def test_repeated_error_before_cooldown_does_not_alert(self):
         from .panel_health_services import check_panel_health
         from .xui_api import XUIError
 
+        self.store.panel_health_alerts_enabled = True
+        self.store.panel_health_alert_failure_threshold_count = 1
+        self.store.save(
+            update_fields=[
+                "panel_health_alerts_enabled",
+                "panel_health_alert_failure_threshold_count",
+                "updated_at",
+            ]
+        )
         PanelHealthStatus.objects.create(
             panel=self.panel,
             status=PanelHealthStatus.Status.ERROR,
             last_error_at=timezone.now(),
             last_alert_sent_at=timezone.now(),
+            consecutive_failures=2,
         )
         service = self.service_mock(login_side_effect=XUIError("Panel login failed."))
         with (
@@ -5823,11 +6111,119 @@ class PanelHealthServiceTests(TestCase):
 
         send_mock.assert_not_called()
         self.assertTrue(result["alert_skipped"])
-        self.assertEqual(result["alert_skip_reason"], "cooldown")
+        self.assertEqual(result["alert_skip_reason"], "repeat_interval")
+
+    def test_repeated_error_after_repeat_interval_sends_alert(self):
+        from .panel_health_services import check_panel_health
+        from .xui_api import XUIError
+
+        self.enable_panel_health_alerts(threshold=1, repeat_interval=60)
+        PanelHealthStatus.objects.create(
+            panel=self.panel,
+            status=PanelHealthStatus.Status.ERROR,
+            last_error_at=timezone.now() - timedelta(minutes=80),
+            last_alert_sent_at=timezone.now() - timedelta(minutes=61),
+            consecutive_failures=3,
+        )
+        service = self.service_mock(login_side_effect=XUIError("Panel login failed."))
+        with (
+            patch("store.panel_health_services.XUIService", return_value=service),
+            patch(
+                "store.panel_health_services.send_admin_message_to_telegram_admins",
+                return_value={"attempted": 1, "sent": 1, "failed": 0},
+            ) as send_mock,
+        ):
+            result = check_panel_health(self.panel, send_alerts=True)
+
+        self.assertEqual(result["alert_sent_count"], 1)
+        send_mock.assert_called_once()
+
+    def test_recovery_does_not_send_when_disabled(self):
+        from .panel_health_services import check_panel_health
+
+        self.enable_panel_health_alerts(recovery=False)
+        PanelHealthStatus.objects.create(
+            panel=self.panel,
+            status=PanelHealthStatus.Status.ERROR,
+            last_error_at=timezone.now() - timedelta(minutes=21),
+            last_alert_sent_at=timezone.now() - timedelta(minutes=20),
+        )
+        service = self.service_mock()
+        with (
+            patch("store.panel_health_services.XUIService", return_value=service),
+            patch("store.panel_health_services.send_admin_message_to_telegram_admins") as send_mock,
+        ):
+            result = check_panel_health(self.panel, send_alerts=True)
+
+        send_mock.assert_not_called()
+        self.assertEqual(result["status"], PanelHealthStatus.Status.OK)
+        self.assertEqual(result["alert_skip_reason"], "recovery_disabled")
+
+    def test_quiet_hours_suppress_alerts(self):
+        from .jalali import TEHRAN_TZ
+        from .panel_health_services import check_panel_health
+        from .xui_api import XUIError
+
+        local_now = timezone.localtime(timezone.now(), TEHRAN_TZ)
+        self.enable_panel_health_alerts(
+            threshold=1,
+            quiet=True,
+            quiet_start=(local_now - timedelta(minutes=5)).time(),
+            quiet_end=(local_now + timedelta(minutes=5)).time(),
+        )
+        service = self.service_mock(login_side_effect=XUIError("Panel login failed."))
+        with (
+            patch("store.panel_health_services.XUIService", return_value=service),
+            patch("store.panel_health_services.send_admin_message_to_telegram_admins") as send_mock,
+        ):
+            result = check_panel_health(self.panel, send_alerts=True)
+
+        send_mock.assert_not_called()
+        self.assertEqual(result["alert_skip_reason"], "quiet_hours")
+
+    def test_panel_alert_disabled_skips_alert(self):
+        from .panel_health_services import check_panel_health
+        from .xui_api import XUIError
+
+        self.enable_panel_health_alerts(threshold=1)
+        self.panel.health_alert_enabled = False
+        self.panel.save(update_fields=["health_alert_enabled", "updated_at"])
+        service = self.service_mock(login_side_effect=XUIError("Panel login failed."))
+        with (
+            patch("store.panel_health_services.XUIService", return_value=service),
+            patch("store.panel_health_services.send_admin_message_to_telegram_admins") as send_mock,
+        ):
+            result = check_panel_health(self.panel, send_alerts=True)
+
+        send_mock.assert_not_called()
+        self.assertEqual(result["alert_skip_reason"], "panel_alert_disabled")
+
+    def test_alert_message_masks_secrets_and_links(self):
+        from .panel_health_services import format_panel_health_alert_message
+
+        result = {
+            "checked_at": timezone.now(),
+            "status": PanelHealthStatus.Status.ERROR,
+            "error_code": "auth_failed",
+            "error_message": (
+                "failed panel-password https://panel.example.com/secret "
+                "vless://uuid@example.com /sub/panel-sub-token"
+            ),
+            "consecutive_failure_count": 2,
+        }
+
+        message = format_panel_health_alert_message(self.panel, result)
+
+        self.assertNotIn("panel-password", message)
+        self.assertNotIn("https://panel.example.com/secret", message)
+        self.assertNotIn("vless://", message)
+        self.assertNotIn("panel-sub-token", message)
 
     def test_error_to_ok_sends_recovery_alert(self):
         from .panel_health_services import check_panel_health
 
+        self.store.panel_health_alerts_enabled = True
+        self.store.save(update_fields=["panel_health_alerts_enabled", "updated_at"])
         PanelHealthStatus.objects.create(
             panel=self.panel,
             status=PanelHealthStatus.Status.ERROR,
@@ -5888,6 +6284,85 @@ class PanelHealthServiceTests(TestCase):
         self.assertIn("checked=1", output)
         self.assertIn("ok=1", output)
         self.assertEqual(PanelHealthCheckLog.objects.count(), 0)
+
+    def test_panel_health_alerts_command_dry_run_sends_nothing(self):
+        from .xui_api import XUIError
+
+        self.enable_panel_health_alerts(threshold=1)
+        service = self.service_mock(login_side_effect=XUIError("Panel login failed."))
+        stdout = StringIO()
+        with (
+            patch("store.panel_health_services.XUIService", return_value=service),
+            patch("store.panel_health_services.send_admin_message_to_telegram_admins") as send_mock,
+        ):
+            call_command("panel_health_alerts", "--panel-id", str(self.panel.pk), "--dry-run", "--verbose", stdout=stdout)
+
+        output = stdout.getvalue()
+        self.assertIn("Panel health alerts summary", output)
+        self.assertIn("would_send=1", output)
+        self.assertIn("dry_run=True", output)
+        send_mock.assert_not_called()
+        self.assertEqual(PanelHealthCheckLog.objects.count(), 0)
+
+    def test_panel_health_alerts_command_sends_only_admin_recipients(self):
+        from .xui_api import XUIError
+
+        self.enable_panel_health_alerts(threshold=1)
+        bot_config = BotConfiguration.objects.create(
+            store=self.store,
+            provider=BotConfiguration.Provider.TELEGRAM,
+            bot_token="123:test",
+            admin_user_id="42",
+            additional_admin_user_ids="43",
+        )
+        customer = Customer.objects.create(username="bob", display_name="Bob")
+        BotUser.objects.create(
+            bot_config=bot_config,
+            customer=customer,
+            provider_user_id="customer-999",
+            chat_id="999",
+        )
+        service = self.service_mock(login_side_effect=XUIError("Panel login failed."))
+        stdout = StringIO()
+        with (
+            patch("store.panel_health_services.XUIService", return_value=service),
+            patch("store.telegram_bot.client.BotClient.send_message", return_value={}) as send_mock,
+        ):
+            call_command("panel_health_alerts", "--panel-id", str(self.panel.pk), stdout=stdout)
+
+        sent_chat_ids = [call.kwargs["chat_id"] for call in send_mock.call_args_list]
+        self.assertEqual(sent_chat_ids, ["42", "43"])
+        self.assertNotIn("999", sent_chat_ids)
+        self.assertIn("alerts_sent=2", stdout.getvalue())
+
+    def test_panel_health_alerts_command_panel_id_limits_checks(self):
+        from .xui_api import XUIError
+
+        other_panel = Panel.objects.create(
+            store=self.store,
+            name="France 1",
+            url="https://fr.example.com",
+            username="admin",
+            password="other-password",
+            is_active=True,
+        )
+        Inbound.objects.create(
+            panel=other_panel,
+            inbound_id=2,
+            remark="Other",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="127.0.0.1",
+            port="443",
+            config_params="type=tcp&security=none",
+            is_active=True,
+        )
+        self.enable_panel_health_alerts(threshold=1)
+        service = self.service_mock(login_side_effect=XUIError("Panel login failed."))
+        stdout = StringIO()
+        with patch("store.panel_health_services.XUIService", return_value=service):
+            call_command("panel_health_alerts", "--panel-id", str(self.panel.pk), "--dry-run", stdout=stdout)
+
+        self.assertIn("total_panels=1", stdout.getvalue())
 
     def test_cleanup_old_logs(self):
         from .panel_health_services import cleanup_old_panel_health_logs

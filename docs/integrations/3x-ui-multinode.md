@@ -116,6 +116,22 @@ Run:
 
 Admin GET pages show saved health and compatibility metadata only. They do not call X-UI.
 
+## Panel Health Bot Alerts
+
+Admin-controlled Telegram alerts are managed in Django Admin under Infrastructure -> هشدار سلامت پنل‌ها.
+
+Use the dedicated alert runner after enabling the Store switch:
+
+```bash
+./venv/bin/python manage.py panel_health_alerts --dry-run --verbose
+./venv/bin/python manage.py panel_health_alerts --panel-id <id> --no-send --verbose
+./venv/bin/python manage.py panel_health_alerts --force-test-message --panel-id <id>
+```
+
+The command sends only to Telegram admin recipients configured in `BotConfiguration`; customer bot users are never selected. Dry-run sends nothing and writes no health logs. `--no-send` updates health state but suppresses Telegram delivery.
+
+Scheduling is intentionally external. A cron or systemd timer can call `panel_health_alerts` at the interval configured in admin, but this patch does not install or enable a production timer automatically.
+
 ## Links
 
 Link generation prefers managed host data when available, then `shareAddrStrategy`/`shareAddr`, then local inbound settings. Full generated links are treated as secrets and must not be printed in logs, fixtures, or reports.

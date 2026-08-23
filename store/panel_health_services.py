@@ -1,3 +1,4 @@
+import hashlib
 import re
 import time
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .admin_notifications import send_admin_message_to_telegram_admins
-from .jalali import format_jalali_datetime, persian_digits
+from .jalali import TEHRAN_TZ, format_jalali_datetime, persian_digits
 from .models import BotEventLog, Inbound, Panel, PanelHealthCheckLog, PanelHealthStatus, Store
 from .panels.errors import PanelIntegrationError
 from .telegram_bot.redaction import sanitize_bot_event_log_value
@@ -31,6 +32,13 @@ class PanelMonitorSettings:
     alerts_enabled: bool = True
     timeout_seconds: int = 15
     alert_cooldown_minutes: int = 30
+    alert_check_interval_minutes: int = 15
+    alert_repeat_interval_minutes: int = 60
+    failure_threshold_count: int = 2
+    recovery_alert_enabled: bool = True
+    quiet_hours_enabled: bool = False
+    quiet_hours_start: object | None = None
+    quiet_hours_end: object | None = None
     max_log_age_days: int = 30
 
 
@@ -45,12 +53,26 @@ def _positive_int(value, default):
 def get_panel_monitor_settings(store=None):
     if store is None:
         store = Store.objects.filter(is_active=True).order_by("pk").first()
+    repeat_interval = _positive_int(getattr(store, "panel_health_alert_repeat_interval_minutes", None), 60)
     return PanelMonitorSettings(
         store=store,
         enabled=bool(getattr(store, "panel_monitor_enabled", True)),
-        alerts_enabled=bool(getattr(store, "panel_monitor_alerts_enabled", True)),
+        alerts_enabled=bool(
+            getattr(store, "panel_monitor_alerts_enabled", True)
+            and getattr(store, "panel_health_alerts_enabled", False)
+        ),
         timeout_seconds=_positive_int(getattr(store, "panel_monitor_check_timeout_seconds", None), 15),
-        alert_cooldown_minutes=_positive_int(getattr(store, "panel_monitor_alert_cooldown_minutes", None), 30),
+        alert_cooldown_minutes=repeat_interval,
+        alert_check_interval_minutes=_positive_int(
+            getattr(store, "panel_health_alert_check_interval_minutes", None),
+            15,
+        ),
+        alert_repeat_interval_minutes=repeat_interval,
+        failure_threshold_count=_positive_int(getattr(store, "panel_health_alert_failure_threshold_count", None), 2),
+        recovery_alert_enabled=bool(getattr(store, "panel_health_recovery_alert_enabled", True)),
+        quiet_hours_enabled=bool(getattr(store, "panel_health_quiet_hours_enabled", False)),
+        quiet_hours_start=getattr(store, "panel_health_quiet_hours_start", None),
+        quiet_hours_end=getattr(store, "panel_health_quiet_hours_end", None),
         max_log_age_days=_positive_int(getattr(store, "panel_monitor_max_log_age_days", None), 30),
     )
 
@@ -62,6 +84,61 @@ def get_panels_for_health_check(panel_id=None, limit=None):
     if limit:
         panels = panels[: max(int(limit), 0)]
     return panels
+
+
+def mask_alert_recipient(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 8:
+        return f"{text[:2]}***"
+    return f"{text[:4]}...{text[-4:]}"
+
+
+def get_panel_health_alert_recipient_summary(store=None):
+    from .models import BotConfiguration
+    from .telegram_bot.notifications import active_bot_configs
+
+    recipients = []
+    configs = active_bot_configs(store=store).filter(provider=BotConfiguration.Provider.TELEGRAM)
+    for config in configs:
+        for admin_id in config.get_admin_user_ids():
+            if admin_id not in recipients:
+                recipients.append(admin_id)
+    return {
+        "count": len(recipients),
+        "masked": [mask_alert_recipient(admin_id) for admin_id in recipients],
+        "config_count": configs.count(),
+    }
+
+
+def safe_panel_alert_label(panel):
+    name = sanitize_operational_text(getattr(panel, "name", "") or "", panel=panel, max_length=80)
+    if name:
+        return f"{name} (ID {getattr(panel, 'pk', '-')})"
+    return f"Panel ID {getattr(panel, 'pk', '-')}"
+
+
+def panel_alert_repeat_interval_minutes(panel, settings):
+    return _positive_int(getattr(panel, "alert_repeat_interval_minutes", None), settings.alert_repeat_interval_minutes)
+
+
+def panel_alert_failure_threshold_count(panel, settings):
+    return _positive_int(getattr(panel, "failure_threshold_count", None), settings.failure_threshold_count)
+
+
+def panel_health_alerts_quiet_now(settings, *, now=None):
+    if not settings.quiet_hours_enabled or not settings.quiet_hours_start or not settings.quiet_hours_end:
+        return False
+    now = now or timezone.now()
+    local_time = timezone.localtime(now, TEHRAN_TZ).time()
+    start = settings.quiet_hours_start
+    end = settings.quiet_hours_end
+    if start == end:
+        return True
+    if start < end:
+        return start <= local_time < end
+    return local_time >= start or local_time < end
 
 
 def sanitize_operational_text(value, *, panel=None, max_length=500):
@@ -76,6 +153,7 @@ def sanitize_operational_text(value, *, panel=None, max_length=500):
         if secret and len(secret) >= 3:
             text = text.replace(secret, "<redacted>")
     text = URL_RE.sub("<url-redacted>", text)
+    text = re.sub(r"(?i)(?:^|\s)/?sub/[^\s<>()]+", " <subscription-link-redacted>", text)
     text = re.sub(r"(?i)(csrf[-_ ]?token|session|cookie)[\"':=\s]+[^\"'\s,}]+", r"\1=<redacted>", text)
     text = re.sub(r"(?i)\bcsrf[-_a-z0-9]{6,}\b", "<csrf-redacted>", text)
     text = re.sub(r"(?i)\b(?:session|cookie)[-_a-z0-9]{8,}\b", "<session-redacted>", text)
@@ -522,6 +600,7 @@ def update_panel_health_status(panel, result):
     metadata = sanitize_operational_metadata(result.get("metadata") or {}, panel=panel)
     with transaction.atomic():
         health_status, _created = PanelHealthStatus.objects.select_for_update().get_or_create(panel=panel)
+        previous_status = health_status.status
         health_status.status = status
         health_status.last_checked_at = checked_at
         health_status.response_time_ms = result.get("response_time_ms")
@@ -532,6 +611,8 @@ def update_panel_health_status(panel, result):
 
         if status == PanelHealthStatus.Status.OK:
             health_status.last_ok_at = checked_at
+            if previous_status in PROBLEM_STATUSES:
+                health_status.last_recovery_at = checked_at
             health_status.consecutive_successes += 1
             health_status.consecutive_failures = 0
         elif status in PROBLEM_STATUSES:
@@ -561,53 +642,45 @@ def update_panel_health_status(panel, result):
     return health_status, log
 
 
-def should_send_panel_alert(previous_status, new_status, settings, *, status_obj=None, force=False, now=None):
-    if not settings.alerts_enabled:
-        return ""
-    now = now or timezone.now()
-    previous_status = previous_status or PanelHealthStatus.Status.UNKNOWN
+def _message_hash(message):
+    return hashlib.sha256(str(message or "").encode("utf-8")).hexdigest()
 
-    if new_status == PanelHealthStatus.Status.OK and previous_status in PROBLEM_STATUSES:
-        return "recovery"
 
-    if new_status in PROBLEM_STATUSES:
-        if force:
-            return "problem"
-        if previous_status in {
-            PanelHealthStatus.Status.UNKNOWN,
-            PanelHealthStatus.Status.OK,
-            PanelHealthStatus.Status.DISABLED,
-        }:
-            return "problem"
-        if previous_status != new_status and new_status == PanelHealthStatus.Status.ERROR:
-            return "problem"
-
-        last_alert = getattr(status_obj, "last_alert_sent_at", None)
-        if not last_alert:
-            return "problem"
-        cooldown = timedelta(minutes=settings.alert_cooldown_minutes)
-        if last_alert + cooldown <= now:
-            return "problem"
-    return ""
+def should_send_panel_alert(previous_status, new_status, settings, *, panel=None, status_obj=None, force=False, now=None):
+    decision = PanelHealthAlertService(now=now).decide_alert(
+        panel,
+        previous_status,
+        {"status": new_status},
+        settings,
+        status_obj=status_obj,
+        force=force,
+    )
+    return decision["action"]
 
 
 def format_panel_health_alert_message(panel, result):
     checked_at = format_jalali_datetime(result.get("checked_at")) or "-"
     status = str(result.get("status") or "").upper()
+    step = result.get("error_code") or status or "-"
     error = result.get("error_message") or result.get("summary") or "خطای نامشخص"
-    response_time = result.get("response_time_ms")
-    response_line = f"\nزمان پاسخ: {persian_digits(response_time)} ms" if response_time is not None else ""
+    consecutive_failures = result.get("consecutive_failure_count")
+    if consecutive_failures is None:
+        consecutive_failures = result.get("consecutive_failures") or 0
     return "\n".join(
         [
-            "⚠️ مشکل در پنل X-UI",
+            "🚨 هشدار خرابی پنل",
             "",
-            f"پنل: {escape(panel.name)}",
-            f"وضعیت: {escape(status)}",
+            f"پنل: {escape(safe_panel_alert_label(panel))}",
+            "وضعیت: خراب",
+            f"مرحله: {escape(str(step))}",
             f"خطا: {escape(sanitize_operational_text(error, panel=panel, max_length=300))}",
-            f"زمان بررسی: {checked_at}{response_line}",
+            f"تعداد خطاهای پشت‌سرهم: {persian_digits(consecutive_failures)}",
+            f"زمان: {checked_at}",
             "",
             "اقدام پیشنهادی:",
-            "لطفاً وضعیت سرور، سرویس X-UI و اینباندهای فعال را بررسی کنید.",
+            "- credential پنل را بررسی کنید",
+            "- وضعیت API پنل را بررسی کنید",
+            "- اینباندها و ظرفیت را بررسی کنید",
         ]
     )
 
@@ -618,18 +691,18 @@ def format_panel_recovery_message(panel, result):
     downtime_label = persian_digits(downtime_minutes) if downtime_minutes is not None else "-"
     return "\n".join(
         [
-            "✅ پنل دوباره در دسترس است",
+            "✅ پنل دوباره سالم شد",
             "",
-            f"پنل: {escape(panel.name)}",
-            "وضعیت: OK",
-            f"مدت تقریبی اختلال: {downtime_label} دقیقه",
-            f"زمان بررسی: {checked_at}",
+            f"پنل: {escape(safe_panel_alert_label(panel))}",
+            f"زمان قطعی تقریبی: {downtime_label} دقیقه",
+            f"زمان بازیابی: {checked_at}",
         ]
     )
 
 
 def send_panel_health_alert(panel, status, result):
     message = format_panel_health_alert_message(panel, result)
+    result["alert_message_hash"] = _message_hash(message)
     return send_admin_message_to_telegram_admins(
         getattr(panel, "store", None),
         text=message,
@@ -639,6 +712,7 @@ def send_panel_health_alert(panel, status, result):
 
 def send_panel_recovery_alert(panel, result):
     message = format_panel_recovery_message(panel, result)
+    result["alert_message_hash"] = _message_hash(message)
     return send_admin_message_to_telegram_admins(
         getattr(panel, "store", None),
         text=message,
@@ -659,61 +733,194 @@ def _mark_alert_delivery(status_obj, log, result, delivery, *, recovery=False):
             status_obj.save(update_fields=["last_recovery_alert_sent_at", "updated_at"])
         else:
             status_obj.last_alert_sent_at = now
-            status_obj.save(update_fields=["last_alert_sent_at", "updated_at"])
+            status_obj.last_alert_error_code = result.get("error_code") or ""
+            status_obj.last_alert_message_hash = result.get("alert_message_hash") or ""
+            status_obj.save(
+                update_fields=[
+                    "last_alert_sent_at",
+                    "last_alert_error_code",
+                    "last_alert_message_hash",
+                    "updated_at",
+                ]
+            )
         log.alert_sent = True
         log.save(update_fields=["alert_sent"])
     return result
 
 
-def check_panel_health(panel, send_alerts=False, force=False, dry_run=False):
-    settings = get_panel_monitor_settings(getattr(panel, "store", None))
-    previous_status_obj = PanelHealthStatus.objects.filter(panel=panel).first()
-    previous_status = getattr(previous_status_obj, "status", PanelHealthStatus.Status.UNKNOWN)
-    result = build_panel_health_result(panel, settings=settings)
-    result["previous_status"] = previous_status
-    result["dry_run"] = dry_run
+class PanelHealthAlertService:
+    def __init__(self, *, store=None, now=None):
+        self.store = store
+        self.now = now
 
-    if previous_status_obj and previous_status_obj.last_error_at:
-        downtime = result["checked_at"] - previous_status_obj.last_error_at
-        result["downtime_minutes"] = max(int(downtime.total_seconds() // 60), 0)
+    def get_settings(self, panel=None):
+        return get_panel_monitor_settings(getattr(panel, "store", None) or self.store)
 
-    if dry_run:
-        if send_alerts:
+    def simulate_consecutive_failure_count(self, previous_status_obj, result):
+        status = result.get("status")
+        if status not in PROBLEM_STATUSES:
+            return 0
+        previous_status = getattr(previous_status_obj, "status", PanelHealthStatus.Status.UNKNOWN)
+        previous_count = int(getattr(previous_status_obj, "consecutive_failures", 0) or 0)
+        return previous_count + 1 if previous_status in PROBLEM_STATUSES else 1
+
+    def decide_alert(self, panel, previous_status, result, settings, *, status_obj=None, force=False):
+        now = self.now or timezone.now()
+        new_status = result.get("status") or PanelHealthStatus.Status.UNKNOWN
+        previous_status = previous_status or PanelHealthStatus.Status.UNKNOWN
+        if panel is None:
+            return {"action": "", "reason": "panel_missing", "would_send": False}
+        if not settings.alerts_enabled:
+            return {"action": "", "reason": "alerts_disabled", "would_send": False}
+        if not getattr(panel, "health_alert_enabled", True):
+            return {"action": "", "reason": "panel_alert_disabled", "would_send": False}
+        if panel_health_alerts_quiet_now(settings, now=now) and not force:
+            return {"action": "", "reason": "quiet_hours", "would_send": False}
+
+        if new_status == PanelHealthStatus.Status.OK and previous_status in PROBLEM_STATUSES:
+            if settings.recovery_alert_enabled:
+                return {"action": "recovery", "reason": "", "would_send": True}
+            return {"action": "", "reason": "recovery_disabled", "would_send": False}
+
+        if new_status not in PROBLEM_STATUSES:
+            return {"action": "", "reason": "healthy", "would_send": False}
+
+        if force:
+            return {"action": "problem", "reason": "", "would_send": True}
+
+        consecutive_failures = result.get("consecutive_failure_count")
+        if consecutive_failures is None:
+            consecutive_failures = int(getattr(status_obj, "consecutive_failures", 0) or 0)
+        threshold = panel_alert_failure_threshold_count(panel, settings)
+        if consecutive_failures < threshold:
+            return {"action": "", "reason": "failure_threshold", "would_send": False}
+
+        last_alert = getattr(status_obj, "last_alert_sent_at", None)
+        repeat_interval = panel_alert_repeat_interval_minutes(panel, settings)
+        if last_alert and last_alert + timedelta(minutes=repeat_interval) > now:
+            return {"action": "", "reason": "repeat_interval", "would_send": False}
+
+        return {"action": "problem", "reason": "", "would_send": True}
+
+    def check_panel(self, panel, *, send_alerts=False, force=False, dry_run=False, no_send=False):
+        settings = self.get_settings(panel)
+        previous_status_obj = PanelHealthStatus.objects.filter(panel=panel).first()
+        previous_status = getattr(previous_status_obj, "status", PanelHealthStatus.Status.UNKNOWN)
+        result = build_panel_health_result(panel, settings=settings)
+        result["previous_status"] = previous_status
+        result["dry_run"] = dry_run
+        result["would_send_alert"] = False
+        result["alert_decision"] = ""
+
+        if previous_status_obj and previous_status_obj.last_error_at:
+            downtime = result["checked_at"] - previous_status_obj.last_error_at
+            result["downtime_minutes"] = max(int(downtime.total_seconds() // 60), 0)
+
+        if dry_run:
+            result["consecutive_failure_count"] = self.simulate_consecutive_failure_count(previous_status_obj, result)
+            if send_alerts:
+                decision = self.decide_alert(
+                    panel,
+                    previous_status,
+                    result,
+                    settings,
+                    status_obj=previous_status_obj,
+                    force=force,
+                )
+                result["would_send_alert"] = bool(decision["would_send"])
+                result["alert_decision"] = decision["action"]
+                if not decision["would_send"]:
+                    result["alert_skipped"] = True
+                    result["alert_skip_reason"] = decision["reason"] or "dry_run"
+            return result
+
+        status_obj, log = update_panel_health_status(panel, result)
+        result["consecutive_failure_count"] = status_obj.consecutive_failures
+        result["last_health_status"] = status_obj.status
+        if not send_alerts:
+            return result
+
+        decision = self.decide_alert(
+            panel,
+            previous_status,
+            result,
+            settings,
+            status_obj=status_obj,
+            force=force,
+        )
+        result["would_send_alert"] = bool(decision["would_send"])
+        result["alert_decision"] = decision["action"]
+        if no_send and decision["would_send"]:
             result["alert_skipped"] = True
-            result["alert_skip_reason"] = "dry_run"
+            result["alert_skip_reason"] = "no_send"
+            return result
+        if decision["action"] == "problem":
+            delivery = send_panel_health_alert(panel, result["status"], result)
+            return _mark_alert_delivery(status_obj, log, result, delivery)
+        if decision["action"] == "recovery":
+            delivery = send_panel_recovery_alert(panel, result)
+            return _mark_alert_delivery(status_obj, log, result, delivery, recovery=True)
+
+        if result["status"] in PROBLEM_STATUSES or previous_status in PROBLEM_STATUSES:
+            result["alert_skipped"] = True
+            result["alert_skip_reason"] = decision["reason"]
         return result
 
-    status_obj, log = update_panel_health_status(panel, result)
-    if not send_alerts:
+    def send_test_message(self, panel, *, dry_run=False, no_send=False):
+        result = {
+            "panel_id": getattr(panel, "pk", None),
+            "panel_name": getattr(panel, "name", ""),
+            "status": "test",
+            "checked_at": self.now or timezone.now(),
+            "consecutive_failure_count": 0,
+            "error_code": "test_message",
+            "error_message": "پیام تست هشدار سلامت پنل.",
+            "summary": "پیام تست هشدار سلامت پنل.",
+        }
+        message = "\n".join(
+            [
+                "🧪 پیام تست هشدار سلامت پنل",
+                "",
+                f"پنل: {escape(safe_panel_alert_label(panel))}",
+                f"زمان: {format_jalali_datetime(result['checked_at']) or '-'}",
+                "",
+                "این پیام فقط برای ادمین‌های تنظیم‌شده ارسال شده است.",
+            ]
+        )
+        result["alert_message_hash"] = _message_hash(message)
+        result["would_send_alert"] = True
+        if dry_run or no_send:
+            result["alert_skipped"] = True
+            result["alert_skip_reason"] = "dry_run" if dry_run else "no_send"
+            result["alert_sent_count"] = 0
+            result["alert_failed_count"] = 0
+            return result
+        delivery = send_admin_message_to_telegram_admins(
+            getattr(panel, "store", None),
+            text=message,
+            event_type=BotEventLog.EventType.WEBHOOK,
+        )
+        result["alert_sent_count"] = int(delivery.get("sent") or 0)
+        result["alert_failed_count"] = int(delivery.get("failed") or 0)
+        result["alert_sent"] = result["alert_sent_count"] > 0
         return result
 
-    if not settings.alerts_enabled:
-        result["alert_skipped"] = True
-        result["alert_skip_reason"] = "alerts_disabled"
-        return result
 
-    decision = should_send_panel_alert(
-        previous_status,
-        result["status"],
-        settings,
-        status_obj=previous_status_obj,
+def check_panel_health(panel, send_alerts=False, force=False, dry_run=False, no_send=False):
+    return PanelHealthAlertService().check_panel(
+        panel,
+        send_alerts=send_alerts,
         force=force,
+        dry_run=dry_run,
+        no_send=no_send,
     )
-    if decision == "problem":
-        delivery = send_panel_health_alert(panel, result["status"], result)
-        return _mark_alert_delivery(status_obj, log, result, delivery)
-    if decision == "recovery":
-        delivery = send_panel_recovery_alert(panel, result)
-        return _mark_alert_delivery(status_obj, log, result, delivery, recovery=True)
-
-    if result["status"] in PROBLEM_STATUSES:
-        result["alert_skipped"] = True
-        result["alert_skip_reason"] = "cooldown"
-    return result
 
 
-def check_all_panels_health(send_alerts=False, dry_run=False, panel_id=None, limit=None):
+def check_all_panels_health(send_alerts=False, dry_run=False, panel_id=None, limit=None, force=False, no_send=False, active_only=False):
     panels = list(get_panels_for_health_check(panel_id=panel_id, limit=limit))
+    if active_only and panel_id is None:
+        panels = [panel for panel in panels if panel.is_active]
+    service = PanelHealthAlertService()
     summary = {
         "total_panels": len(panels),
         "checked": 0,
@@ -724,13 +931,20 @@ def check_all_panels_health(send_alerts=False, dry_run=False, panel_id=None, lim
         "alerts_sent": 0,
         "alerts_skipped": 0,
         "failed": 0,
+        "would_send": 0,
         "dry_run": bool(dry_run),
         "results": [],
     }
 
     for panel in panels:
         try:
-            result = check_panel_health(panel, send_alerts=send_alerts, dry_run=dry_run)
+            result = service.check_panel(
+                panel,
+                send_alerts=send_alerts,
+                force=force,
+                dry_run=dry_run,
+                no_send=no_send,
+            )
         except Exception as exc:
             summary["failed"] += 1
             result = {
@@ -742,6 +956,7 @@ def check_all_panels_health(send_alerts=False, dry_run=False, panel_id=None, lim
                 "alert_sent": False,
                 "alert_sent_count": 0,
                 "alert_skipped": False,
+                "would_send_alert": False,
             }
 
         status = result.get("status") or PanelHealthStatus.Status.ERROR
@@ -750,6 +965,7 @@ def check_all_panels_health(send_alerts=False, dry_run=False, panel_id=None, lim
         if status != PanelHealthStatus.Status.DISABLED:
             summary["checked"] += 1
         summary["alerts_sent"] += int(result.get("alert_sent_count") or 0)
+        summary["would_send"] += int(bool(result.get("would_send_alert")))
         if result.get("alert_skipped"):
             summary["alerts_skipped"] += 1
         summary["results"].append(result)

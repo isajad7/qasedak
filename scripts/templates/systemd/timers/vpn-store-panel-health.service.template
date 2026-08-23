@@ -5,4 +5,4 @@ Description=VPN Store panel health check job
 Type=oneshot
 WorkingDirectory={{INSTALL_DIR}}
 EnvironmentFile={{INSTALL_DIR}}/.env
-ExecStart={{INSTALL_DIR}}/venv/bin/python manage.py check_panel_health
+ExecStart={{INSTALL_DIR}}/venv/bin/python manage.py panel_health_alerts

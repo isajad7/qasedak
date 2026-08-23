@@ -246,6 +246,7 @@ CAPABILITY_PERMISSIONS = {
     ),
     "panels.view": (
         "store.view_panel",
+        "store.view_panelhealthalertsettings",
         "store.view_inbound",
         "store.view_panelhealthstatus",
         "store.view_panelhealthchecklog",
@@ -255,6 +256,8 @@ CAPABILITY_PERMISSIONS = {
     ),
     "panels.manage": (
         "store.change_panel",
+        "store.view_panelhealthalertsettings",
+        "store.change_panelhealthalertsettings",
         "store.change_inbound",
         "store.view_panel",
         "store.view_inbound",

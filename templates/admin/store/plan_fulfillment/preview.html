@@ -9,6 +9,7 @@
       <p class="tw-mt-2 tw-mb-0 tw-text-sm tw-leading-7 tw-text-slate-600">{{ recipe.title }} · {{ readiness.plan_label }}</p>
     </div>
     <div class="tw-model-actions">
+      <a class="tw-button tw-button-secondary" href="{% url 'admin:store_plan_change' recipe.plan_id %}">بازگشت به پلن فروش</a>
       <a class="tw-button tw-button-secondary" href="{{ recipe_urls.builder }}">دستور تحویل</a>
       <a class="tw-button tw-button-primary" href="{{ recipe_urls.simulate }}">تست شبیه‌سازی</a>
     </div>

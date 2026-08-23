@@ -323,6 +323,7 @@ JAZZMIN_SETTINGS = {
         "Infrastructure": [
             {"name": _("Panel Integration Center"), "url": "admin_store_panel_center", "icon": "fas fa-plug", "permissions": ["store.view_panel"]},
             {"name": _("Plan Routing Builder"), "url": "admin_store_panel_center_routing", "icon": "fas fa-route", "permissions": ["store.view_plan"]},
+            {"model": "store.PanelHealthAlertSettings"},
             {"model": "store.Panel"},
             {"model": "store.Inbound"},
             {"model": "store.BotConfiguration"},
@@ -368,6 +369,7 @@ JAZZMIN_SETTINGS = {
         "store.SupportMessage",
         "admin_store_panel_center",
         "admin_store_panel_center_routing",
+        "store.PanelHealthAlertSettings",
         "admin_store_cup_center",
         "admin_store_cup_center_quick_build",
         "admin_store_plan_fulfillment",
@@ -414,6 +416,7 @@ JAZZMIN_SETTINGS = {
         "store.DiscountCode": "fas fa-tags",
         "store.Order": "fas fa-shopping-cart",
         "store.Panel": "fas fa-server",
+        "store.PanelHealthAlertSettings": "fas fa-exclamation-triangle",
         "store.Inbound": "fas fa-network-wired",
         "store.VPNClient": "fas fa-shield-alt",
         "store.SubscriptionCup": "fas fa-link",

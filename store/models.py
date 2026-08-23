@@ -525,6 +525,45 @@ class Store(TimeStampedModel):
         default=True,
         help_text=_("Send Telegram admin alerts when panel health changes or cooldown reminders are due."),
     )
+    panel_health_alerts_enabled = models.BooleanField(
+        _("فعال‌سازی هشدار خرابی پنل"),
+        default=False,
+        help_text=_("Master switch for Telegram admin alerts when panel health checks fail."),
+    )
+    panel_health_alert_check_interval_minutes = models.PositiveIntegerField(
+        _("فاصله بررسی سلامت پنل"),
+        default=15,
+        validators=[MinValueValidator(1)],
+        help_text=_("Intended scheduler interval in minutes. Scheduling is configured outside Django."),
+    )
+    panel_health_alert_repeat_interval_minutes = models.PositiveIntegerField(
+        _("فاصله تکرار هشدار برای خطای تکراری"),
+        default=60,
+        validators=[MinValueValidator(1)],
+    )
+    panel_health_alert_failure_threshold_count = models.PositiveIntegerField(
+        _("تعداد خطای پشت‌سرهم قبل از ارسال هشدار"),
+        default=2,
+        validators=[MinValueValidator(1)],
+    )
+    panel_health_recovery_alert_enabled = models.BooleanField(
+        _("ارسال پیام بعد از درست شدن پنل"),
+        default=True,
+    )
+    panel_health_quiet_hours_enabled = models.BooleanField(
+        _("فعال‌سازی ساعات سکوت"),
+        default=False,
+    )
+    panel_health_quiet_hours_start = models.TimeField(
+        _("شروع ساعات سکوت"),
+        null=True,
+        blank=True,
+    )
+    panel_health_quiet_hours_end = models.TimeField(
+        _("پایان ساعات سکوت"),
+        null=True,
+        blank=True,
+    )
     panel_monitor_check_timeout_seconds = models.PositiveIntegerField(
         _("panel monitor check timeout seconds"),
         default=15,
@@ -671,6 +710,25 @@ class Store(TimeStampedModel):
             errors["panel_monitor_alert_cooldown_minutes"] = _("Panel monitor alert cooldown must be positive.")
         if self.panel_monitor_max_log_age_days is not None and self.panel_monitor_max_log_age_days <= 0:
             errors["panel_monitor_max_log_age_days"] = _("Panel monitor log age must be positive.")
+        if (
+            self.panel_health_alert_check_interval_minutes is not None
+            and self.panel_health_alert_check_interval_minutes <= 0
+        ):
+            errors["panel_health_alert_check_interval_minutes"] = _("Panel health alert check interval must be positive.")
+        if (
+            self.panel_health_alert_repeat_interval_minutes is not None
+            and self.panel_health_alert_repeat_interval_minutes <= 0
+        ):
+            errors["panel_health_alert_repeat_interval_minutes"] = _("Panel health alert repeat interval must be positive.")
+        if (
+            self.panel_health_alert_failure_threshold_count is not None
+            and self.panel_health_alert_failure_threshold_count <= 0
+        ):
+            errors["panel_health_alert_failure_threshold_count"] = _("Panel health alert failure threshold must be positive.")
+        if self.panel_health_quiet_hours_enabled and (
+            not self.panel_health_quiet_hours_start or not self.panel_health_quiet_hours_end
+        ):
+            errors["panel_health_quiet_hours_enabled"] = _("Quiet hours require both start and end times.")
         if self.panel_usage_snapshot_retention_days is not None and self.panel_usage_snapshot_retention_days <= 0:
             errors["panel_usage_snapshot_retention_days"] = _("Panel usage snapshot retention must be positive.")
         if self.panel_usage_active_user_method not in self.PanelUsageActiveUserMethod.values:
@@ -781,6 +839,13 @@ class Store(TimeStampedModel):
         if value.startswith(("http://", "https://")):
             return value
         return f"https://ble.ir/{value.lstrip('@')}"
+
+
+class PanelHealthAlertSettings(Store):
+    class Meta:
+        proxy = True
+        verbose_name = _("هشدار سلامت پنل به ربات")
+        verbose_name_plural = _("هشدار سلامت پنل‌ها")
 
 
 class Operator(TimeStampedModel):
@@ -2507,6 +2572,25 @@ class Panel(TimeStampedModel):
         help_text=_("Optional HTTP proxy URL for this panel, e.g. http://proxy-host:port."),
     )
     is_active = models.BooleanField(_("is active"), default=True, db_index=True)
+    health_alert_enabled = models.BooleanField(
+        _("هشدار سلامت فعال"),
+        default=True,
+        help_text=_("Allow this panel to send Telegram admin health alerts when global alerts are enabled."),
+    )
+    alert_repeat_interval_minutes = models.PositiveIntegerField(
+        _("فاصله تکرار هشدار برای این پنل"),
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        help_text=_("Optional override for repeated failure alerts. Leave blank to use Store settings."),
+    )
+    failure_threshold_count = models.PositiveIntegerField(
+        _("تعداد خطای پشت‌سرهم برای این پنل"),
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        help_text=_("Optional override for failures required before alerting. Leave blank to use Store settings."),
+    )
     last_sync_at = models.DateTimeField(_("last sync at"), blank=True, null=True)
     detected_xui_version = models.CharField(_("detected X-UI version"), max_length=50, blank=True)
     capability_profile = models.CharField(
@@ -2843,8 +2927,11 @@ class PanelHealthStatus(TimeStampedModel):
     last_checked_at = models.DateTimeField(_("last checked at"), blank=True, null=True, db_index=True)
     last_ok_at = models.DateTimeField(_("last OK at"), blank=True, null=True)
     last_error_at = models.DateTimeField(_("last error at"), blank=True, null=True)
+    last_recovery_at = models.DateTimeField(_("last recovery at"), blank=True, null=True)
     last_alert_sent_at = models.DateTimeField(_("last alert sent at"), blank=True, null=True)
     last_recovery_alert_sent_at = models.DateTimeField(_("last recovery alert sent at"), blank=True, null=True)
+    last_alert_error_code = models.CharField(_("last alert error code"), max_length=80, blank=True)
+    last_alert_message_hash = models.CharField(_("last alert message hash"), max_length=64, blank=True)
     consecutive_failures = models.PositiveIntegerField(_("consecutive failures"), default=0)
     consecutive_successes = models.PositiveIntegerField(_("consecutive successes"), default=0)
     response_time_ms = models.PositiveIntegerField(_("response time ms"), null=True, blank=True)

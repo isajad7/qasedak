@@ -1,0 +1,158 @@
+{% extends "admin/change_form.html" %}
+{% load static %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin_tailwind.css' %}">
+<style>
+  .plan-service-delivery {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    color: #0f172a;
+    display: grid;
+    gap: 1rem;
+    padding: 1rem;
+    text-align: right;
+  }
+  .plan-service-delivery h3,
+  .plan-service-delivery h4,
+  .plan-service-delivery p,
+  .plan-service-delivery ul {
+    margin: 0;
+  }
+  .plan-service-delivery-helper ul {
+    display: grid;
+    gap: .35rem;
+    margin-top: .5rem;
+    padding-right: 1.1rem;
+  }
+  .plan-delivery-heading h3,
+  .plan-delivery-summary h3 {
+    font-size: 1rem;
+    font-weight: 900;
+  }
+  .plan-delivery-summary {
+    align-items: center;
+    display: flex;
+    gap: 1rem;
+    justify-content: space-between;
+  }
+  .plan-delivery-summary p,
+  .plan-service-delivery-helper p,
+  .plan-delivery-note {
+    color: #475569;
+    line-height: 1.8;
+  }
+  .plan-delivery-cards {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  }
+  .plan-delivery-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    display: grid;
+    gap: .85rem;
+    min-width: 0;
+    padding: 1rem;
+  }
+  .plan-delivery-card-head {
+    align-items: center;
+    display: flex;
+    gap: .65rem;
+  }
+  .plan-delivery-card-head span {
+    align-items: center;
+    background: #0f172a;
+    border-radius: 999px;
+    color: #fff;
+    display: inline-flex;
+    font-size: .78rem;
+    font-weight: 900;
+    height: 28px;
+    justify-content: center;
+    width: 28px;
+  }
+  .plan-delivery-card-head h4 {
+    font-size: .98rem;
+    font-weight: 900;
+  }
+  .plan-delivery-card p {
+    color: #475569;
+    line-height: 1.8;
+  }
+  .plan-delivery-list {
+    border: 1px solid #eef2f7;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .plan-delivery-row {
+    align-items: center;
+    display: flex;
+    gap: .75rem;
+    justify-content: space-between;
+    min-height: 42px;
+    padding: .6rem .75rem;
+  }
+  .plan-delivery-row + .plan-delivery-row {
+    border-top: 1px solid #eef2f7;
+  }
+  .plan-delivery-row span {
+    color: #475569;
+    font-weight: 800;
+  }
+  .plan-delivery-row strong {
+    color: #0f172a;
+    font-weight: 900;
+    overflow-wrap: anywhere;
+    text-align: left;
+  }
+  .plan-delivery-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .45rem;
+  }
+  .plan-delivery-actions .button,
+  .plan-save-fulfillment-row input {
+    white-space: normal;
+  }
+  .plan-delivery-disabled {
+    opacity: .55;
+    pointer-events: none;
+  }
+  .plan-delivery-source-summary,
+  .plan-delivery-details {
+    color: #475569;
+    font-weight: 800;
+    line-height: 1.8;
+  }
+  .plan-delivery-details summary {
+    cursor: pointer;
+  }
+  @media (max-width: 640px) {
+    .plan-delivery-summary,
+    .plan-delivery-row {
+      align-items: stretch;
+      flex-direction: column;
+    }
+    .plan-delivery-row strong {
+      text-align: right;
+    }
+    .plan-delivery-actions .button {
+      text-align: center;
+      width: 100%;
+    }
+  }
+</style>
+{% endblock %}
+
+{% block submit_buttons_bottom %}
+{% if add %}
+<div class="submit-row plan-save-fulfillment-row" dir="rtl">
+  <input type="submit" value="ذخیره و تنظیم تحویل ساب" class="default" name="_save_and_configure_fulfillment">
+</div>
+{% endif %}
+{{ block.super }}
+{% endblock %}

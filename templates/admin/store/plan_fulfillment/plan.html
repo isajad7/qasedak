@@ -9,6 +9,7 @@
       <p class="tw-mt-2 tw-mb-0 tw-text-sm tw-leading-7 tw-text-slate-600">بعد از تایید سفارش، برای مشتری ظرف ساب مشتری ساخته می‌شود و لینک /sub اختصاصی تحویل داده می‌شود.</p>
     </div>
     <div class="tw-model-actions">
+      <a class="tw-button tw-button-secondary" href="{% url 'admin:store_plan_change' plan.pk %}">بازگشت به پلن فروش</a>
       {% if recipe %}<a class="tw-button tw-button-secondary" href="{{ recipe_urls.preview }}">پیش‌نمایش</a>{% endif %}
       <a class="tw-button tw-button-secondary" href="{% url 'admin_store_plan_fulfillment' %}">داشبورد تحویل</a>
     </div>
