@@ -9,8 +9,10 @@ from django.template.response import TemplateResponse
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
+from .admin_catalog import catalog_plan_edit_url, catalog_url
 from .config_inventory_services import inventory_allocation_mode_label
 from .models import ConfigInventoryPool, CupFillerRule, CupFulfillmentRecipe, Inbound, Panel, Plan
+from .plan_delivery_services import resolve_plan_delivery_configuration
 from .plan_fulfillment_services import (
     ERROR_STATUS,
     READY_STATUS,
@@ -210,9 +212,15 @@ def _enrich_readiness_urls(readiness):
 
 
 def _plan_card(plan):
-    status = plan_fulfillment_status_for_plan(plan)
-    recipe = status["recipe"]
-    readiness = status.get("readiness") or {}
+    legacy_status = plan_fulfillment_status_for_plan(plan)
+    delivery_config = resolve_plan_delivery_configuration(plan, plan.store)
+    recipe = legacy_status["recipe"]
+    status = {
+        **legacy_status,
+        "status_label": delivery_config.mode_label,
+        "status_tone": delivery_config.readiness_tone,
+        "delivery_config": delivery_config,
+    }
     urls = _recipe_urls(recipe)
     return {
         "plan": plan,
@@ -220,12 +228,13 @@ def _plan_card(plan):
         "duration": _plan_duration_label(plan),
         "volume": _plan_volume_label(plan),
         "status": status,
+        "delivery_config": delivery_config,
         "recipe": recipe,
         "recipe_urls": urls,
-        "setup_url": reverse("admin_store_plan_fulfillment_plan", args=[plan.pk]),
-        "panel_source_count": readiness.get("panel_source_count", 0),
-        "inventory_pool_count": readiness.get("inventory_pool_count", 0),
-        "expected_config_count": readiness.get("expected_config_count", 0),
+        "setup_url": f"{catalog_plan_edit_url(plan)}#delivery",
+        "panel_source_count": delivery_config.panel_source_count,
+        "inventory_pool_count": delivery_config.inventory_source_count,
+        "expected_config_count": delivery_config.expected_output_count,
     }
 
 
@@ -245,14 +254,14 @@ def _dashboard_context(request, *, title=None):
     summary_cards = [
         {"label": _("تعداد پلن‌های فعال"), "value": len(plans), "description": _("پلن‌های فعال و عمومی"), "tone": "blue", "icon": "fas fa-box-open"},
         {"label": _("پلن‌های متصل به Recipe"), "value": connected_count, "description": _("دارای دستور تحویل فعال"), "tone": "emerald", "icon": "fas fa-link"},
-        {"label": _("پلن‌های بدون تنظیم تحویل"), "value": no_config_count, "description": _("هنوز با legacy کار می‌کنند"), "tone": "amber" if no_config_count else "slate", "icon": "fas fa-circle-exclamation"},
+        {"label": _("پلن‌های روی fallback/direct"), "value": no_config_count, "description": _("بدون Recipe فعال"), "tone": "amber" if no_config_count else "slate", "icon": "fas fa-circle-exclamation"},
         {"label": _("Recipeهای آماده"), "value": ready_recipe_count, "description": _("بدون هشدار فروش"), "tone": "cyan", "icon": "fas fa-check"},
         {"label": _("Recipeهای دارای هشدار"), "value": warning_recipe_count, "description": _("نیازمند بررسی قبل از فروش"), "tone": "rose" if warning_recipe_count else "slate", "icon": "fas fa-triangle-exclamation"},
         {"label": _("مخزن‌های کم‌موجودی"), "value": low_stock_pool_count(), "description": _("موجودی ۳ یا کمتر"), "tone": "warning", "icon": "fas fa-boxes-stacked"},
     ]
     action_cards = [
-        {"title": _("اتصال یک پلن به تحویل خودکار"), "url": reverse("admin_store_plan_fulfillment_plans"), "description": _("از کارت هر پلن وارد Wizard اتصال شوید."), "icon": "fas fa-plug", "tone": "blue"},
-        {"title": _("ساخت Recipe جدید"), "url": reverse("admin:store_cupfulfillmentrecipe_add"), "description": _("دستور خام بسازید و سپس در Builder کاملش کنید."), "icon": "fas fa-mug-hot", "tone": "emerald"},
+        {"title": _("ویرایش تحویل در Products / Plans"), "url": catalog_url(), "description": _("تنظیم عادی تحویل هر پلن فقط از ویرایش همان پلن انجام می‌شود."), "icon": "fas fa-box-open", "tone": "blue"},
+        {"title": _("دستورهای تحویل پیشرفته"), "url": reverse("admin:store_cupfulfillmentrecipe_changelist"), "description": _("نمای پیشرفته Recipeها برای بررسی و عیب‌یابی."), "icon": "fas fa-mug-hot", "tone": "emerald"},
         {"title": _("تست شبیه‌سازی تحویل"), "url": reverse("admin:store_cupfulfillmentrecipe_changelist"), "description": _("Recipe را انتخاب کنید و dry-run بگیرید."), "icon": "fas fa-vial", "tone": "cyan"},
         {"title": _("مشاهده مخزن کانفیگ‌ها"), "url": reverse("admin_store_config_inventory"), "description": _("موجودی و import کانفیگ‌ها را بررسی کنید."), "icon": "fas fa-boxes-stacked", "tone": "amber"},
         {"title": _("ساخت سریع Cup تستی"), "url": reverse("admin_store_cup_center_quick_build"), "description": _("Quick Builder قبلی بدون تغییر در دسترس است."), "icon": "fas fa-wand-magic-sparkles", "tone": "slate"},
@@ -260,8 +269,8 @@ def _dashboard_context(request, *, title=None):
     return {
         **admin.site.each_context(request),
         "opts": CupFulfillmentRecipe._meta,
-        "title": title or _("تحویل خودکار ساب برای پلن‌ها"),
-        "subtitle": _("مشخص کنید هر پلن فروش بعد از خرید از چه پنل‌ها و مخزن‌هایی Cup بسازد و لینک ساب اختصاصی مشتری را تحویل دهد."),
+        "title": title or _("داشبورد تحویل پلن‌ها"),
+        "subtitle": _("نمای read-only آمادگی، منابع، پیش‌نمایش و شبیه‌سازی تحویل. تنظیم عادی تحویل از Products / Plans انجام می‌شود."),
         "summary_cards": summary_cards,
         "action_cards": action_cards,
         "plan_cards": plan_cards,
@@ -432,44 +441,15 @@ def plan_fulfillment_dashboard(request):
 
 def plan_fulfillment_plans(request):
     _require_plan_fulfillment_view_perm(request.user)
-    return TemplateResponse(request, "admin/store/plan_fulfillment/dashboard.html", _dashboard_context(request, title=_("اتصال پلن به Cup")))
+    messages.info(request, _("تنظیم تحویل پلن‌ها از Products / Plans انجام می‌شود."))
+    return redirect("admin_store_catalog")
 
 
 def plan_fulfillment_plan(request, plan_id):
     _require_plan_fulfillment_view_perm(request.user)
     plan = get_object_or_404(Plan.objects.select_related("store"), pk=plan_id)
-    active_recipe = CupFulfillmentRecipe.objects.filter(plan=plan, is_active=True).order_by("priority", "pk").first()
-    if request.method == "POST":
-        _require_plan_fulfillment_change_perm(request.user)
-        form = PlanFulfillmentWizardForm(request.POST, plan=plan)
-        if form.is_valid():
-            recipe = _save_wizard(plan, form, actor=request.user)
-            if recipe:
-                messages.success(request, _("دستور تحویل ذخیره شد و به پلن متصل شد."))
-                return redirect("admin_store_plan_fulfillment_recipe", recipe_id=recipe.pk)
-            messages.success(request, _("تحویل خودکار برای این پلن غیرفعال شد و مسیر legacy حفظ می‌شود."))
-            return redirect("admin_store_plan_fulfillment_plan", plan_id=plan.pk)
-    else:
-        initial = _recipe_initial(active_recipe)
-        if not initial.get("recipe_title"):
-            initial["recipe_title"] = _("تحویل خودکار %(plan)s") % {"plan": plan.name}
-        form = PlanFulfillmentWizardForm(initial=initial, plan=plan)
-    context = {
-        **admin.site.each_context(request),
-        "opts": Plan._meta,
-        "title": _("تنظیم تحویل ساب پلن"),
-        "plan": plan,
-        "form": form,
-        "recipe": active_recipe,
-        "recipe_urls": _recipe_urls(active_recipe),
-        "plan_summary": {
-            "price": _plan_price_label(plan),
-            "volume": _plan_volume_label(plan),
-            "duration": _plan_duration_label(plan),
-            "sales_status": _("فعال و عمومی") if plan.is_active and plan.is_public else _("نیازمند بررسی"),
-        },
-    }
-    return TemplateResponse(request, "admin/store/plan_fulfillment/plan.html", context)
+    messages.info(request, _("تنظیم تحویل این پلن از ویرایش پلن انجام می‌شود."))
+    return redirect(f"{catalog_plan_edit_url(plan)}#delivery")
 
 
 def plan_fulfillment_recipe(request, recipe_id):
@@ -483,6 +463,7 @@ def plan_fulfillment_recipe(request, recipe_id):
         "recipe": recipe,
         "readiness": readiness,
         "recipe_urls": _recipe_urls(recipe),
+        "plan_edit_url": f"{catalog_plan_edit_url(recipe.plan)}#delivery",
         "rule_source_type_label": rule_source_type_label,
         "failure_policy_label": recipe_failure_policy_label(recipe.failure_policy),
     }

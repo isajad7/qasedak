@@ -34,6 +34,7 @@ from .admin_access import get_user_product_roles, mask_staff_email, user_has_cap
 from .admin_catalog import (
     ROUTE_STATUS_FALLBACK,
     ROUTE_STATUS_MISSING,
+    catalog_plan_edit_url,
     catalog_plan_review_url,
     catalog_url,
     get_inbound_sales_readiness,
@@ -76,6 +77,8 @@ from .models import (
     PanelHealthStatus,
     PanelUsageSnapshot,
     Plan,
+    PlanDeliveryConfig,
+    PlanDeliverySource,
     PlanInboundRoute,
     QasedakBackupJob,
     QasedakRestoreJob,
@@ -488,6 +491,35 @@ class StoreAdminForm(forms.ModelForm):
             store.save()
             self.save_m2m()
         return store
+
+
+class PanelHealthAlertSettingsAdminForm(forms.ModelForm):
+    class Meta:
+        model = PanelHealthAlertSettings
+        fields = "__all__"
+        labels = {
+            "name": _("نام"),
+            "domain": _("دامنه"),
+            "is_active": _("فعال است"),
+            "panel_monitor_enabled": _("فعال‌سازی بررسی سلامت پنل"),
+            "panel_monitor_alerts_enabled": _("فعال‌سازی هشدارهای سلامت پنل"),
+            "panel_health_alerts_enabled": _("فعال‌سازی هشدار خرابی پنل"),
+            "panel_health_alert_check_interval_minutes": _("فاصله بررسی سلامت پنل"),
+            "panel_health_alert_repeat_interval_minutes": _("فاصله تکرار هشدار"),
+            "panel_health_alert_failure_threshold_count": _("تعداد خطای پشت‌سرهم قبل از هشدار"),
+            "panel_health_recovery_alert_enabled": _("ارسال پیام بعد از بازیابی پنل"),
+            "panel_health_quiet_hours_enabled": _("فعال‌سازی ساعات سکوت"),
+            "panel_health_quiet_hours_start": _("شروع ساعات سکوت"),
+            "panel_health_quiet_hours_end": _("پایان ساعات سکوت"),
+        }
+        help_texts = {
+            "panel_monitor_enabled": _("اگر غیرفعال باشد health check پنل‌ها اجرا نمی‌شود."),
+            "panel_monitor_alerts_enabled": _("کلید سازگاری با مانیتورینگ قدیمی؛ برای ارسال هشدار باید فعال باشد."),
+            "panel_health_alerts_enabled": _("پیام‌ها فقط برای ادمین‌های تنظیم‌شده در ربات ارسال می‌شود، نه مشتری‌ها."),
+            "panel_health_alert_check_interval_minutes": _("این مقدار برای زمان‌بندی cron/systemd استفاده می‌شود؛ خود Django timer نصب نمی‌کند."),
+            "panel_health_alert_repeat_interval_minutes": _("تا قبل از این فاصله، هشدار خطای تکراری دوباره ارسال نمی‌شود."),
+            "panel_health_alert_failure_threshold_count": _("بعد از این تعداد خطای پشت‌سرهم هشدار ارسال می‌شود."),
+        }
 
 
 class PanelHealthAlertAdminMixin:
@@ -931,9 +963,12 @@ class StoreAdmin(PanelHealthAlertAdminMixin, ImportExportModelAdmin):
 
 @admin.register(PanelHealthAlertSettings)
 class PanelHealthAlertSettingsAdmin(PanelHealthAlertAdminMixin, ImportExportModelAdmin):
+    form = PanelHealthAlertSettingsAdminForm
+    change_form_template = "admin/store/panelhealthalertsettings/change_form.html"
+    change_list_template = "admin/store/panelhealthalertsettings/change_list.html"
     list_display = (
-        "name",
-        "domain",
+        "store_name",
+        "store_domain",
         "panel_health_alerts_status",
         "panel_health_alert_recipient_summary",
         "updated_at",
@@ -949,34 +984,62 @@ class PanelHealthAlertSettingsAdmin(PanelHealthAlertAdminMixin, ImportExportMode
     )
     fieldsets = (
         (
-            _("هشدار سلامت پنل‌ها"),
+            _("وضعیت هشدار"),
             {
                 "fields": (
                     "name",
                     "domain",
                     "is_active",
-                    "panel_health_alert_recipient_summary",
-                    "panel_health_last_alert_status",
-                    "telegram_bot_hint",
                     "panel_monitor_enabled",
                     "panel_monitor_alerts_enabled",
                     "panel_health_alerts_enabled",
+                ),
+                "description": _("این تنظیمات فقط برای پیام‌های ادمین استفاده می‌شود و به مشتری‌ها پیام ارسال نمی‌کند."),
+            },
+        ),
+        (
+            _("زمان‌بندی"),
+            {
+                "fields": (
                     "panel_health_alert_check_interval_minutes",
+                    "panel_health_recovery_alert_enabled",
+                ),
+            },
+        ),
+        (
+            _("جلوگیری از اسپم"),
+            {
+                "fields": (
                     "panel_health_alert_repeat_interval_minutes",
                     "panel_health_alert_failure_threshold_count",
-                    "panel_health_recovery_alert_enabled",
+                ),
+            },
+        ),
+        (
+            _("ساعات سکوت"),
+            {
+                "fields": (
                     "panel_health_quiet_hours_enabled",
                     "panel_health_quiet_hours_start",
                     "panel_health_quiet_hours_end",
                 ),
-                "description": _("تنظیمات هشدار سلامت پنل به ربات فقط برای پیام‌های ادمین استفاده می‌شود."),
             },
         ),
         (
-            _("Diagnostics"),
+            _("گیرندگان ادمین"),
+            {
+                "fields": (
+                    "panel_health_alert_recipient_summary",
+                    "telegram_bot_hint",
+                ),
+                "description": _("گیرنده‌ها از BotConfiguration تلگرام خوانده می‌شوند و به صورت masked نمایش داده می‌شوند."),
+            },
+        ),
+        (
+            _("عیب‌یابی"),
             {
                 "classes": ("collapse",),
-                "fields": ("created_at", "updated_at"),
+                "fields": ("panel_health_last_alert_status", "created_at", "updated_at"),
             },
         ),
     )
@@ -987,7 +1050,31 @@ class PanelHealthAlertSettingsAdmin(PanelHealthAlertAdminMixin, ImportExportMode
     def has_delete_permission(self, request, obj=None):
         return False
 
-    @admin.display(description=_("BotConfiguration"))
+    @admin.display(description=_("نام"), ordering="name")
+    def store_name(self, obj):
+        return obj.name
+
+    @admin.display(description=_("دامنه"), ordering="domain")
+    def store_domain(self, obj):
+        return obj.domain or "-"
+
+    def changelist_view(self, request, extra_context=None):
+        extra_context = {
+            **(extra_context or {}),
+            "title": _("تنظیمات هشدار سلامت پنل‌ها"),
+            "subtitle": _("این تنظیمات فقط برای پیام‌های ادمین استفاده می‌شود و به مشتری‌ها پیام ارسال نمی‌کند."),
+        }
+        return super().changelist_view(request, extra_context=extra_context)
+
+    def change_view(self, request, object_id, form_url="", extra_context=None):
+        extra_context = {
+            **(extra_context or {}),
+            "title": _("تنظیمات هشدار سلامت پنل‌ها"),
+            "subtitle": _("این تنظیمات فقط برای پیام‌های ادمین استفاده می‌شود و به مشتری‌ها پیام ارسال نمی‌کند."),
+        }
+        return super().change_view(request, object_id, form_url=form_url, extra_context=extra_context)
+
+    @admin.display(description=_("تنظیمات ربات"))
     def telegram_bot_hint(self, obj):
         url = reverse("admin:store_botconfiguration_changelist")
         if obj and obj.pk:
@@ -999,7 +1086,7 @@ class PanelHealthAlertSettingsAdmin(PanelHealthAlertAdminMixin, ImportExportMode
             '{} <a class="button" href="{}">{}</a>',
             _("%(count)s active Telegram bot configuration(s).") % {"count": count},
             url,
-            _("Manage BotConfiguration"),
+            _("مدیریت تنظیمات ربات"),
         )
 
 
@@ -2390,13 +2477,13 @@ class PlanAdmin(ImportExportModelAdmin):
 
     @admin.display(description=_("Cup fulfillment"))
     def fulfillment_recipe_actions(self, obj):
-        setup_url = reverse("admin_store_plan_fulfillment_plan", args=[obj.pk])
+        setup_url = f"{catalog_plan_edit_url(obj)}#delivery"
         status = _plan_admin_fulfillment_status(obj)
         recipe = status["recipe"]
         setup_button = format_html(
             '<a class="button" href="{}">{}</a>',
             setup_url,
-            _("تنظیم تحویل ساب"),
+            _("تنظیم تحویل"),
         )
         if recipe:
             preview_url = reverse("admin_store_plan_fulfillment_recipe_preview", args=[recipe.pk])
@@ -2434,7 +2521,7 @@ class PlanAdmin(ImportExportModelAdmin):
                 _("بعد از ذخیره پلن، می‌توانید تحویل سرویس را تنظیم کنید:"),
                 _("اتصال به اینباندها"),
                 _("یا ساخت Recipe برای تحویل ساب اختصاصی"),
-                _("برای رفتن مستقیم به Wizard تحویل، از دکمه «ذخیره و تنظیم تحویل ساب» پایین فرم استفاده کنید."),
+                _("برای رفتن مستقیم به تنظیم تحویل، از دکمه «ذخیره و تنظیم تحویل» پایین فرم استفاده کنید."),
             )
 
         route_count = _plan_admin_active_route_count(obj)
@@ -2442,7 +2529,7 @@ class PlanAdmin(ImportExportModelAdmin):
         fulfillment_status = _plan_admin_fulfillment_status(obj)
         recipe = fulfillment_status["recipe"]
         readiness = fulfillment_status.get("readiness") or {}
-        setup_url = reverse("admin_store_plan_fulfillment_plan", args=[obj.pk])
+        setup_url = f"{catalog_plan_edit_url(obj)}#delivery"
         route_builder_url = reverse("admin_store_panel_center_routing_detail", args=[obj.pk])
         route_list_url = f"{reverse('admin:store_planinboundroute_changelist')}?{urlencode({'plan__id__exact': obj.pk})}"
         readiness_label, readiness_tone = _plan_delivery_readiness(obj, fulfillment_status, route_status, route_count)
@@ -2476,7 +2563,7 @@ class PlanAdmin(ImportExportModelAdmin):
             simulate_url = reverse("admin_store_plan_fulfillment_recipe_simulate", args=[recipe.pk])
             recipe_actions = format_html(
                 "{}{}{}{}",
-                _delivery_button(setup_url, _("ساخت / ویرایش دستور تحویل")),
+                _delivery_button(setup_url, _("ویرایش تحویل در Plan editor")),
                 _delivery_button(preview_url, _("پیش‌نمایش آمادگی")),
                 _delivery_button(simulate_url, _("تست شبیه‌سازی")),
                 _delivery_button(recipe_url, _("مشاهده Recipe")),
@@ -2489,7 +2576,7 @@ class PlanAdmin(ImportExportModelAdmin):
             source_summary = _("۰ پنل + ۰ مخزن")
             recipe_actions = format_html(
                 "{}{}{}{}",
-                _delivery_button(setup_url, _("ساخت / ویرایش دستور تحویل")),
+                _delivery_button(setup_url, _("ویرایش تحویل در Plan editor")),
                 _disabled_delivery_button(_("پیش‌نمایش آمادگی")),
                 _disabled_delivery_button(_("تست شبیه‌سازی")),
                 _disabled_delivery_button(_("مشاهده Recipe")),
@@ -2568,13 +2655,13 @@ class PlanAdmin(ImportExportModelAdmin):
         if not obj or not obj.pk:
             return "-"
         status = plan_fulfillment_status_for_plan(obj)
-        setup_url = reverse("admin_store_plan_fulfillment_plan", args=[obj.pk])
+        setup_url = f"{catalog_plan_edit_url(obj)}#delivery"
         if not status["recipe"]:
             return format_html(
                 '<div><span class="badge bg-secondary">{}</span></div><p><a class="button" href="{}">{}</a></p>',
                 _("بدون تحویل خودکار"),
                 setup_url,
-                _("تنظیم تحویل ساب"),
+                _("تنظیم تحویل"),
             )
         recipe = status["recipe"]
         readiness = status["readiness"] or {}
@@ -2593,7 +2680,7 @@ class PlanAdmin(ImportExportModelAdmin):
             _("کانفیگ مورد انتظار"),
             readiness.get("expected_config_count", 0),
             setup_url,
-            _("تنظیم تحویل ساب"),
+            _("تنظیم تحویل"),
             preview_url,
             _("پیش‌نمایش دستور تحویل"),
             simulate_url,
@@ -2619,7 +2706,7 @@ class PlanAdmin(ImportExportModelAdmin):
     def response_add(self, request, obj, post_url_continue=None):
         if "_save_and_configure_fulfillment" in request.POST:
             self.message_user(request, _("پلن ذخیره شد. حالا تحویل سرویس را تنظیم کنید."), messages.SUCCESS)
-            return HttpResponseRedirect(reverse("admin_store_plan_fulfillment_plan", args=[obj.pk]))
+            return HttpResponseRedirect(f"{catalog_plan_edit_url(obj)}#delivery")
         return super().response_add(request, obj, post_url_continue)
 
     def changelist_view(self, request, extra_context=None):
@@ -3033,7 +3120,7 @@ class PanelAdmin(ImportExportModelAdmin):
             },
         ),
         (
-            _("هشدار سلامت پنل به ربات"),
+            _("هشدار سلامت این پنل"),
             {
                 "fields": (
                     "health_alert_enabled",
@@ -3120,6 +3207,11 @@ class PanelAdmin(ImportExportModelAdmin):
                 self.admin_site.admin_view(self.send_health_alert_test_message),
                 name="store_panel_health_alert_test",
             ),
+            path(
+                "<path:object_id>/health-alerts/dry-run/",
+                self.admin_site.admin_view(self.dry_run_health_alert),
+                name="store_panel_health_alert_dry_run",
+            ),
         ]
         return custom_urls + urls
 
@@ -3150,6 +3242,18 @@ class PanelAdmin(ImportExportModelAdmin):
 
     def send_health_alert_test_message(self, request, object_id):
         panel = self._panel_for_alert_action(request, object_id)
+        if request.method != "POST":
+            context = {
+                **self.admin_site.each_context(request),
+                "title": _("تأیید ارسال پیام تستی هشدار سلامت"),
+                "panel": panel,
+                "opts": self.model._meta,
+                "back_url": reverse("admin:store_panel_change", args=[panel.pk]),
+            }
+            return TemplateResponse(request, "admin/store/panel/confirm_health_alert_test.html", context)
+        if request.POST.get("confirm") != "yes":
+            messages.warning(request, _("ارسال پیام تستی تأیید نشد."))
+            return self._redirect_to_panel(panel)
         result = PanelHealthAlertService().send_test_message(panel)
         if result.get("alert_sent_count"):
             messages.success(
@@ -3162,6 +3266,24 @@ class PanelAdmin(ImportExportModelAdmin):
                 request,
                 _("پیام تست ارسال نشد؛ BotConfiguration تلگرام و گیرنده‌های ادمین را بررسی کنید."),
             )
+        return self._redirect_to_panel(panel)
+
+    def dry_run_health_alert(self, request, object_id):
+        panel = self._panel_for_alert_action(request, object_id)
+        from .panel_health_services import check_panel_health
+
+        result = check_panel_health(panel, send_alerts=True, dry_run=True)
+        messages.info(
+            request,
+            _(
+                "Dry-run هشدار سلامت انجام شد: status=%(status)s would_send=%(would_send)s skip_reason=%(reason)s alerts_sent=0"
+            )
+            % {
+                "status": result.get("status") or "-",
+                "would_send": bool(result.get("would_send_alert")),
+                "reason": result.get("alert_skip_reason") or "-",
+            },
+        )
         return self._redirect_to_panel(panel)
 
     @admin.display(description=_("URL"), ordering="url")
@@ -3278,13 +3400,20 @@ class PanelAdmin(ImportExportModelAdmin):
         )
         last_error = health_status.error_message or health_status.summary if health_status else "-"
         rows = [
-            (_("هشدار"), _("فعال") if obj.health_alert_enabled else _("غیرفعال")),
+            (_("هشدار برای این پنل"), _("فعال است") if obj.health_alert_enabled else _("غیرفعال است")),
             (_("وضعیت فعلی پنل"), health_status.status if health_status else _("No check")),
             (_("آخرین خطا"), last_error or "-"),
             (_("آخرین هشدار ارسال‌شده"), last_alert),
+            (
+                _("آخرین بازیابی"),
+                timezone.localtime(health_status.last_recovery_at).strftime("%Y-%m-%d %H:%M")
+                if health_status and health_status.last_recovery_at
+                else "-",
+            ),
             (_("تعداد خطاهای پشت‌سرهم"), health_status.consecutive_failures if health_status else 0),
             (_("فاصله تکرار موثر"), _("%(minutes)s minute(s)") % {"minutes": repeat_interval}),
             (_("آستانه خطای موثر"), threshold),
+            (_("Override"), _("فعال") if obj.alert_repeat_interval_minutes or obj.failure_threshold_count else _("استفاده از تنظیمات کلی")),
         ]
         return format_html(
             '<div class="qasedak-admin-summary"><ul>{}</ul></div>',
@@ -3298,7 +3427,11 @@ class PanelAdmin(ImportExportModelAdmin):
         enable_url = reverse("admin:store_panel_health_alert_enable", args=[obj.pk])
         disable_url = reverse("admin:store_panel_health_alert_disable", args=[obj.pk])
         test_url = reverse("admin:store_panel_health_alert_test", args=[obj.pk])
+        dry_run_url = reverse("admin:store_panel_health_alert_dry_run", args=[obj.pk])
+        panel_center_url = reverse("admin_store_panel_center_detail", args=[obj.pk])
         return format_html(
+            '<a class="button" href="{}">{}</a> '
+            '<a class="button" href="{}">{}</a> '
             '<a class="button" href="{}">{}</a> '
             '<a class="button" href="{}">{}</a> '
             '<a class="button" href="{}">{}</a>',
@@ -3306,8 +3439,12 @@ class PanelAdmin(ImportExportModelAdmin):
             _("فعال‌سازی هشدار برای این پنل"),
             disable_url,
             _("غیرفعال‌سازی هشدار برای این پنل"),
+            dry_run_url,
+            _("اجرای Dry-run هشدار"),
+            panel_center_url,
+            _("اجرای بررسی سلامت"),
             test_url,
-            _("ارسال پیام تستی به ادمین"),
+            _("ارسال پیام تستی فقط به ادمین"),
         )
 
     @admin.display(description=_("Latest health details"))
@@ -5718,6 +5855,90 @@ class CupFulfillmentRecipeAdmin(ImportExportModelAdmin):
 
     def preview_view(self, request, recipe_id):
         return fulfillment_recipe_preview(request, recipe_id)
+
+
+class PlanDeliverySourceInline(admin.TabularInline):
+    model = PlanDeliverySource
+    extra = 0
+    fields = (
+        "source_type",
+        "panel",
+        "inbound",
+        "inventory_pool",
+        "quantity",
+        "required",
+        "priority",
+        "is_fallback",
+        "active",
+        "label",
+    )
+    autocomplete_fields = ("panel", "inbound", "inventory_pool")
+
+
+@admin.register(PlanDeliveryConfig)
+class PlanDeliveryConfigAdmin(ImportExportModelAdmin):
+    inlines = (PlanDeliverySourceInline,)
+    list_display = (
+        "id",
+        "plan_label",
+        "delivery_mode",
+        "failure_policy",
+        "active",
+        "active_source_count",
+        "created_at",
+    )
+    list_filter = ("delivery_mode", "failure_policy", "active", "created_at")
+    search_fields = ("plan__name", "plan__slug")
+    autocomplete_fields = ("plan",)
+    readonly_fields = ("created_at", "updated_at")
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("plan").annotate(
+            admin_active_source_count=Count("sources", filter=Q(sources__active=True))
+        )
+
+    @admin.display(description=_("پلن"), ordering="plan__name")
+    def plan_label(self, obj):
+        return obj.plan
+
+    @admin.display(description=_("منابع فعال"), ordering="admin_active_source_count")
+    def active_source_count(self, obj):
+        return getattr(obj, "admin_active_source_count", None) if getattr(obj, "admin_active_source_count", None) is not None else obj.sources.filter(active=True).count()
+
+
+@admin.register(PlanDeliverySource)
+class PlanDeliverySourceAdmin(ImportExportModelAdmin):
+    list_display = (
+        "id",
+        "plan_label",
+        "source_type",
+        "source_label",
+        "quantity",
+        "required",
+        "priority",
+        "is_fallback",
+        "active",
+    )
+    list_filter = ("source_type", "required", "is_fallback", "active", "created_at")
+    search_fields = (
+        "delivery_config__plan__name",
+        "label",
+        "panel__name",
+        "inbound__remark",
+        "inventory_pool__title",
+    )
+    autocomplete_fields = ("delivery_config", "panel", "inbound", "inventory_pool")
+    list_select_related = ("delivery_config", "delivery_config__plan", "panel", "inbound", "inventory_pool")
+
+    @admin.display(description=_("پلن"), ordering="delivery_config__plan__name")
+    def plan_label(self, obj):
+        return obj.delivery_config.plan
+
+    @admin.display(description=_("منبع"))
+    def source_label(self, obj):
+        if obj.source_type == PlanDeliverySource.SourceType.INVENTORY_POOL:
+            return obj.inventory_pool or "-"
+        return obj.inbound or obj.panel or "-"
 
 
 @admin.register(CupFillerRule)

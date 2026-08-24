@@ -9,10 +9,31 @@ from django.utils import timezone
 from django.utils.http import urlencode
 from django.utils.translation import gettext_lazy as _
 
-from .models import Inbound, Operator, Order, Plan, PlanInboundRoute, Store, VPNClient
+from .models import (
+    ConfigInventoryPool,
+    Inbound,
+    Operator,
+    Order,
+    Plan,
+    PlanDeliveryConfig,
+    PlanDeliverySource,
+    PlanInboundRoute,
+    Store,
+    VPNClient,
+)
 from .order_services import format_custom_volume_label, sales_mode_requires_operator
+from .plan_delivery_services import (
+    MODE_CONFLICT,
+    MODE_DIRECT_LINKS,
+    MODE_GLOBAL_FALLBACK,
+    MODE_SUBSCRIPTION,
+    active_delivery_config_for_plan,
+    active_delivery_sources,
+    delivery_mode_choices,
+    resolve_plan_delivery_configuration,
+    save_delivery_config_sources,
+)
 from .plan_route_services import (
-    active_routes_for_plan_operator,
     get_valid_sales_inbounds,
     sales_inbound_issues,
 )
@@ -424,8 +445,14 @@ def get_plan_catalog_items(store=None):
     for plan in plans:
         route_status = get_plan_route_status(plan, store)
         readiness = validate_plan_sales_readiness(plan, store)
+        delivery_config = resolve_plan_delivery_configuration(plan, store)
         recent_order_count = Order.objects.filter(plan=plan).order_by().count()
         vpn_client_count = VPNClient.objects.filter(plan=plan).order_by().count()
+        preview_url = catalog_plan_review_url(plan)
+        test_url = catalog_plan_review_url(plan)
+        if delivery_config.active_recipe_id:
+            preview_url = reverse("admin_store_plan_fulfillment_recipe_preview", args=[delivery_config.active_recipe_id])
+            test_url = reverse("admin_store_plan_fulfillment_recipe_simulate", args=[delivery_config.active_recipe_id])
         items.append(
             {
                 "plan": plan,
@@ -438,12 +465,20 @@ def get_plan_catalog_items(store=None):
                 "is_custom_volume": plan.is_custom_volume,
                 "route_status": route_status,
                 "readiness": readiness,
+                "delivery_config": delivery_config,
+                "delivery_method": delivery_config.mode_label,
+                "delivery_sources": delivery_config.source_summary,
+                "delivery_status_label": delivery_config.readiness_label,
+                "delivery_status_tone": delivery_config.readiness_tone,
                 "destination": route_status["destination"] or "-",
                 "operator_names": [operator.name for operator in plan.operators.all()],
                 "recent_order_count": recent_order_count,
                 "vpn_client_count": vpn_client_count,
                 "review_url": catalog_plan_review_url(plan),
                 "edit_url": catalog_plan_edit_url(plan),
+                "setup_delivery_url": f"{catalog_plan_edit_url(plan)}#delivery",
+                "preview_url": preview_url,
+                "test_url": test_url,
                 "admin_url": reverse("admin:store_plan_change", args=[plan.pk]),
                 "bulk_assign_url": add_query(
                     reverse("admin:store_planinboundroute_bulk_assign"),
@@ -681,11 +716,6 @@ def deactivate_route_for_admin(route):
     return True
 
 
-class SalesReadyInboundChoiceField(forms.ModelChoiceField):
-    def label_from_instance(self, obj):
-        return inbound_label(obj)
-
-
 class CatalogPlanForm(forms.Form):
     name = forms.CharField(label=_("نام پلن"), max_length=100)
     volume_gb = forms.DecimalField(
@@ -708,25 +738,29 @@ class CatalogPlanForm(forms.Form):
         required=False,
         help_text=_("فقط در حالت فروش اپراتوری استفاده می‌شود."),
     )
-    inbound = SalesReadyInboundChoiceField(
-        label=_("Inbound مقصد"),
-        queryset=Inbound.objects.none(),
+    delivery_mode = forms.ChoiceField(
+        label=_("روش تحویل سرویس"),
+        choices=delivery_mode_choices(),
         required=False,
-        help_text=_("فقط inboundهای فعال، قابل فروش، غیر legacy و متصل به پنل فعال نمایش داده می‌شوند."),
+        widget=forms.RadioSelect,
     )
-    operator = forms.ModelChoiceField(
-        label=_("اپراتور route"),
-        queryset=Operator.objects.none(),
+    failure_policy = forms.ChoiceField(
+        label=_("سیاست خطا و کمبود موجودی"),
+        choices=PlanDeliveryConfig.FailurePolicy.choices,
         required=False,
-        help_text=_("خالی یعنی route عمومی. در حالت فروش اپراتوری می‌توان route اختصاصی ساخت."),
+        initial=PlanDeliveryConfig.FailurePolicy.STRICT,
     )
-    priority = forms.IntegerField(label=_("اولویت route"), min_value=0, initial=100)
-    route_active = forms.BooleanField(label=_("route فعال باشد"), required=False, initial=True)
+
+    source_prefix = "source"
 
     def __init__(self, *args, store=None, plan=None, **kwargs):
         self.store = store or getattr(plan, "store", None)
         self.plan = plan
+        self.source_errors = []
+        self.cleaned_source_rows = []
+        self.active_delivery_config = active_delivery_config_for_plan(plan) if plan else None
         initial = kwargs.pop("initial", {}) or {}
+        self.delivery_config = resolve_plan_delivery_configuration(plan, self.store) if plan else resolve_plan_delivery_configuration(None, self.store)
         if plan:
             initial.update(
                 {
@@ -741,63 +775,251 @@ class CatalogPlanForm(forms.Form):
                     "device_limit": plan.device_limit,
                     "sort_order": plan.sort_order,
                     "operators": list(plan.operators.values_list("pk", flat=True)),
+                    "delivery_mode": "" if self.delivery_config.effective_mode == MODE_CONFLICT else self.delivery_config.effective_mode,
+                    "failure_policy": self.delivery_config.failure_policy,
                 }
             )
-            route = store_scoped_route_query(self.store).filter(plan=plan, is_active=True).order_by("operator_id", "priority", "pk").first()
-            if route:
-                initial.update(
-                    {
-                        "inbound": route.inbound_id,
-                        "operator": route.operator_id,
-                        "priority": route.priority,
-                        "route_active": route.is_active,
-                    }
-                )
         else:
             initial.setdefault("currency", Plan.Currency.TOMAN)
             initial.setdefault("is_active", False)
             initial.setdefault("is_public", True)
             initial.setdefault("device_limit", 2)
             initial.setdefault("sort_order", 0)
-            initial.setdefault("priority", 100)
-            initial.setdefault("route_active", True)
+            initial.setdefault("delivery_mode", MODE_GLOBAL_FALLBACK)
+            initial.setdefault("failure_policy", PlanDeliveryConfig.FailurePolicy.STRICT)
         kwargs["initial"] = initial
         super().__init__(*args, **kwargs)
 
-        self.fields["inbound"].queryset = get_sales_ready_inbounds(self.store)
+        initial_source_rows = self._posted_source_rows() if self.is_bound else self._config_source_rows()
+        selected_inbound_ids = {row.get("inbound_id") for row in initial_source_rows if row.get("inbound_id")}
+        selected_pool_ids = {row.get("inventory_pool_id") for row in initial_source_rows if row.get("inventory_pool_id")}
+
+        sales_ready_ids = list(get_sales_ready_inbounds(self.store).values_list("pk", flat=True))
+        self.source_inbound_queryset = (
+            Inbound.objects.select_related("panel")
+            .filter(models.Q(pk__in=sales_ready_ids) | models.Q(pk__in=selected_inbound_ids))
+            .order_by("panel__name", "inbound_id", "pk")
+        )
+
+        pools = ConfigInventoryPool.objects.filter(models.Q(is_active=True) | models.Q(pk__in=selected_pool_ids))
+        if self.store and self.store.pk:
+            pools = pools.filter(
+                models.Q(connected_plan__isnull=True)
+                | models.Q(connected_plan__store=self.store)
+                | models.Q(pk__in=selected_pool_ids)
+            )
+        self.source_pool_queryset = pools.order_by("priority", "title", "pk")
+
         operators = Operator.objects.filter(is_active=True)
         if self.store and self.store.pk:
             operators = operators.filter(models.Q(store=self.store) | models.Q(store__isnull=True))
-        operators = operators.order_by("sort_order", "name", "pk")
-        self.fields["operator"].queryset = operators
-        self.fields["operators"].queryset = operators
-
+        self.fields["operators"].queryset = operators.order_by("sort_order", "name", "pk")
         if not (self.store and sales_mode_requires_operator(self.store)):
-            self.fields["operator"].widget = forms.HiddenInput()
             self.fields["operators"].widget = forms.MultipleHiddenInput()
+
+        for field in self.fields.values():
+            if not isinstance(field.widget, (forms.CheckboxSelectMultiple, forms.RadioSelect)):
+                css_class = field.widget.attrs.get("class", "")
+                field.widget.attrs["class"] = f"{css_class} plan-delivery-field".strip()
+
+        self.source_type_options = [
+            {"value": value, "label": label}
+            for value, label in PlanDeliverySource.SourceType.choices
+        ]
+        self.source_inbound_options = [
+            {"value": str(inbound.pk), "label": inbound_label(inbound)}
+            for inbound in self.source_inbound_queryset
+        ]
+        self.source_pool_options = [
+            {"value": str(pool.pk), "label": safe_label(pool.title)}
+            for pool in self.source_pool_queryset
+        ]
+        self.source_rows = self._template_source_rows(initial_source_rows)
+
+    def _as_int(self, value, default=0):
+        try:
+            if value in ("", None):
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _posted_bool(self, name, default=False):
+        if not self.is_bound or name not in self.data:
+            return default
+        return str(self.data.get(name)).lower() in {"1", "true", "on", "yes"}
+
+    def _source_field_name(self, index, field):
+        return f"{self.source_prefix}-{index}-{field}"
+
+    def _raw_posted_source_row(self, index):
+        return {
+            "index": index,
+            "id": self.data.get(self._source_field_name(index, "id")) or "",
+            "source_type": self.data.get(self._source_field_name(index, "source_type")) or PlanDeliverySource.SourceType.PANEL_INBOUND,
+            "inbound_id": self.data.get(self._source_field_name(index, "inbound")) or "",
+            "inventory_pool_id": self.data.get(self._source_field_name(index, "inventory_pool")) or "",
+            "label": self.data.get(self._source_field_name(index, "label")) or "",
+            "quantity": self.data.get(self._source_field_name(index, "quantity")) or "1",
+            "priority": self.data.get(self._source_field_name(index, "priority")) or str((index + 1) * 10),
+            "required": self._posted_bool(self._source_field_name(index, "required")),
+            "is_fallback": self._posted_bool(self._source_field_name(index, "is_fallback")),
+            "DELETE": self._posted_bool(self._source_field_name(index, "DELETE")),
+        }
+
+    def _posted_source_rows(self):
+        total = self._as_int(self.data.get(f"{self.source_prefix}-TOTAL_FORMS"), 0)
+        rows = []
+        for index in range(max(total, 0)):
+            row = self._raw_posted_source_row(index)
+            if row["DELETE"]:
+                continue
+            has_identity = bool(row["id"] or row["inbound_id"] or row["inventory_pool_id"] or row["label"])
+            has_explicit_type = self._source_field_name(index, "source_type") in self.data
+            if has_identity or has_explicit_type:
+                rows.append(row)
+        return rows
+
+    def _config_source_rows(self):
+        if not self.active_delivery_config:
+            return []
+        rows = []
+        for index, source in enumerate(active_delivery_sources(self.active_delivery_config)):
+            rows.append(
+                {
+                    "index": index,
+                    "id": source.pk,
+                    "source_type": source.source_type,
+                    "inbound_id": source.inbound_id or "",
+                    "inventory_pool_id": source.inventory_pool_id or "",
+                    "label": source.label,
+                    "quantity": source.quantity,
+                    "priority": source.priority,
+                    "required": source.required,
+                    "is_fallback": source.is_fallback,
+                }
+            )
+        return rows
+
+    def _blank_source_row(self, index=0):
+        return {
+            "index": index,
+            "id": "",
+            "source_type": PlanDeliverySource.SourceType.PANEL_INBOUND,
+            "inbound_id": "",
+            "inventory_pool_id": "",
+            "label": "",
+            "quantity": 1,
+            "priority": (index + 1) * 10,
+            "required": True,
+            "is_fallback": False,
+        }
+
+    def _template_source_rows(self, rows):
+        display_rows = rows or [self._blank_source_row(0)]
+        decorated = []
+        for index, row in enumerate(display_rows):
+            source_type = str(row.get("source_type") or PlanDeliverySource.SourceType.PANEL_INBOUND)
+            decorated.append(
+                {
+                    **row,
+                    "index": index,
+                    "id": str(row.get("id") or ""),
+                    "source_type": source_type,
+                    "inbound_id": str(row.get("inbound_id") or ""),
+                    "inventory_pool_id": str(row.get("inventory_pool_id") or ""),
+                    "quantity": self._as_int(row.get("quantity"), 1) or 1,
+                    "priority": self._as_int(row.get("priority"), (index + 1) * 10),
+                    "required": bool(row.get("required")),
+                    "is_fallback": bool(row.get("is_fallback")),
+                }
+            )
+        return decorated
+
+    def _source_error(self, row, message):
+        label = row.get("label") or row.get("source_type") or _("منبع")
+        self.source_errors.append(
+            _("ردیف %(row)s (%(label)s): %(message)s")
+            % {
+                "row": int(row.get("index", 0)) + 1,
+                "label": label,
+                "message": message,
+            }
+        )
+
+    def _clean_source_rows(self):
+        sources = []
+        self.source_errors = []
+        inbound_by_id = {str(inbound.pk): inbound for inbound in self.source_inbound_queryset}
+        pool_by_id = {str(pool.pk): pool for pool in self.source_pool_queryset}
+        valid_source_types = set(PlanDeliverySource.SourceType.values)
+
+        for row in self._posted_source_rows():
+            source_type = str(row.get("source_type") or "").strip()
+            if source_type not in valid_source_types:
+                self._source_error(row, _("نوع منبع نامعتبر است."))
+                continue
+            quantity = self._as_int(row.get("quantity"), 1)
+            priority = self._as_int(row.get("priority"), (int(row.get("index", 0)) + 1) * 10)
+            if quantity < 1:
+                self._source_error(row, _("تعداد باید حداقل ۱ باشد."))
+                continue
+            if priority < 0:
+                self._source_error(row, _("اولویت نمی‌تواند منفی باشد."))
+                continue
+
+            source = {
+                "id": self._as_int(row.get("id"), None),
+                "source_type": source_type,
+                "label": str(row.get("label") or "").strip()[:120],
+                "quantity": quantity,
+                "priority": priority,
+                "required": bool(row.get("required")),
+                "is_fallback": bool(row.get("is_fallback")),
+                "metadata": {"created_from": "canonical_plan_delivery_editor"},
+            }
+            if source_type == PlanDeliverySource.SourceType.PANEL_INBOUND:
+                inbound = inbound_by_id.get(str(row.get("inbound_id") or ""))
+                if not inbound:
+                    self._source_error(row, _("Inbound آماده فروش را انتخاب کنید."))
+                    continue
+                errors, warnings = sales_inbound_issues(inbound, store=self.store)
+                if errors:
+                    self._source_error(row, " ".join(str(error) for error in errors + warnings))
+                    continue
+                source.update({"panel": inbound.panel, "inbound": inbound, "inventory_pool": None})
+            else:
+                pool = pool_by_id.get(str(row.get("inventory_pool_id") or ""))
+                if not pool:
+                    self._source_error(row, _("مخزن کانفیگ را انتخاب کنید."))
+                    continue
+                if not pool.is_active:
+                    self._source_error(row, _("مخزن انتخاب‌شده غیرفعال است."))
+                    continue
+                source.update({"panel": None, "inbound": None, "inventory_pool": pool})
+            sources.append(source)
+
+        if self.source_errors:
+            self.add_error("delivery_mode", _("خطاهای منابع سرویس را بررسی کنید."))
+        return sources
 
     def clean(self):
         cleaned_data = super().clean()
         active = bool(cleaned_data.get("is_active"))
         public = bool(cleaned_data.get("is_public"))
         custom = bool(cleaned_data.get("is_custom_volume"))
-        inbound = cleaned_data.get("inbound")
-        operator = cleaned_data.get("operator")
-        selected_operators = cleaned_data.get("operators")
+        delivery_mode = cleaned_data.get("delivery_mode") or MODE_GLOBAL_FALLBACK
+        cleaned_data["delivery_mode"] = delivery_mode
 
-        if operator and selected_operators is not None and operator not in selected_operators:
-            self.add_error("operator", _("برای route اختصاصی، همان اپراتور باید در اپراتورهای مجاز پلن هم انتخاب شود."))
+        sources = [] if delivery_mode == MODE_GLOBAL_FALLBACK else self._clean_source_rows()
+        self.cleaned_source_rows = sources
+        if delivery_mode in {MODE_DIRECT_LINKS, MODE_SUBSCRIPTION} and not sources and not self.source_errors:
+            self.add_error("delivery_mode", _("برای این روش تحویل حداقل یک منبع سرویس لازم است."))
 
         if self.store and active and (public or custom):
-            fallback_enabled = bool(getattr(self.store, "allow_global_inbound_fallback", True))
-            routing_enabled = bool(getattr(self.store, "plan_inbound_routing_enabled", True))
-            route_selected = bool(inbound and cleaned_data.get("route_active", True))
-            existing_ready = False
-            if self.plan:
-                status = get_plan_route_status(self.plan, self.store)
-                existing_ready = status["is_ready"] and status["code"] != ROUTE_STATUS_FALLBACK
-            if routing_enabled and not fallback_enabled and not route_selected and not existing_ready:
-                self.add_error("inbound", _("Fallback خاموش است؛ پلن فعال قابل فروش باید route معتبر داشته باشد."))
+            fallback_available = bool(getattr(self.store, "allow_global_inbound_fallback", True) and get_sales_ready_inbounds(self.store).exists())
+            if delivery_mode == MODE_GLOBAL_FALLBACK and not fallback_available:
+                self.add_error("delivery_mode", _("برای پیش‌فرض فروشگاه، fallback باید روشن باشد و حداقل یک inbound آماده فروش وجود داشته باشد."))
         return cleaned_data
 
     def save(self):
@@ -821,40 +1043,13 @@ class CatalogPlanForm(forms.Form):
             plan.full_clean(exclude=["operators"])
             plan.save()
             plan.operators.set(self.cleaned_data.get("operators") or [])
-
-            inbound = self.cleaned_data.get("inbound")
-            if inbound:
-                self.save_route(plan, inbound)
+            self.save_delivery(plan, self.cleaned_data.get("delivery_mode") or MODE_GLOBAL_FALLBACK)
         return plan
 
-    def save_route(self, plan, inbound):
-        operator = self.cleaned_data.get("operator")
-        is_active = bool(self.cleaned_data.get("route_active"))
-        priority = self.cleaned_data.get("priority") or 100
-        route_filter = {"plan": plan, "inbound": inbound}
-        if operator:
-            route_filter["operator"] = operator
-        else:
-            route_filter["operator__isnull"] = True
-
-        route = PlanInboundRoute.objects.filter(**route_filter).order_by("-is_active", "priority", "pk").first()
-        if route is None:
-            route = PlanInboundRoute(plan=plan, inbound=inbound, operator=operator)
-
-        if is_active:
-            for active_route in active_routes_for_plan_operator(plan, operator, store=self.store):
-                if active_route.pk != route.pk:
-                    active_route.is_active = False
-                    active_route.full_clean()
-                    active_route.save(update_fields=["is_active", "updated_at"])
-
-        route.store = self.store
-        route.inbound = inbound
-        route.operator = operator
-        route.priority = priority
-        route.weight = getattr(route, "weight", 1) or 1
-        route.is_active = is_active
-        if not route.note:
-            route.note = "Updated from product catalog."
-        route.full_clean()
-        route.save()
+    def save_delivery(self, plan, delivery_mode):
+        save_delivery_config_sources(
+            plan,
+            delivery_mode=delivery_mode,
+            failure_policy=self.cleaned_data.get("failure_policy") or PlanDeliveryConfig.FailurePolicy.STRICT,
+            sources=[] if delivery_mode == MODE_GLOBAL_FALLBACK else self.cleaned_source_rows,
+        )

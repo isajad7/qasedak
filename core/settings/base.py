@@ -300,7 +300,6 @@ JAZZMIN_SETTINGS = {
         ],
         "تحویل ساب": [
             {"name": _("داشبورد تحویل پلن‌ها"), "url": "admin_store_plan_fulfillment", "icon": "fas fa-chart-line", "permissions": ["store.view_plan"]},
-            {"name": _("اتصال پلن به Cup"), "url": "admin_store_plan_fulfillment_plans", "icon": "fas fa-plug", "permissions": ["store.view_plan"]},
             {"name": _("دستورهای تحویل"), "url": "admin:store_cupfulfillmentrecipe_changelist", "icon": "fas fa-mug-hot", "permissions": ["store.view_cupfulfillmentrecipe"]},
             {"name": _("قوانین پرکننده"), "url": "admin:store_cupfillerrule_changelist", "icon": "fas fa-list-ol", "permissions": ["store.view_cupfillerrule"]},
             {"name": _("تست شبیه‌سازی تحویل"), "url": "admin_store_plan_fulfillment", "icon": "fas fa-vial", "permissions": ["store.view_cupfulfillmentrecipe"]},
@@ -323,7 +322,6 @@ JAZZMIN_SETTINGS = {
         "Infrastructure": [
             {"name": _("Panel Integration Center"), "url": "admin_store_panel_center", "icon": "fas fa-plug", "permissions": ["store.view_panel"]},
             {"name": _("Plan Routing Builder"), "url": "admin_store_panel_center_routing", "icon": "fas fa-route", "permissions": ["store.view_plan"]},
-            {"model": "store.PanelHealthAlertSettings"},
             {"model": "store.Panel"},
             {"model": "store.Inbound"},
             {"model": "store.BotConfiguration"},
@@ -369,7 +367,6 @@ JAZZMIN_SETTINGS = {
         "store.SupportMessage",
         "admin_store_panel_center",
         "admin_store_panel_center_routing",
-        "store.PanelHealthAlertSettings",
         "admin_store_cup_center",
         "admin_store_cup_center_quick_build",
         "admin_store_plan_fulfillment",
@@ -395,6 +392,9 @@ JAZZMIN_SETTINGS = {
         "auth.User",
         "auth.Group",
     ],
+    "hide_models": [
+        "store.PanelHealthAlertSettings",
+    ],
     "icons": {
         "Dashboard": "fas fa-chart-line",
         "Sales": "fas fa-cash-register",
@@ -416,7 +416,6 @@ JAZZMIN_SETTINGS = {
         "store.DiscountCode": "fas fa-tags",
         "store.Order": "fas fa-shopping-cart",
         "store.Panel": "fas fa-server",
-        "store.PanelHealthAlertSettings": "fas fa-exclamation-triangle",
         "store.Inbound": "fas fa-network-wired",
         "store.VPNClient": "fas fa-shield-alt",
         "store.SubscriptionCup": "fas fa-link",

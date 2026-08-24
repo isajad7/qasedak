@@ -104,8 +104,9 @@
                                 <th>قیمت</th>
                                 <th>نمایش</th>
                                 <th>وضعیت فعال</th>
-                                <th>Inbound مقصد</th>
-                                <th>آمادگی route</th>
+                                <th>روش تحویل</th>
+                                <th>وضعیت تحویل</th>
+                                <th>منابع</th>
                                 <th>اقدامات</th>
                             </tr>
                         </thead>
@@ -131,17 +132,32 @@
                                             {% if item.plan.is_active %}فعال{% else %}غیرفعال{% endif %}
                                         </span>
                                     </td>
-                                    <td>{{ item.destination }}</td>
                                     <td>
-                                        <span class="tw-status-badge tw-tone-{{ item.route_status.tone }}">{{ item.route_status.label }}</span>
-                                        {% if item.route_status.operators %}<small>{{ item.route_status.operators|join:"، " }}</small>{% endif %}
+                                        <span class="tw-status-badge tw-tone-slate">{{ item.delivery_method }}</span>
+                                        {% if item.delivery_config.effective_mode == "GLOBAL_FALLBACK" %}
+                                            <small>در حال استفاده از مسیر پیش‌فرض فروشگاه</small>
+                                        {% endif %}
+                                        {% if item.delivery_config.legacy_ignored %}
+                                            <small>legacy موجود است اما توسط تنظیم canonical نادیده گرفته می‌شود</small>
+                                        {% elif item.delivery_config.legacy_source_used %}
+                                            <small>legacy compatibility</small>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <span class="tw-status-badge tw-tone-{{ item.delivery_status_tone }}">{{ item.delivery_status_label }}</span>
+                                        {% if item.delivery_config.conflicts %}<small>{{ item.delivery_config.conflicts|join:"، " }}</small>{% endif %}
+                                    </td>
+                                    <td>
+                                        {{ item.delivery_sources }}
                                     </td>
                                     <td>
                                         <div class="tw-row-actions">
                                             <a href="{{ item.review_url }}" class="tw-mini-button">مشاهده</a>
                                             {% if can_manage_catalog %}
                                                 <a href="{{ item.edit_url }}" class="tw-mini-button">ویرایش</a>
-                                                <a href="{{ item.bulk_assign_url }}" class="tw-mini-button">مسیر</a>
+                                                <a href="{{ item.setup_delivery_url }}" class="tw-mini-button">تنظیم تحویل</a>
+                                                <a href="{{ item.preview_url }}" class="tw-mini-button">پیش‌نمایش</a>
+                                                <a href="{{ item.test_url }}" class="tw-mini-button">تست</a>
                                                 <form method="post">
                                                     {% csrf_token %}
                                                     <input type="hidden" name="confirm_action" value="1">

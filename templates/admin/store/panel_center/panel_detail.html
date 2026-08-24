@@ -44,6 +44,56 @@
 </section>
 {% endif %}
 
+<section class="tw-section">
+    <div class="tw-admin-card">
+        <div class="tw-flex tw-flex-col tw-gap-4 xl:tw-flex-row xl:tw-items-start xl:tw-justify-between">
+            <div class="tw-min-w-0">
+                <div class="tw-section-heading tw-mb-3">
+                    <h2>هشدار سلامت این پنل</h2>
+                    {% include "admin/store/panel_center/_badge.html" with tone=alert_detail.status_badge.tone label=alert_detail.status_badge.label icon="fas fa-exclamation-triangle" %}
+                </div>
+                <p class="tw-m-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+                    وضعیت هشدار، آخرین health check و کنترل‌های امن مربوط به همین پنل.
+                </p>
+            </div>
+            <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row xl:tw-shrink-0">
+                <a href="{{ alert_detail.settings_url }}" class="tw-button tw-button-secondary">تنظیمات هشدار سلامت</a>
+                {% if alert_detail.enabled %}
+                    <form method="post" action="{{ actions.alert_disable }}" class="tw-m-0">
+                        {% csrf_token %}
+                        <button type="submit" class="tw-button tw-button-secondary">غیرفعال کردن هشدار این پنل</button>
+                    </form>
+                {% else %}
+                    <form method="post" action="{{ actions.alert_enable }}" class="tw-m-0">
+                        {% csrf_token %}
+                        <button type="submit" class="tw-button tw-button-primary">فعال کردن هشدار این پنل</button>
+                    </form>
+                {% endif %}
+                <form method="post" action="{{ actions.test }}" class="tw-m-0">
+                    {% csrf_token %}
+                    <button type="submit" class="tw-button tw-button-secondary">اجرای بررسی سلامت</button>
+                </form>
+                <form method="post" action="{{ actions.alert_dry_run }}" class="tw-m-0">
+                    {% csrf_token %}
+                    <button type="submit" class="tw-button tw-button-secondary">اجرای Dry-run هشدار</button>
+                </form>
+                <a href="{{ alert_detail.test_message_url }}" class="tw-button tw-button-secondary">ارسال پیام تستی فقط به ادمین</a>
+            </div>
+        </div>
+        <div class="tw-mt-4 tw-grid tw-gap-3 md:tw-grid-cols-2 xl:tw-grid-cols-3">
+            <div class="tw-model-row"><span>وضعیت هشدار این پنل</span><strong>{% if alert_detail.enabled %}فعال است{% else %}غیرفعال است{% endif %}</strong></div>
+            <div class="tw-model-row"><span>وضعیت فعلی سلامت پنل</span><strong>{{ alert_detail.health_label }}</strong></div>
+            <div class="tw-model-row"><span>آخرین خطا</span><strong>{{ alert_detail.last_error|default:"-" }}</strong></div>
+            <div class="tw-model-row"><span>تعداد خطاهای پشت‌سرهم</span><strong>{{ alert_detail.consecutive_failures }}</strong></div>
+            <div class="tw-model-row"><span>آخرین هشدار ارسال‌شده</span><strong>{{ alert_detail.last_alert_sent_at }}</strong></div>
+            <div class="tw-model-row"><span>آخرین بازیابی</span><strong>{{ alert_detail.last_recovery_at }}</strong></div>
+            <div class="tw-model-row"><span>Override</span><strong>{{ alert_detail.override_label }}</strong></div>
+            <div class="tw-model-row"><span>آستانه موثر خطا</span><strong>{{ alert_detail.failure_threshold }}</strong></div>
+            <div class="tw-model-row"><span>فاصله موثر تکرار</span><strong>{{ alert_detail.repeat_interval }} دقیقه</strong></div>
+        </div>
+    </div>
+</section>
+
 <section class="tw-section tw-grid tw-gap-4 xl:tw-grid-cols-2">
     <div class="tw-admin-card">
         <div class="tw-section-heading tw-mb-4"><h2>گزارش قابلیت</h2></div>

@@ -12,12 +12,15 @@ from store.admin_panel_center.services import (
     get_panel_queryset,
     inbound_rows,
     panel_action_urls,
+    panel_health_alert_detail,
+    panel_health_alert_summary,
     panel_list_items,
     safe_capability_report,
     structured_errors_for_capability_report,
     sync_panel_inbounds,
 )
 from store.models import Panel
+from store.panel_health_services import check_all_panels_health, check_panel_health
 
 
 def _require_panel_permission(request, perm="store.view_panel"):
@@ -50,6 +53,7 @@ def panel_center_index(request):
     context = {
         **_base_context(request, "مرکز اتصال پنل‌ها"),
         "items": panel_list_items(),
+        "alert_summary": panel_health_alert_summary(),
         "add_url": reverse("admin_store_panel_center_new"),
         "panel_admin_url": reverse("admin:store_panel_changelist"),
     }
@@ -104,6 +108,7 @@ def panel_center_detail(request, panel_id):
         "report_dict": report_dict,
         "report_structured_errors": structured_errors_for_capability_report(panel, report),
         "capability_items": capability_items(report),
+        "alert_detail": panel_health_alert_detail(panel),
         "inbound_rows": rows[:8],
         "inbound_count": len(rows),
         "last_result": last_result,
@@ -137,6 +142,59 @@ def panel_center_inbounds(request, panel_id):
         "inbound_rows": inbound_rows(panel),
     }
     return TemplateResponse(request, "admin/store/panel_center/inbound_explorer.html", context)
+
+
+@require_POST
+def panel_center_alerts_dry_run(request):
+    _require_panel_permission(request, "store.view_panel")
+    summary = check_all_panels_health(send_alerts=True, dry_run=True, active_only=True)
+    messages.info(
+        request,
+        (
+            "Dry-run هشدار سلامت پنل‌ها انجام شد: "
+            f"checked={summary['checked']} ok={summary['ok']} warning={summary['warning']} "
+            f"error={summary['error']} would_send={summary['would_send']} alerts_sent=0"
+        ),
+    )
+    return redirect("admin_store_panel_center")
+
+
+@require_POST
+def panel_center_panel_alerts_dry_run(request, panel_id):
+    _require_panel_permission(request, "store.view_panel")
+    panel = get_object_or_404(Panel, pk=panel_id)
+    result = check_panel_health(panel, send_alerts=True, dry_run=True)
+    messages.info(
+        request,
+        (
+            "Dry-run هشدار این پنل انجام شد: "
+            f"status={result.get('status') or '-'} "
+            f"would_send={bool(result.get('would_send_alert'))} "
+            f"skip_reason={result.get('alert_skip_reason') or '-'} "
+            f"alerts_sent=0"
+        ),
+    )
+    return redirect("admin_store_panel_center_detail", panel.pk)
+
+
+@require_POST
+def panel_center_panel_alert_enable(request, panel_id):
+    _require_panel_permission(request, "store.change_panel")
+    panel = get_object_or_404(Panel, pk=panel_id)
+    panel.health_alert_enabled = True
+    panel.save(update_fields=["health_alert_enabled", "updated_at"])
+    messages.success(request, "هشدار سلامت برای این پنل فعال شد.")
+    return redirect("admin_store_panel_center_detail", panel.pk)
+
+
+@require_POST
+def panel_center_panel_alert_disable(request, panel_id):
+    _require_panel_permission(request, "store.change_panel")
+    panel = get_object_or_404(Panel, pk=panel_id)
+    panel.health_alert_enabled = False
+    panel.save(update_fields=["health_alert_enabled", "updated_at"])
+    messages.success(request, "هشدار سلامت برای این پنل غیرفعال شد.")
+    return redirect("admin_store_panel_center_detail", panel.pk)
 
 
 @require_POST

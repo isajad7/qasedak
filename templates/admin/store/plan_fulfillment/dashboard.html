@@ -4,11 +4,11 @@
 <section class="tw-dashboard-header tw-rounded-2xl tw-border tw-border-slate-200 tw-bg-white tw-p-5 tw-shadow-sm">
   <div class="tw-flex tw-flex-col tw-gap-4 lg:tw-flex-row lg:tw-items-center lg:tw-justify-between">
     <div class="tw-min-w-0">
-      <span class="tw-status-badge tw-tone-cyan"><i class="fas fa-link" aria-hidden="true"></i> تحویل ساب</span>
-      <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">تحویل خودکار ساب برای پلن‌ها</h1>
+      <span class="tw-status-badge tw-tone-cyan"><i class="fas fa-link" aria-hidden="true"></i> داشبورد تحویل</span>
+      <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">داشبورد تحویل پلن‌ها</h1>
       <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">{{ subtitle }}</p>
     </div>
-    <a class="tw-button tw-button-primary" href="{% url 'admin_store_plan_fulfillment_plans' %}">اتصال پلن به Cup</a>
+    <a class="tw-button tw-button-primary" href="{% url 'admin_store_catalog' %}">Products / Plans</a>
   </div>
 </section>
 
@@ -59,7 +59,7 @@
           <div class="tw-model-row"><span>کانفیگ مورد انتظار</span><strong>{{ card.expected_config_count }}</strong></div>
         </div>
         <div class="tw-model-actions">
-          <a class="tw-mini-button" href="{{ card.setup_url }}">تنظیم تحویل</a>
+          <a class="tw-mini-button" href="{{ card.setup_url }}">ویرایش پلن</a>
           {% if card.recipe %}
             <a class="tw-mini-button" href="{{ card.recipe_urls.preview }}">پیش‌نمایش</a>
             <a class="tw-mini-button" href="{{ card.recipe_urls.simulate }}">تست شبیه‌سازی</a>

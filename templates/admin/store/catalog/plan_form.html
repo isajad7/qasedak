@@ -6,6 +6,24 @@
 {% block extrastyle %}
 {{ block.super }}
 <link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+<style>
+  .qadmin-delivery-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .qadmin-delivery-card { border: 1px solid #d8dee8; border-radius: 8px; padding: 14px; background: #fff; cursor: pointer; }
+  .qadmin-delivery-card input { margin-left: 8px; }
+  .qadmin-delivery-card strong { display: block; margin-bottom: 6px; color: #111827; }
+  .qadmin-delivery-card p { margin: 0; color: #64748b; line-height: 1.8; }
+  .qadmin-delivery-section { margin-top: 18px; }
+  .qadmin-delivery-section[hidden], .qadmin-source-row[hidden] { display: none; }
+  .qadmin-output-box { border: 1px solid #d8dee8; border-radius: 8px; padding: 14px; background: #f8fafc; margin-bottom: 16px; }
+  .qadmin-conflict-warning { border: 1px solid #fecaca; background: #fff1f2; color: #991b1b; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+  .qadmin-source-list { display: grid; gap: 12px; margin-top: 12px; }
+  .qadmin-source-row { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #fff; }
+  .qadmin-source-row-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .qadmin-source-row-title { font-weight: 700; color: #111827; }
+  .qadmin-source-actions { display: flex; justify-content: flex-start; margin-top: 12px; }
+  .qadmin-inline-checks { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding-top: 28px; }
+  .qadmin-inline-checks label { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
+</style>
 {% endblock %}
 
 {% block breadcrumbs %}
@@ -36,11 +54,23 @@
         {% for hidden in form.hidden_fields %}{{ hidden }}{% endfor %}
         {{ form.non_field_errors }}
 
+        {% if delivery_config.legacy_ignored %}
+            <div class="qadmin-conflict-warning">
+                <strong>تنظیمات legacy این پلن نادیده گرفته می‌شود.</strong>
+                <p>PlanDeliveryConfig فعال است و route/recipe قدیمی با این ذخیره ترکیب نمی‌شود.</p>
+            </div>
+        {% elif delivery_config.has_conflict %}
+            <div class="qadmin-conflict-warning">
+                <strong>این پلن legacy route و recipe فعال هم‌زمان دارد.</strong>
+                <p>با ذخیره این صفحه، تنظیم canonical جدید ساخته می‌شود و از این پس همان برنده است.</p>
+            </div>
+        {% endif %}
+
         <section class="qadmin-form-section">
-            <h2>اطلاعات اصلی</h2>
+            <h2>مرحله ۱ — اطلاعات فروش</h2>
             <div class="qadmin-form-grid">
                 {% for field in form.visible_fields %}
-                    {% if field.name == "name" or field.name == "volume_gb" or field.name == "duration_days" or field.name == "price" or field.name == "currency" %}
+                    {% if field.name == "name" or field.name == "volume_gb" or field.name == "duration_days" or field.name == "price" or field.name == "currency" or field.name == "device_limit" or field.name == "is_active" or field.name == "is_public" or field.name == "is_custom_volume" or field.name == "operators" or field.name == "sort_order" %}
                         <div class="qadmin-form-field field-{{ field.name }}">
                             {{ field.errors }}
                             {{ field.label_tag }}
@@ -52,39 +82,138 @@
             </div>
         </section>
 
-        <section class="qadmin-form-section">
-            <h2>نمایش و فروش</h2>
-            <div class="qadmin-form-grid">
-                {% for field in form.visible_fields %}
-                    {% if field.name == "is_active" or field.name == "is_public" or field.name == "is_custom_volume" or field.name == "device_limit" or field.name == "sort_order" or field.name == "operators" %}
-                        <div class="qadmin-form-field field-{{ field.name }}">
-                            {{ field.errors }}
-                            {{ field.label_tag }}
-                            {{ field }}
-                            {% if field.help_text %}<p class="help">{{ field.help_text }}</p>{% endif %}
-                        </div>
-                    {% endif %}
-                {% endfor %}
+        <section class="qadmin-form-section qadmin-status-info" id="delivery">
+            <h2>مرحله ۲ — روش تحویل</h2>
+            {{ form.delivery_mode.errors }}
+            <div class="qadmin-delivery-grid">
+                <label class="qadmin-delivery-card">
+                    <input type="radio" name="{{ form.delivery_mode.name }}" value="GLOBAL_FALLBACK" {% if form.delivery_mode.value == "GLOBAL_FALLBACK" %}checked{% endif %}>
+                    <strong>پیش‌فرض فروشگاه</strong>
+                    <p>از مسیرهای آماده فروش فروشگاه استفاده می‌شود.</p>
+                </label>
+                <label class="qadmin-delivery-card">
+                    <input type="radio" name="{{ form.delivery_mode.name }}" value="DIRECT_LINKS" {% if form.delivery_mode.value == "DIRECT_LINKS" %}checked{% endif %}>
+                    <strong>لینک مستقیم</strong>
+                    <p>کانفیگ‌های ساخته‌شده یا برداشته‌شده مستقیماً به مشتری تحویل داده می‌شوند.</p>
+                </label>
+                <label class="qadmin-delivery-card">
+                    <input type="radio" name="{{ form.delivery_mode.name }}" value="SUBSCRIPTION" {% if form.delivery_mode.value == "SUBSCRIPTION" %}checked{% endif %}>
+                    <strong>ساب اختصاصی قاصدک</strong>
+                    <p>منابع داخل Cup مشتری قرار می‌گیرند و یک لینک /sub اختصاصی تحویل داده می‌شود.</p>
+                </label>
+            </div>
+
+            <div class="qadmin-output-box">
+                <strong>خروجی این پلن</strong>
+                <p>روش فعلی: {{ delivery_config.mode_label }} · وضعیت: {{ delivery_config.readiness_label }}</p>
+                <p>منابع: {{ delivery_config.source_summary }}</p>
+                {% if delivery_config.effective_mode == "SUBSCRIPTION" %}
+                    <p>تحویل مشتری: /sub/&lt;token&gt;</p>
+                {% elif delivery_config.effective_mode == "GLOBAL_FALLBACK" %}
+                    <p>تحویل مشتری: لینک مستقیم از fallback فروشگاه</p>
+                {% else %}
+                    <p>تحویل مشتری: Direct links</p>
+                {% endif %}
+                {% if delivery_config.warnings %}
+                    <ul>
+                        {% for warning in delivery_config.warnings %}<li>{{ warning }}</li>{% endfor %}
+                    </ul>
+                {% endif %}
             </div>
         </section>
 
-        <section class="qadmin-form-section qadmin-status-info">
-            <h2>مسیر فروش</h2>
-            <div class="qadmin-form-grid">
-                {% for field in form.visible_fields %}
-                    {% if field.name == "inbound" or field.name == "operator" or field.name == "priority" or field.name == "route_active" %}
-                        <div class="qadmin-form-field field-{{ field.name }}">
-                            {{ field.errors }}
-                            {{ field.label_tag }}
-                            {{ field }}
-                            {% if field.help_text %}<p class="help">{{ field.help_text }}</p>{% endif %}
-                        </div>
-                    {% endif %}
-                {% endfor %}
-            </div>
-            {% if selected_store and not selected_store.allow_global_inbound_fallback %}
-                <p class="qadmin-safe-text">Fallback خاموش است؛ پلن فعال قابل فروش بدون route معتبر ذخیره نمی‌شود.</p>
+        <section class="qadmin-form-section qadmin-delivery-section" data-global-fallback-section>
+            <h2>مرحله ۳ — پیش‌فرض فروشگاه</h2>
+            <p>Fallback فروشگاه: {% if selected_store and selected_store.allow_global_inbound_fallback %}فعال{% else %}غیرفعال{% endif %}</p>
+            <p>Inbound آماده فروش: {{ delivery_config.sales_ready_inbound_count }}</p>
+            {% if not delivery_config.global_fallback_available %}
+                <p class="qadmin-safe-text">برای fallback فعلاً منبع آماده فروش وجود ندارد.</p>
             {% endif %}
+        </section>
+
+        <section class="qadmin-form-section qadmin-delivery-section" data-source-builder>
+            <h2>مرحله ۳ — منابع سرویس</h2>
+            {% if form.source_errors %}
+                <ul class="errorlist">
+                    {% for error in form.source_errors %}<li>{{ error }}</li>{% endfor %}
+                </ul>
+            {% endif %}
+            <input type="hidden" name="source-TOTAL_FORMS" id="source-total-forms" value="{{ form.source_rows|length }}">
+            <div class="qadmin-source-list" id="source-list">
+                {% for row in form.source_rows %}
+                    <article class="qadmin-source-row" data-source-row>
+                        <input type="hidden" name="source-{{ row.index }}-id" value="{{ row.id }}">
+                        <input type="hidden" name="source-{{ row.index }}-DELETE" value="">
+                        <div class="qadmin-source-row-header">
+                            <span class="qadmin-source-row-title">منبع {{ forloop.counter }}</span>
+                            <button type="button" class="qadmin-action qadmin-action-secondary" data-remove-source>حذف</button>
+                        </div>
+                        <div class="qadmin-form-grid">
+                            <div class="qadmin-form-field">
+                                <label for="id_source_{{ row.index }}_source_type">نوع منبع</label>
+                                <select id="id_source_{{ row.index }}_source_type" name="source-{{ row.index }}-source_type" class="plan-delivery-field" data-source-type>
+                                    {% for option in form.source_type_options %}
+                                        <option value="{{ option.value }}" {% if option.value == row.source_type %}selected{% endif %}>{{ option.label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="qadmin-form-field" data-panel-source-field>
+                                <label for="id_source_{{ row.index }}_inbound">Inbound پنل</label>
+                                <select id="id_source_{{ row.index }}_inbound" name="source-{{ row.index }}-inbound" class="plan-delivery-field">
+                                    <option value="">انتخاب کنید</option>
+                                    {% for option in form.source_inbound_options %}
+                                        <option value="{{ option.value }}" {% if option.value == row.inbound_id %}selected{% endif %}>{{ option.label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="qadmin-form-field" data-inventory-source-field>
+                                <label for="id_source_{{ row.index }}_inventory_pool">مخزن کانفیگ</label>
+                                <select id="id_source_{{ row.index }}_inventory_pool" name="source-{{ row.index }}-inventory_pool" class="plan-delivery-field">
+                                    <option value="">انتخاب کنید</option>
+                                    {% for option in form.source_pool_options %}
+                                        <option value="{{ option.value }}" {% if option.value == row.inventory_pool_id %}selected{% endif %}>{{ option.label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="qadmin-form-field">
+                                <label for="id_source_{{ row.index }}_label">برچسب</label>
+                                <input id="id_source_{{ row.index }}_label" type="text" name="source-{{ row.index }}-label" value="{{ row.label }}" maxlength="120" class="plan-delivery-field">
+                            </div>
+                            <div class="qadmin-form-field">
+                                <label for="id_source_{{ row.index }}_quantity">تعداد</label>
+                                <input id="id_source_{{ row.index }}_quantity" type="number" name="source-{{ row.index }}-quantity" value="{{ row.quantity }}" min="1" class="plan-delivery-field">
+                            </div>
+                            <div class="qadmin-form-field">
+                                <label for="id_source_{{ row.index }}_priority">اولویت</label>
+                                <input id="id_source_{{ row.index }}_priority" type="number" name="source-{{ row.index }}-priority" value="{{ row.priority }}" min="0" class="plan-delivery-field">
+                            </div>
+                            <div class="qadmin-inline-checks">
+                                <label><input type="checkbox" name="source-{{ row.index }}-required" {% if row.required %}checked{% endif %}> الزامی</label>
+                                <label><input type="checkbox" name="source-{{ row.index }}-is_fallback" {% if row.is_fallback %}checked{% endif %}> fallback</label>
+                            </div>
+                        </div>
+                    </article>
+                {% endfor %}
+            </div>
+            <div class="qadmin-source-actions">
+                <button type="button" class="qadmin-action qadmin-action-secondary" id="add-source">افزودن منبع</button>
+            </div>
+        </section>
+
+        <section class="qadmin-form-section qadmin-delivery-section" data-source-builder>
+            <h2>مرحله ۴ — قوانین تحویل</h2>
+            <div class="qadmin-form-grid">
+                <div class="qadmin-form-field">
+                    {{ form.failure_policy.errors }}
+                    {{ form.failure_policy.label_tag }}
+                    {{ form.failure_policy }}
+                </div>
+            </div>
+        </section>
+
+        <section class="qadmin-form-section">
+            <h2>مرحله ۵ — پیش‌نمایش و تست</h2>
+            <p>Preview فعلی فقط readiness و خروجی مورد انتظار را نشان می‌دهد و live call اجرا نمی‌کند.</p>
         </section>
 
         <div class="qadmin-form-actions">
@@ -93,4 +222,138 @@
         </div>
     </form>
 </div>
+
+<template id="source-row-template">
+    <article class="qadmin-source-row" data-source-row>
+        <input type="hidden" name="source-__prefix__-id" value="">
+        <input type="hidden" name="source-__prefix__-DELETE" value="">
+        <div class="qadmin-source-row-header">
+            <span class="qadmin-source-row-title">منبع</span>
+            <button type="button" class="qadmin-action qadmin-action-secondary" data-remove-source>حذف</button>
+        </div>
+        <div class="qadmin-form-grid">
+            <div class="qadmin-form-field">
+                <label>نوع منبع</label>
+                <select name="source-__prefix__-source_type" class="plan-delivery-field" data-source-type>
+                    {% for option in form.source_type_options %}
+                        <option value="{{ option.value }}">{{ option.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="qadmin-form-field" data-panel-source-field>
+                <label>Inbound پنل</label>
+                <select name="source-__prefix__-inbound" class="plan-delivery-field">
+                    <option value="">انتخاب کنید</option>
+                    {% for option in form.source_inbound_options %}
+                        <option value="{{ option.value }}">{{ option.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="qadmin-form-field" data-inventory-source-field>
+                <label>مخزن کانفیگ</label>
+                <select name="source-__prefix__-inventory_pool" class="plan-delivery-field">
+                    <option value="">انتخاب کنید</option>
+                    {% for option in form.source_pool_options %}
+                        <option value="{{ option.value }}">{{ option.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="qadmin-form-field">
+                <label>برچسب</label>
+                <input type="text" name="source-__prefix__-label" value="" maxlength="120" class="plan-delivery-field">
+            </div>
+            <div class="qadmin-form-field">
+                <label>تعداد</label>
+                <input type="number" name="source-__prefix__-quantity" value="1" min="1" class="plan-delivery-field">
+            </div>
+            <div class="qadmin-form-field">
+                <label>اولویت</label>
+                <input type="number" name="source-__prefix__-priority" value="100" min="0" class="plan-delivery-field">
+            </div>
+            <div class="qadmin-inline-checks">
+                <label><input type="checkbox" name="source-__prefix__-required" checked> الزامی</label>
+                <label><input type="checkbox" name="source-__prefix__-is_fallback"> fallback</label>
+            </div>
+        </div>
+    </article>
+</template>
+
+<script>
+  (function () {
+    var totalInput = document.getElementById("source-total-forms");
+    var list = document.getElementById("source-list");
+    var template = document.getElementById("source-row-template");
+
+    function selectedMode() {
+      var checked = document.querySelector('input[name="{{ form.delivery_mode.name }}"]:checked');
+      return checked ? checked.value : "";
+    }
+
+    function updateDeliverySections() {
+      var mode = selectedMode();
+      document.querySelectorAll("[data-source-builder]").forEach(function (section) {
+        section.hidden = mode === "GLOBAL_FALLBACK";
+      });
+      document.querySelectorAll("[data-global-fallback-section]").forEach(function (section) {
+        section.hidden = mode !== "GLOBAL_FALLBACK";
+      });
+    }
+
+    function updateSourceRow(row) {
+      var type = row.querySelector("[data-source-type]");
+      var isInventory = type && type.value === "INVENTORY_POOL";
+      row.querySelectorAll("[data-panel-source-field]").forEach(function (field) {
+        field.hidden = isInventory;
+      });
+      row.querySelectorAll("[data-inventory-source-field]").forEach(function (field) {
+        field.hidden = !isInventory;
+      });
+    }
+
+    function refreshRows() {
+      document.querySelectorAll("[data-source-row]").forEach(updateSourceRow);
+    }
+
+    document.querySelectorAll('input[name="{{ form.delivery_mode.name }}"]').forEach(function (input) {
+      input.addEventListener("change", updateDeliverySections);
+    });
+
+    if (list) {
+      list.addEventListener("change", function (event) {
+        if (event.target.matches("[data-source-type]")) {
+          updateSourceRow(event.target.closest("[data-source-row]"));
+        }
+      });
+      list.addEventListener("click", function (event) {
+        var button = event.target.closest("[data-remove-source]");
+        if (!button) {
+          return;
+        }
+        var row = button.closest("[data-source-row]");
+        var deleteInput = row.querySelector('input[name$="-DELETE"]');
+        if (deleteInput) {
+          deleteInput.value = "1";
+        }
+        row.hidden = true;
+      });
+    }
+
+    var addButton = document.getElementById("add-source");
+    if (addButton && template && list && totalInput) {
+      addButton.addEventListener("click", function () {
+        var index = parseInt(totalInput.value || "0", 10);
+        var html = template.innerHTML.replace(/__prefix__/g, String(index));
+        var wrapper = document.createElement("div");
+        wrapper.innerHTML = html;
+        var row = wrapper.firstElementChild;
+        list.appendChild(row);
+        totalInput.value = String(index + 1);
+        updateSourceRow(row);
+      });
+    }
+
+    updateDeliverySections();
+    refreshRows();
+  }());
+</script>
 {% endblock %}

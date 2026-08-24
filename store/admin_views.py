@@ -2316,6 +2316,8 @@ def catalog_plan_form(request, plan_id=None):
         "form": form,
         "plan": plan,
         "selected_store": selected_store,
+        "delivery_config": form.delivery_config,
+        "delivery_sources": form.source_rows,
         "catalog_url": catalog_url(selected_store),
         "review_url": catalog_plan_review_url(plan) if plan else "",
     }

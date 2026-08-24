@@ -1,0 +1,31 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin:store_panel_changelist' %}">پنل‌ها</a>
+    &rsaquo; <a href="{{ back_url }}">{{ panel.name }}</a>
+    &rsaquo; ارسال پیام تستی هشدار
+</div>
+{% endblock %}
+
+{% block content %}
+<div dir="rtl">
+    <h1>تأیید ارسال پیام تستی هشدار سلامت</h1>
+    <p class="help">
+        این پیام فقط به ادمین‌های تنظیم‌شده در BotConfiguration ارسال می‌شود و هیچ پیامی برای مشتری‌ها ارسال نمی‌کند.
+    </p>
+    <p>
+        پنل: <strong>{{ panel.name }}</strong>
+    </p>
+    <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="confirm" value="yes">
+        <div class="submit-row">
+            <input type="submit" class="default" value="ارسال پیام تستی فقط به ادمین">
+            <a class="button cancel-link" href="{{ back_url }}">انصراف</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

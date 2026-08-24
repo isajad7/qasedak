@@ -4085,6 +4085,139 @@ class ConfigAllocation(TimeStampedModel):
         return f"{self.asset_id}:{self.status}:{self.allocated_at:%Y-%m-%d}"
 
 
+class PlanDeliveryConfig(TimeStampedModel):
+    class DeliveryMode(models.TextChoices):
+        GLOBAL_FALLBACK = "GLOBAL_FALLBACK", _("Global fallback")
+        DIRECT_LINKS = "DIRECT_LINKS", _("Direct links")
+        SUBSCRIPTION = "SUBSCRIPTION", _("Subscription")
+
+    class FailurePolicy(models.TextChoices):
+        STRICT = "strict", _("Strict")
+        PARTIAL_ALLOWED = "partial_allowed", _("Partial allowed")
+
+    plan = models.OneToOneField(
+        Plan,
+        verbose_name=_("plan"),
+        on_delete=models.CASCADE,
+        related_name="delivery_config",
+    )
+    delivery_mode = models.CharField(
+        _("delivery mode"),
+        max_length=30,
+        choices=DeliveryMode.choices,
+        default=DeliveryMode.GLOBAL_FALLBACK,
+        db_index=True,
+    )
+    failure_policy = models.CharField(
+        _("failure policy"),
+        max_length=30,
+        choices=FailurePolicy.choices,
+        default=FailurePolicy.STRICT,
+        db_index=True,
+    )
+    active = models.BooleanField(_("active"), default=True, db_index=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("plan delivery config")
+        verbose_name_plural = _("plan delivery configs")
+        indexes = [
+            models.Index(fields=["delivery_mode", "active"]),
+        ]
+
+    def __str__(self):
+        return f"{self.plan} / {self.delivery_mode}"
+
+
+class PlanDeliverySource(TimeStampedModel):
+    class SourceType(models.TextChoices):
+        PANEL_INBOUND = "PANEL_INBOUND", _("Panel inbound")
+        INVENTORY_POOL = "INVENTORY_POOL", _("Inventory pool")
+
+    delivery_config = models.ForeignKey(
+        PlanDeliveryConfig,
+        verbose_name=_("delivery config"),
+        on_delete=models.CASCADE,
+        related_name="sources",
+    )
+    source_type = models.CharField(
+        _("source type"),
+        max_length=30,
+        choices=SourceType.choices,
+        db_index=True,
+    )
+    panel = models.ForeignKey(
+        Panel,
+        verbose_name=_("panel"),
+        on_delete=models.SET_NULL,
+        related_name="plan_delivery_sources",
+        null=True,
+        blank=True,
+    )
+    inbound = models.ForeignKey(
+        Inbound,
+        verbose_name=_("inbound"),
+        on_delete=models.SET_NULL,
+        related_name="plan_delivery_sources",
+        null=True,
+        blank=True,
+    )
+    inventory_pool = models.ForeignKey(
+        ConfigInventoryPool,
+        verbose_name=_("inventory pool"),
+        on_delete=models.SET_NULL,
+        related_name="plan_delivery_sources",
+        null=True,
+        blank=True,
+    )
+    label = models.CharField(_("label"), max_length=120, blank=True)
+    quantity = models.PositiveIntegerField(_("quantity"), default=1, validators=[MinValueValidator(1)])
+    required = models.BooleanField(_("required"), default=True)
+    priority = models.PositiveIntegerField(_("priority"), default=100, db_index=True)
+    is_fallback = models.BooleanField(_("is fallback"), default=False, db_index=True)
+    active = models.BooleanField(_("active"), default=True, db_index=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("plan delivery source")
+        verbose_name_plural = _("plan delivery sources")
+        ordering = ["priority", "id"]
+        indexes = [
+            models.Index(fields=["delivery_config", "active", "priority"]),
+            models.Index(fields=["source_type", "active"]),
+            models.Index(fields=["is_fallback", "priority"]),
+        ]
+
+    def __str__(self):
+        return f"{self.delivery_config_id}:{self.priority}:{self.source_type}"
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        if self.source_type == self.SourceType.PANEL_INBOUND:
+            if not self.inbound_id:
+                errors["inbound"] = _("Panel/inbound source requires an inbound.")
+            if self.inventory_pool_id:
+                errors["inventory_pool"] = _("Panel/inbound source cannot also use an inventory pool.")
+            if self.inbound_id:
+                inbound_panel_id = getattr(self.inbound, "panel_id", None)
+                if self.panel_id and inbound_panel_id and self.panel_id != inbound_panel_id:
+                    errors["panel"] = _("Selected panel must match the inbound panel.")
+                elif not self.panel_id and inbound_panel_id:
+                    self.panel = self.inbound.panel
+        elif self.source_type == self.SourceType.INVENTORY_POOL:
+            if not self.inventory_pool_id:
+                errors["inventory_pool"] = _("Inventory source requires a pool.")
+            if self.panel_id:
+                errors["panel"] = _("Inventory source cannot use a panel.")
+            if self.inbound_id:
+                errors["inbound"] = _("Inventory source cannot use an inbound.")
+        else:
+            errors["source_type"] = _("Unsupported source type.")
+        if errors:
+            raise ValidationError(errors)
+
+
 class CupFulfillmentRecipe(TimeStampedModel):
     class FailurePolicy(models.TextChoices):
         STRICT = "strict", _("Strict")

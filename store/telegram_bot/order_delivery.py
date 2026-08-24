@@ -12,6 +12,20 @@ from store.subscription_cups import (
 from .config_delivery import config_send_result_count, send_config_links_message
 
 
+def _metadata_direct_delivery_links(order):
+    metadata = order.metadata or {}
+    links = metadata.get("direct_delivery_links") or []
+    cleaned = []
+    seen = set()
+    for link in links:
+        link = str(link or "").strip()
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        cleaned.append(link)
+    return cleaned
+
+
 def format_customer_order_event(order, *, event_type, format_order_message_func):
     if event_type == "approved":
         lines = [
@@ -43,6 +57,12 @@ def format_customer_order_event(order, *, event_type, format_order_message_func)
 
 def order_config_links(order):
     links = []
+    direct_delivery_links = _metadata_direct_delivery_links(order)
+    if direct_delivery_links:
+        for index, link in enumerate(direct_delivery_links, start=1):
+            prefix = f"کانفیگ {persian_digits(index)}" if len(direct_delivery_links) > 1 else "کانفیگ"
+            links.append((f"{prefix} - لینک مستقیم", link))
+        return links
     clients = list(order.get_vpn_clients())
     if clients:
         groups = order_config_link_groups(order)
@@ -79,6 +99,19 @@ def _project_subscription_urls(cup, store):
 
 
 def order_config_link_groups(order):
+    direct_delivery_links = _metadata_direct_delivery_links(order)
+    if direct_delivery_links:
+        total = len(direct_delivery_links)
+        return [
+            {
+                "label": f"کانفیگ {persian_digits(index)}" if total > 1 else "",
+                "subscription_link": "",
+                "direct_link": link,
+                "project_subscription_link": "",
+                "project_client_link": "",
+            }
+            for index, link in enumerate(direct_delivery_links, start=1)
+        ]
     clients = list(order.get_vpn_clients())
     if clients:
         expanded = []

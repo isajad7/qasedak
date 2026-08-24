@@ -73,6 +73,8 @@ from .models import (
     PanelHealthStatus,
     PanelUsageSnapshot,
     Plan,
+    PlanDeliveryConfig,
+    PlanDeliverySource,
     PlanInboundRoute,
     QasedakBackupJob,
     QasedakRestoreJob,
@@ -301,6 +303,85 @@ class SubscriptionCupMVPTests(TestCase):
             )
             CupItem.objects.create(cup=cup, config_link=config_link, position=position)
         return cup
+
+    def create_inventory_pool_with_assets(self, title, links):
+        pool = ConfigInventoryPool.objects.create(title=title, is_active=True)
+        for raw_link in links:
+            ConfigInventoryAsset.objects.create(
+                pool=pool,
+                raw_link=raw_link,
+                status=ConfigInventoryAsset.Status.AVAILABLE,
+            )
+        return pool
+
+    def create_pending_order(self, *, username="v2-order"):
+        return Order.objects.create(
+            store=self.store,
+            customer=self.customer,
+            plan=self.plan,
+            status=Order.Status.PENDING_VERIFICATION,
+            verification_status=Order.VerificationStatus.PENDING,
+            amount=self.plan.price,
+            original_amount=self.plan.price,
+            username=username,
+        )
+
+    def test_plan_delivery_v2_direct_links_allocates_inventory_without_subscription_cup(self):
+        from .provisioning_services import approve_and_provision_order
+
+        links = [self.direct_link(401), self.direct_link(402)]
+        pool = self.create_inventory_pool_with_assets("V2 direct pool", links)
+        config = PlanDeliveryConfig.objects.create(
+            plan=self.plan,
+            delivery_mode=PlanDeliveryConfig.DeliveryMode.DIRECT_LINKS,
+        )
+        PlanDeliverySource.objects.create(
+            delivery_config=config,
+            source_type=PlanDeliverySource.SourceType.INVENTORY_POOL,
+            inventory_pool=pool,
+            quantity=2,
+            priority=1,
+        )
+        order = self.create_pending_order(username="v2-direct")
+
+        result = approve_and_provision_order(order, notify=False)
+
+        self.assertTrue(result.ok)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.COMPLETED)
+        self.assertEqual(order.direct_link, links[0])
+        self.assertEqual((order.metadata or {}).get("direct_delivery_links"), links)
+        self.assertEqual(ConfigAllocation.objects.filter(order=order, status=ConfigAllocation.Status.ACTIVE).count(), 2)
+        self.assertFalse(SubscriptionCup.objects.filter(order=order).exists())
+
+    def test_plan_delivery_v2_subscription_allocates_inventory_into_one_cup(self):
+        from .provisioning_services import approve_and_provision_order
+
+        links = [self.direct_link(501), self.direct_link(502)]
+        pool = self.create_inventory_pool_with_assets("V2 subscription pool", links)
+        config = PlanDeliveryConfig.objects.create(
+            plan=self.plan,
+            delivery_mode=PlanDeliveryConfig.DeliveryMode.SUBSCRIPTION,
+        )
+        PlanDeliverySource.objects.create(
+            delivery_config=config,
+            source_type=PlanDeliverySource.SourceType.INVENTORY_POOL,
+            inventory_pool=pool,
+            quantity=2,
+            priority=1,
+        )
+        order = self.create_pending_order(username="v2-subscription")
+
+        result = approve_and_provision_order(order, notify=False)
+
+        self.assertTrue(result.ok)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.COMPLETED)
+        self.assertEqual(order.direct_link, "")
+        self.assertIn("/sub/", order.sub_link)
+        cup = SubscriptionCup.objects.get(order=order, vpn_client__isnull=True)
+        self.assertEqual(CupItem.objects.filter(cup=cup, is_active=True).count(), 2)
+        self.assertEqual(ConfigAllocation.objects.filter(order=order, cup=cup, status=ConfigAllocation.Status.ACTIVE).count(), 2)
 
     def browser_headers(self):
         return {
@@ -2947,8 +3028,6 @@ class SubscriptionCupMVPTests(TestCase):
 
         urls = [
             reverse("admin_store_plan_fulfillment"),
-            reverse("admin_store_plan_fulfillment_plans"),
-            reverse("admin_store_plan_fulfillment_plan", args=[self.plan.pk]),
             reverse("admin_store_plan_fulfillment_recipe", args=[recipe.pk]),
             reverse("admin_store_plan_fulfillment_recipe_preview", args=[recipe.pk]),
             reverse("admin_store_plan_fulfillment_recipe_simulate", args=[recipe.pk]),
@@ -2960,40 +3039,23 @@ class SubscriptionCupMVPTests(TestCase):
                 self.assertEqual(response.status_code, 200)
 
         dashboard = self.client.get(reverse("admin_store_plan_fulfillment"))
-        self.assertContains(dashboard, "تحویل خودکار ساب برای پلن‌ها")
-        self.assertContains(dashboard, "اتصال یک پلن به تحویل خودکار")
+        self.assertContains(dashboard, "داشبورد تحویل پلن‌ها")
+        self.assertContains(dashboard, "ویرایش تحویل در Products / Plans")
         self.assertContains(dashboard, "تست شبیه‌سازی تحویل")
+        self.assertEqual(self.client.get(reverse("admin_store_plan_fulfillment_plans")).status_code, 302)
+        self.assertEqual(self.client.get(reverse("admin_store_plan_fulfillment_plan", args=[self.plan.pk])).status_code, 302)
 
-    def test_plan_fulfillment_wizard_connects_plan_to_inventory_recipe(self):
-        pool = self.create_inventory_pool(title="Wizard Plan Stock")
+    def test_plan_fulfillment_plan_url_redirects_to_catalog_editor(self):
         self.client.force_login(self.admin_user)
 
         response = self.client.post(
             reverse("admin_store_plan_fulfillment_plan", args=[self.plan.pk]),
-            {
-                "fulfillment_type": "cup",
-                "recipe_title": "Wizard recipe",
-                "failure_policy": CupFulfillmentRecipe.FailurePolicy.STRICT,
-                "panel_quantity": "1",
-                "panel_priority": "1",
-                "inventory_pool": pool.pk,
-                "inventory_quantity": "2",
-                "inventory_required": "on",
-                "inventory_priority": "2",
-                "inventory_allocation_mode": "",
-                "fallback_type": "",
-                "fallback_quantity": "1",
-                "fallback_priority": "90",
-            },
+            {"fulfillment_type": "cup"},
         )
 
-        recipe = CupFulfillmentRecipe.objects.get(plan=self.plan, title="Wizard recipe")
-        self.assertRedirects(response, reverse("admin_store_plan_fulfillment_recipe", args=[recipe.pk]))
-        self.assertTrue(recipe.is_active)
-        rule = recipe.rules.get()
-        self.assertEqual(rule.source_type, CupFillerRule.SourceType.INVENTORY_POOL)
-        self.assertEqual(rule.inventory_pool, pool)
-        self.assertEqual(rule.quantity, 2)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], f"{reverse('admin_store_catalog_plan_edit', args=[self.plan.pk])}#delivery")
+        self.assertFalse(CupFulfillmentRecipe.objects.filter(plan=self.plan, title="Wizard recipe").exists())
 
     def test_plan_fulfillment_preview_flags_reality_missing_pbk(self):
         self.inbound.security = Inbound.Security.REALITY
@@ -3059,7 +3121,7 @@ class SubscriptionCupMVPTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "تحویل خودکار ساب")
-        self.assertContains(response, "تنظیم تحویل ساب")
+        self.assertContains(response, "تنظیم تحویل")
         self.assertContains(response, "بدون تنظیم")
 
     def test_plan_admin_change_page_shows_service_delivery_cards(self):
@@ -3082,11 +3144,11 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertContains(response, "این پلن با ساب اختصاصی قاصدک تحویل داده می‌شود.")
         self.assertContains(response, "مدیریت اینباندهای پلن")
         self.assertContains(response, "تست مسیر اینباندها")
-        self.assertContains(response, "ساخت / ویرایش دستور تحویل")
+        self.assertContains(response, "ویرایش تحویل در Plan editor")
         self.assertContains(response, "پیش‌نمایش آمادگی")
         self.assertContains(response, "تست شبیه‌سازی")
         self.assertContains(response, "مشاهده Recipe")
-        self.assertContains(response, reverse("admin_store_plan_fulfillment_plan", args=[self.plan.pk]))
+        self.assertContains(response, f"{reverse('admin_store_catalog_plan_edit', args=[self.plan.pk])}#delivery")
         self.assertContains(response, reverse("admin_store_plan_fulfillment_recipe", args=[recipe.pk]))
         self.assertContains(response, reverse("admin_store_plan_fulfillment_recipe_preview", args=[recipe.pk]))
         self.assertContains(response, reverse("admin_store_plan_fulfillment_recipe_simulate", args=[recipe.pk]))
@@ -3102,7 +3164,7 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "برای این پلن هنوز دستور تحویل ساب تعریف نشده است.")
         self.assertContains(response, "این پلن با مسیر قدیمی اینباند تحویل داده می‌شود.")
-        self.assertContains(response, "ساخت / ویرایش دستور تحویل")
+        self.assertContains(response, "ویرایش تحویل در Plan editor")
         self.assertContains(response, reverse("admin_store_panel_center_routing_detail", args=[self.plan.pk]))
 
     def test_plan_admin_add_page_shows_next_step_and_redirect_button(self):
@@ -3113,7 +3175,7 @@ class SubscriptionCupMVPTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "مرحله بعد از ساخت پلن")
-        self.assertContains(response, "ذخیره و تنظیم تحویل ساب")
+        self.assertContains(response, "ذخیره و تنظیم تحویل")
 
         post_response = self.client.post(
             add_url,
@@ -3139,7 +3201,7 @@ class SubscriptionCupMVPTests(TestCase):
         )
 
         plan = Plan.objects.get(slug="after-save-fulfillment")
-        self.assertRedirects(post_response, reverse("admin_store_plan_fulfillment_plan", args=[plan.pk]), fetch_redirect_response=False)
+        self.assertRedirects(post_response, f"{reverse('admin_store_catalog_plan_edit', args=[plan.pk])}#delivery", fetch_redirect_response=False)
 
     def test_plan_admin_list_delivery_columns_and_filters(self):
         pool = self.create_inventory_pool(title="Plan List Stock")
@@ -5816,10 +5878,25 @@ class PanelHealthServiceTests(TestCase):
         User.objects.create_superuser("owner", "owner@example.com", "password")
         self.client.login(username="owner", password="password")
 
-        response = self.client.get(reverse("admin:store_panelhealthalertsettings_changelist"))
+        changelist = self.client.get(reverse("admin:store_panelhealthalertsettings_changelist"))
+        change = self.client.get(reverse("admin:store_panelhealthalertsettings_change", args=[self.store.pk]))
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "هشدار سلامت پنل")
+        self.assertEqual(changelist.status_code, 200)
+        self.assertEqual(change.status_code, 200)
+        self.assertContains(changelist, "تنظیمات هشدار سلامت پنل‌ها")
+        self.assertContains(change, "تنظیمات هشدار سلامت پنل‌ها")
+        self.assertContains(change, "این تنظیمات فقط برای پیام‌های ادمین استفاده می‌شود")
+        self.assertContains(change, "فعال‌سازی بررسی سلامت پنل")
+        self.assertContains(change, "تنظیمات ربات")
+
+    def test_panel_health_alert_settings_hidden_from_jazzmin_sidebar(self):
+        infrastructure_items = settings.JAZZMIN_SETTINGS["custom_links"]["Infrastructure"]
+
+        self.assertNotIn({"model": "store.PanelHealthAlertSettings"}, infrastructure_items)
+        self.assertIn("store.PanelHealthAlertSettings", settings.JAZZMIN_SETTINGS["hide_models"])
+        self.assertIn({"model": "store.Panel"}, infrastructure_items)
+        self.assertIn({"model": "store.Inbound"}, infrastructure_items)
+        self.assertIn({"model": "store.BotConfiguration"}, infrastructure_items)
 
     def test_alert_settings_validate_positive_intervals(self):
         self.store.panel_health_alert_check_interval_minutes = 0
@@ -5863,11 +5940,18 @@ class PanelHealthServiceTests(TestCase):
         User.objects.create_superuser("owner", "owner@example.com", "password")
         self.client.login(username="owner", password="password")
 
+        confirm = self.client.get(reverse("admin:store_panel_health_alert_test", args=[self.panel.pk]))
+        self.assertEqual(confirm.status_code, 200)
+        self.assertContains(confirm, "تأیید ارسال پیام تستی هشدار سلامت")
+
         with patch(
             "store.panel_health_services.send_admin_message_to_telegram_admins",
             return_value={"attempted": 1, "sent": 1, "failed": 0},
         ) as send_mock:
-            response = self.client.get(reverse("admin:store_panel_health_alert_test", args=[self.panel.pk]))
+            response = self.client.post(
+                reverse("admin:store_panel_health_alert_test", args=[self.panel.pk]),
+                {"confirm": "yes"},
+            )
 
         self.assertEqual(response.status_code, 302)
         send_mock.assert_called_once()
@@ -9419,6 +9503,43 @@ class AdminCatalogTests(TestCase):
         data.update(kwargs)
         return PlanInboundRoute.objects.create(**data)
 
+    def plan_form_payload(self, **overrides):
+        sources = overrides.pop("sources", None)
+        data = {
+            "name": self.plan.name,
+            "volume_gb": str(self.plan.volume_gb),
+            "duration_days": str(self.plan.duration_days),
+            "price": str(self.plan.price),
+            "currency": self.plan.currency,
+            "is_active": "on" if self.plan.is_active else "",
+            "is_public": "on" if self.plan.is_public else "",
+            "is_custom_volume": "on" if self.plan.is_custom_volume else "",
+            "device_limit": str(self.plan.device_limit),
+            "sort_order": str(self.plan.sort_order),
+            "delivery_mode": "GLOBAL_FALLBACK",
+            "failure_policy": PlanDeliveryConfig.FailurePolicy.STRICT,
+            "source-TOTAL_FORMS": "0",
+        }
+        if sources is not None:
+            data["source-TOTAL_FORMS"] = str(len(sources))
+            for index, source in enumerate(sources):
+                prefix = f"source-{index}"
+                source_type = source.get("source_type", PlanDeliverySource.SourceType.PANEL_INBOUND)
+                data[f"{prefix}-id"] = str(source.get("id", ""))
+                data[f"{prefix}-source_type"] = source_type
+                data[f"{prefix}-inbound"] = str(source.get("inbound", ""))
+                data[f"{prefix}-inventory_pool"] = str(source.get("inventory_pool", ""))
+                data[f"{prefix}-label"] = source.get("label", "")
+                data[f"{prefix}-quantity"] = str(source.get("quantity", 1))
+                data[f"{prefix}-priority"] = str(source.get("priority", (index + 1) * 10))
+                data[f"{prefix}-DELETE"] = ""
+                if source.get("required", True):
+                    data[f"{prefix}-required"] = "on"
+                if source.get("is_fallback", False):
+                    data[f"{prefix}-is_fallback"] = "on"
+        data.update(overrides)
+        return data
+
     def test_catalog_center_loads_for_superuser(self):
         self.login_admin()
 
@@ -9437,10 +9558,10 @@ class AdminCatalogTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "جستجو")
-        self.assertContains(response, "آمادگی route")
+        self.assertContains(response, "وضعیت تحویل")
         self.assertContains(response, "مشاهده")
         self.assertContains(response, "ویرایش")
-        self.assertContains(response, "مسیر")
+        self.assertContains(response, "تنظیم تحویل")
         self.assertContains(response, "کپی")
         self.assertNotContains(response, "وضعیت فروشگاه")
         self.assertNotContains(response, "Quick Actions")
@@ -9535,6 +9656,367 @@ class AdminCatalogTests(TestCase):
         inactive_status = get_plan_route_status(self.plan, self.store)
         self.assertEqual(inactive_status["code"], "inbound_inactive")
 
+    def test_plan_delivery_resolver_derives_effective_modes(self):
+        from .plan_delivery_services import (
+            MODE_CONFLICT,
+            MODE_DIRECT_LINKS,
+            MODE_GLOBAL_FALLBACK,
+            MODE_SUBSCRIPTION,
+            SOURCE_V2_CONFIG,
+            resolve_plan_delivery_configuration,
+        )
+
+        self.assertEqual(resolve_plan_delivery_configuration(self.plan, self.store).effective_mode, MODE_GLOBAL_FALLBACK)
+
+        self.create_route()
+        self.assertEqual(resolve_plan_delivery_configuration(self.plan, self.store).effective_mode, MODE_DIRECT_LINKS)
+
+        second = self.create_inbound(2, remark="second route")
+        self.create_route(inbound=second, priority=101)
+        legacy_direct = resolve_plan_delivery_configuration(self.plan, self.store)
+        self.assertEqual(legacy_direct.effective_mode, MODE_DIRECT_LINKS)
+        self.assertEqual(legacy_direct.source_count, 2)
+
+        PlanInboundRoute.objects.filter(plan=self.plan).update(is_active=False)
+        recipe = CupFulfillmentRecipe.objects.create(plan=self.plan, title="Resolver recipe")
+        self.assertEqual(resolve_plan_delivery_configuration(self.plan, self.store).effective_mode, MODE_SUBSCRIPTION)
+
+        PlanInboundRoute.objects.filter(plan=self.plan).update(is_active=True)
+        conflict = resolve_plan_delivery_configuration(self.plan, self.store)
+        self.assertEqual(conflict.effective_mode, MODE_CONFLICT)
+        self.assertEqual(conflict.active_recipe_id, recipe.pk)
+        self.assertTrue(conflict.conflicts)
+
+        canonical = PlanDeliveryConfig.objects.create(plan=self.plan, delivery_mode=PlanDeliveryConfig.DeliveryMode.DIRECT_LINKS)
+        PlanDeliverySource.objects.create(
+            delivery_config=canonical,
+            source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+            panel=self.panel,
+            inbound=self.ready_inbound,
+            priority=1,
+        )
+        resolved = resolve_plan_delivery_configuration(self.plan, self.store)
+        self.assertEqual(resolved.effective_mode, MODE_DIRECT_LINKS)
+        self.assertEqual(resolved.source_of_truth, SOURCE_V2_CONFIG)
+        self.assertTrue(resolved.legacy_ignored)
+
+    def test_plan_delivery_source_validation_rejects_incompatible_fields(self):
+        pool = ConfigInventoryPool.objects.create(title="Validation Pool", is_active=True)
+        config = PlanDeliveryConfig.objects.create(plan=self.plan, delivery_mode=PlanDeliveryConfig.DeliveryMode.DIRECT_LINKS)
+        source = PlanDeliverySource(
+            delivery_config=config,
+            source_type=PlanDeliverySource.SourceType.INVENTORY_POOL,
+            inventory_pool=pool,
+            inbound=self.ready_inbound,
+        )
+
+        with self.assertRaises(ValidationError):
+            source.full_clean()
+
+    def test_catalog_plan_editor_renders_global_fallback_and_price_save_does_not_create_sources(self):
+        self.login_admin()
+        edit_url = reverse("admin_store_catalog_plan_edit", args=[self.plan.pk])
+
+        response = self.client.get(edit_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "پیش‌فرض فروشگاه")
+        self.assertContains(response, "منابع سرویس")
+
+        payload = self.plan_form_payload(price="275000")
+        post = self.client.post(edit_url, payload)
+
+        self.assertRedirects(post, reverse("admin_store_catalog_plan_review", args=[self.plan.pk]))
+        self.plan.refresh_from_db()
+        self.assertEqual(self.plan.price, 275000)
+        config = PlanDeliveryConfig.objects.get(plan=self.plan)
+        self.assertEqual(config.delivery_mode, PlanDeliveryConfig.DeliveryMode.GLOBAL_FALLBACK)
+        self.assertFalse(config.sources.filter(active=True).exists())
+        self.assertFalse(PlanInboundRoute.objects.filter(plan=self.plan).exists())
+        self.assertFalse(CupFulfillmentRecipe.objects.filter(plan=self.plan).exists())
+
+    def test_catalog_plan_editor_direct_links_creates_exactly_one_active_source(self):
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_catalog_plan_edit", args=[self.plan.pk]),
+            self.plan_form_payload(
+                delivery_mode="DIRECT_LINKS",
+                sources=[
+                    {
+                        "source_type": PlanDeliverySource.SourceType.PANEL_INBOUND,
+                        "inbound": self.ready_inbound.pk,
+                        "priority": 7,
+                    }
+                ],
+            ),
+        )
+
+        self.assertRedirects(response, reverse("admin_store_catalog_plan_review", args=[self.plan.pk]))
+        config = PlanDeliveryConfig.objects.get(plan=self.plan)
+        self.assertEqual(config.delivery_mode, PlanDeliveryConfig.DeliveryMode.DIRECT_LINKS)
+        sources = list(config.sources.filter(active=True))
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0].inbound, self.ready_inbound)
+        self.assertEqual(sources[0].priority, 7)
+        self.assertFalse(PlanInboundRoute.objects.filter(plan=self.plan, is_active=True).exists())
+        self.assertFalse(CupFulfillmentRecipe.objects.filter(plan=self.plan, is_active=True).exists())
+
+    def test_catalog_plan_editor_direct_links_persists_and_reloads_all_sources(self):
+        second = self.create_inbound(2, remark="second multi inbound")
+        third = self.create_inbound(3, remark="third multi inbound")
+        self.login_admin()
+        edit_url = reverse("admin_store_catalog_plan_edit", args=[self.plan.pk])
+
+        post = self.client.post(
+            edit_url,
+            self.plan_form_payload(
+                delivery_mode="DIRECT_LINKS",
+                sources=[
+                    {
+                        "source_type": PlanDeliverySource.SourceType.PANEL_INBOUND,
+                        "inbound": second.pk,
+                        "priority": 20,
+                    },
+                    {
+                        "source_type": PlanDeliverySource.SourceType.PANEL_INBOUND,
+                        "inbound": third.pk,
+                        "priority": 21,
+                    },
+                ],
+            ),
+        )
+
+        self.assertRedirects(post, reverse("admin_store_catalog_plan_review", args=[self.plan.pk]))
+        config = PlanDeliveryConfig.objects.get(plan=self.plan)
+        active_sources = config.sources.filter(active=True).order_by("priority")
+        self.assertEqual(list(active_sources.values_list("inbound_id", flat=True)), [second.pk, third.pk])
+        self.assertEqual(list(active_sources.values_list("priority", flat=True)), [20, 21])
+
+        reload_response = self.client.get(edit_url)
+        self.assertContains(reload_response, "second multi inbound")
+        self.assertContains(reload_response, "third multi inbound")
+
+        self.client.post(
+            edit_url,
+            self.plan_form_payload(
+                price="290000",
+                delivery_mode="DIRECT_LINKS",
+                sources=[
+                    {
+                        "id": active_sources[0].pk,
+                        "source_type": PlanDeliverySource.SourceType.PANEL_INBOUND,
+                        "inbound": second.pk,
+                        "priority": 20,
+                    },
+                    {
+                        "id": active_sources[1].pk,
+                        "source_type": PlanDeliverySource.SourceType.PANEL_INBOUND,
+                        "inbound": third.pk,
+                        "priority": 21,
+                    },
+                ],
+            ),
+        )
+        self.assertEqual(config.sources.filter(active=True).count(), 2)
+
+    def test_catalog_plan_editor_persists_three_panel_and_two_inventory_sources(self):
+        second = self.create_inbound(2, remark="second builder inbound")
+        third = self.create_inbound(3, remark="third builder inbound")
+        first_pool = ConfigInventoryPool.objects.create(title="Builder Pool A", is_active=True)
+        second_pool = ConfigInventoryPool.objects.create(title="Builder Pool B", is_active=True)
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_catalog_plan_edit", args=[self.plan.pk]),
+            self.plan_form_payload(
+                delivery_mode="SUBSCRIPTION",
+                sources=[
+                    {"source_type": PlanDeliverySource.SourceType.PANEL_INBOUND, "inbound": self.ready_inbound.pk, "priority": 1},
+                    {"source_type": PlanDeliverySource.SourceType.PANEL_INBOUND, "inbound": second.pk, "priority": 2},
+                    {"source_type": PlanDeliverySource.SourceType.PANEL_INBOUND, "inbound": third.pk, "priority": 3},
+                    {"source_type": PlanDeliverySource.SourceType.INVENTORY_POOL, "inventory_pool": first_pool.pk, "priority": 4},
+                    {"source_type": PlanDeliverySource.SourceType.INVENTORY_POOL, "inventory_pool": second_pool.pk, "priority": 5},
+                ],
+            ),
+        )
+
+        self.assertRedirects(response, reverse("admin_store_catalog_plan_review", args=[self.plan.pk]))
+        config = PlanDeliveryConfig.objects.get(plan=self.plan)
+        self.assertEqual(config.delivery_mode, PlanDeliveryConfig.DeliveryMode.SUBSCRIPTION)
+        self.assertEqual(config.sources.filter(active=True).count(), 5)
+        self.assertEqual(config.sources.filter(active=True, source_type=PlanDeliverySource.SourceType.PANEL_INBOUND).count(), 3)
+        self.assertEqual(config.sources.filter(active=True, source_type=PlanDeliverySource.SourceType.INVENTORY_POOL).count(), 2)
+
+    def test_catalog_plan_editor_switches_direct_to_subscription_without_touching_legacy_routes(self):
+        route = self.create_route()
+        pool = ConfigInventoryPool.objects.create(title="Switch Pool", is_active=True)
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_catalog_plan_edit", args=[self.plan.pk]),
+            self.plan_form_payload(
+                delivery_mode="SUBSCRIPTION",
+                sources=[
+                    {
+                        "source_type": PlanDeliverySource.SourceType.INVENTORY_POOL,
+                        "inventory_pool": pool.pk,
+                        "quantity": 2,
+                        "priority": 2,
+                    }
+                ],
+            ),
+        )
+
+        self.assertRedirects(response, reverse("admin_store_catalog_plan_review", args=[self.plan.pk]))
+        route.refresh_from_db()
+        self.assertTrue(route.is_active)
+        self.assertTrue(PlanInboundRoute.objects.filter(pk=route.pk).exists())
+        self.assertFalse(CupFulfillmentRecipe.objects.filter(plan=self.plan, is_active=True).exists())
+        config = PlanDeliveryConfig.objects.get(plan=self.plan)
+        self.assertEqual(config.delivery_mode, PlanDeliveryConfig.DeliveryMode.SUBSCRIPTION)
+        source = config.sources.get(active=True)
+        self.assertEqual(source.inventory_pool, pool)
+        self.assertEqual(source.quantity, 2)
+
+    def test_catalog_plan_editor_switches_subscription_legacy_to_direct_without_touching_rules(self):
+        pool = ConfigInventoryPool.objects.create(title="Cup To Direct Pool", is_active=True)
+        recipe = CupFulfillmentRecipe.objects.create(plan=self.plan, title="Cup to direct")
+        rule = CupFillerRule.objects.create(
+            recipe=recipe,
+            position=1,
+            source_type=CupFillerRule.SourceType.INVENTORY_POOL,
+            quantity=1,
+            inventory_pool=pool,
+            required=True,
+        )
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_catalog_plan_edit", args=[self.plan.pk]),
+            self.plan_form_payload(
+                delivery_mode="DIRECT_LINKS",
+                sources=[
+                    {
+                        "source_type": PlanDeliverySource.SourceType.PANEL_INBOUND,
+                        "inbound": self.ready_inbound.pk,
+                    }
+                ],
+            ),
+        )
+
+        self.assertRedirects(response, reverse("admin_store_catalog_plan_review", args=[self.plan.pk]))
+        recipe.refresh_from_db()
+        self.assertTrue(recipe.is_active)
+        self.assertTrue(CupFillerRule.objects.filter(pk=rule.pk).exists())
+        self.assertFalse(PlanInboundRoute.objects.filter(plan=self.plan, inbound=self.ready_inbound, is_active=True).exists())
+        config = PlanDeliveryConfig.objects.get(plan=self.plan)
+        self.assertEqual(config.delivery_mode, PlanDeliveryConfig.DeliveryMode.DIRECT_LINKS)
+        self.assertEqual(config.sources.get(active=True).inbound, self.ready_inbound)
+
+    def test_catalog_plan_editor_switches_to_fallback_without_touching_legacy(self):
+        route = self.create_route()
+        recipe = CupFulfillmentRecipe.objects.create(plan=self.plan, title="Fallback switch")
+        rule = CupFillerRule.objects.create(
+            recipe=recipe,
+            position=1,
+            source_type=CupFillerRule.SourceType.PANEL_INBOUNDS,
+            quantity=1,
+            panel=self.panel,
+            required=True,
+        )
+        rule.inbounds.add(self.ready_inbound)
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_catalog_plan_edit", args=[self.plan.pk]),
+            self.plan_form_payload(delivery_mode="GLOBAL_FALLBACK"),
+        )
+
+        self.assertRedirects(response, reverse("admin_store_catalog_plan_review", args=[self.plan.pk]))
+        route.refresh_from_db()
+        recipe.refresh_from_db()
+        self.assertTrue(route.is_active)
+        self.assertTrue(recipe.is_active)
+        self.assertTrue(CupFillerRule.objects.filter(pk=rule.pk).exists())
+        config = PlanDeliveryConfig.objects.get(plan=self.plan)
+        self.assertEqual(config.delivery_mode, PlanDeliveryConfig.DeliveryMode.GLOBAL_FALLBACK)
+        self.assertFalse(config.sources.filter(active=True).exists())
+
+    def test_catalog_plan_editor_saves_hybrid_subscription_sources_and_failure_policy(self):
+        pool = ConfigInventoryPool.objects.create(title="Hybrid Pool", is_active=True)
+        fallback_pool = ConfigInventoryPool.objects.create(title="Fallback Pool", is_active=True)
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_catalog_plan_edit", args=[self.plan.pk]),
+            self.plan_form_payload(
+                delivery_mode="SUBSCRIPTION",
+                failure_policy=PlanDeliveryConfig.FailurePolicy.PARTIAL_ALLOWED,
+                sources=[
+                    {
+                        "source_type": PlanDeliverySource.SourceType.PANEL_INBOUND,
+                        "inbound": self.ready_inbound.pk,
+                        "priority": 1,
+                    },
+                    {
+                        "source_type": PlanDeliverySource.SourceType.INVENTORY_POOL,
+                        "inventory_pool": pool.pk,
+                        "quantity": 2,
+                        "priority": 2,
+                    },
+                    {
+                        "source_type": PlanDeliverySource.SourceType.INVENTORY_POOL,
+                        "inventory_pool": fallback_pool.pk,
+                        "quantity": 1,
+                        "required": False,
+                        "is_fallback": True,
+                        "priority": 90,
+                    },
+                ],
+            ),
+        )
+
+        self.assertRedirects(response, reverse("admin_store_catalog_plan_review", args=[self.plan.pk]))
+        config = PlanDeliveryConfig.objects.get(plan=self.plan)
+        self.assertEqual(config.failure_policy, PlanDeliveryConfig.FailurePolicy.PARTIAL_ALLOWED)
+        active_sources = config.sources.filter(active=True).order_by("priority")
+        self.assertEqual(active_sources.count(), 3)
+        self.assertEqual(active_sources.filter(source_type=PlanDeliverySource.SourceType.PANEL_INBOUND, required=True).count(), 1)
+        self.assertEqual(active_sources.filter(source_type=PlanDeliverySource.SourceType.INVENTORY_POOL, required=True).count(), 1)
+        self.assertEqual(active_sources.filter(source_type=PlanDeliverySource.SourceType.INVENTORY_POOL, required=False, is_fallback=True).count(), 1)
+
+    def test_catalog_plan_editor_failed_delivery_save_rolls_back_plan_fields(self):
+        self.login_admin()
+        original_price = self.plan.price
+
+        with patch("store.admin_catalog.save_delivery_config_sources", side_effect=ValidationError("boom")):
+            with self.assertRaises(ValidationError):
+                self.client.post(
+                    reverse("admin_store_catalog_plan_edit", args=[self.plan.pk]),
+                    self.plan_form_payload(
+                        price="333000",
+                        delivery_mode="DIRECT_LINKS",
+                        sources=[
+                            {
+                                "source_type": PlanDeliverySource.SourceType.PANEL_INBOUND,
+                                "inbound": self.ready_inbound.pk,
+                            }
+                        ],
+                    ),
+                )
+
+        self.plan.refresh_from_db()
+        self.assertEqual(self.plan.price, original_price)
+
+    def test_plan_fulfillment_plan_url_redirects_to_canonical_plan_editor(self):
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_plan_fulfillment_plan", args=[self.plan.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], f"{reverse('admin_store_catalog_plan_edit', args=[self.plan.pk])}#delivery")
+
     def test_plan_create_form_only_offers_sales_ready_inbounds(self):
         legacy = self.create_inbound(2, remark="legacy dropdown")
         legacy.available_for_new_orders = False
@@ -9546,7 +10028,7 @@ class AdminCatalogTests(TestCase):
         self.login_admin()
 
         response = self.client.get(reverse("admin_store_catalog_plan_new"), {"store": self.store.pk})
-        choices = list(response.context["form"].fields["inbound"].queryset)
+        choices = list(response.context["form"].source_inbound_queryset)
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(self.ready_inbound, choices)
@@ -10648,9 +11130,42 @@ class AdminPanelCenterTests(TestCase):
         self.assertContains(response, "مرکز اتصال پنل‌ها")
         self.assertContains(response, self.panel.name)
         self.assertContains(response, "modern_multi_node")
+        self.assertContains(response, "هشدار سلامت پنل‌ها")
+        self.assertContains(response, "تنظیمات هشدار سلامت")
+        self.assertContains(response, reverse("admin:store_panelhealthalertsettings_change", args=[self.store.pk]))
         self.assertNotContains(response, "panel-secret")
         self.assertNotContains(response, "proxy-secret")
         self.assertNotContains(response, "admin:panelpass")
+
+    def test_panel_center_global_alert_dry_run_sends_nothing(self):
+        self.login_admin()
+        result = {
+            "panel_id": self.panel.pk,
+            "panel_name": self.panel.name,
+            "status": PanelHealthStatus.Status.OK,
+            "checked_at": timezone.now(),
+            "response_time_ms": 10,
+            "login_ok": True,
+            "inbounds_checked": 0,
+            "inbounds_ok": 0,
+            "inbounds_warning": 0,
+            "inbounds_error": 0,
+            "error_code": "",
+            "error_message": "",
+            "summary": "پنل سالم است.",
+            "metadata": {},
+        }
+
+        with (
+            patch("store.panel_health_services.build_panel_health_result", return_value=result),
+            patch("store.panel_health_services.send_admin_message_to_telegram_admins") as send_mock,
+        ):
+            response = self.client.post(reverse("admin_store_panel_center_alerts_dry_run"), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Dry-run هشدار سلامت پنل‌ها انجام شد")
+        send_mock.assert_not_called()
+        self.assertEqual(PanelHealthCheckLog.objects.count(), 0)
 
     def test_panel_center_requires_staff_login(self):
         response = self.client.get(reverse("admin_store_panel_center"))
@@ -10780,6 +11295,60 @@ class AdminPanelCenterTests(TestCase):
         self.assertContains(response, "marzban")
         self.assertContains(response, "unsupported_safe")
         self.assertContains(response, "پشتیبانی نمی‌شود")
+
+    def test_panel_center_detail_shows_panel_alert_card(self):
+        PanelHealthStatus.objects.create(
+            panel=self.panel,
+            status=PanelHealthStatus.Status.ERROR,
+            last_checked_at=timezone.now(),
+            last_error_at=timezone.now(),
+            error_code="auth_failed",
+            error_message="ورود به پنل ناموفق بود.",
+            consecutive_failures=2,
+        )
+        self.login_admin()
+
+        response = self.client.get(reverse("admin_store_panel_center_detail", args=[self.panel.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "هشدار سلامت این پنل")
+        self.assertContains(response, "ورود به پنل ناموفق بود.")
+        self.assertContains(response, "اجرای Dry-run هشدار")
+        self.assertContains(response, "ارسال پیام تستی فقط به ادمین")
+        self.assertNotContains(response, "panel-secret")
+
+    def test_panel_center_panel_alert_dry_run_sends_nothing(self):
+        self.login_admin()
+        result = {
+            "panel_id": self.panel.pk,
+            "panel_name": self.panel.name,
+            "status": PanelHealthStatus.Status.OK,
+            "checked_at": timezone.now(),
+            "response_time_ms": 10,
+            "login_ok": True,
+            "inbounds_checked": 0,
+            "inbounds_ok": 0,
+            "inbounds_warning": 0,
+            "inbounds_error": 0,
+            "error_code": "",
+            "error_message": "",
+            "summary": "پنل سالم است.",
+            "metadata": {},
+        }
+
+        with (
+            patch("store.panel_health_services.build_panel_health_result", return_value=result),
+            patch("store.panel_health_services.send_admin_message_to_telegram_admins") as send_mock,
+        ):
+            response = self.client.post(
+                reverse("admin_store_panel_center_panel_alerts_dry_run", args=[self.panel.pk]),
+                follow=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Dry-run هشدار این پنل انجام شد")
+        send_mock.assert_not_called()
+        self.assertEqual(PanelHealthCheckLog.objects.count(), 0)
 
     def test_unknown_family_does_not_crash(self):
         self.panel.family = Panel.Family.UNKNOWN

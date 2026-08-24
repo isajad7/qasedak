@@ -12,8 +12,41 @@
         </div>
         <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row lg:tw-shrink-0">
             <a href="{{ add_url }}" class="tw-button tw-button-primary">افزودن پنل</a>
+            <a href="{{ alert_summary.settings_url }}" class="tw-button tw-button-secondary">هشدارهای سلامت پنل‌ها</a>
             <a href="{% url 'admin_store_panel_center_routing' %}" class="tw-button tw-button-secondary">تنظیم مسیر فروش</a>
             <a href="{{ panel_admin_url }}" class="tw-button tw-button-secondary">مدل Panel در Django Admin</a>
+        </div>
+    </div>
+</section>
+
+<section class="tw-section">
+    <div class="tw-admin-card">
+        <div class="tw-flex tw-flex-col tw-gap-4 xl:tw-flex-row xl:tw-items-start xl:tw-justify-between">
+            <div class="tw-min-w-0">
+                <div class="tw-section-heading tw-mb-3">
+                    <h2>هشدار سلامت پنل‌ها</h2>
+                    {% include "admin/store/panel_center/_badge.html" with tone=alert_summary.status_badge.tone label=alert_summary.status_badge.label icon="fas fa-exclamation-triangle" %}
+                </div>
+                <p class="tw-m-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
+                    تنظیم ارسال هشدار خرابی پنل به ادمین‌های ربات، فاصله بررسی، تکرار هشدار و ساعات سکوت.
+                </p>
+            </div>
+            <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row xl:tw-shrink-0">
+                <a href="{{ alert_summary.settings_url }}" class="tw-button tw-button-primary">تنظیمات هشدار سلامت</a>
+                <form method="post" action="{{ alert_summary.dry_run_url }}" class="tw-m-0">
+                    {% csrf_token %}
+                    <button type="submit" class="tw-button tw-button-secondary">اجرای Dry-run</button>
+                </form>
+                <a href="{{ alert_summary.panel_status_url }}" class="tw-button tw-button-secondary">مشاهده وضعیت پنل‌ها</a>
+            </div>
+        </div>
+        <div class="tw-mt-4 tw-grid tw-gap-3 md:tw-grid-cols-2 xl:tw-grid-cols-3">
+            <div class="tw-model-row"><span>وضعیت کلی هشدار</span><strong>{{ alert_summary.status_badge.label }}</strong></div>
+            <div class="tw-model-row"><span>فاصله بررسی</span><strong>{{ alert_summary.check_interval }} دقیقه</strong></div>
+            <div class="tw-model-row"><span>آستانه خطا</span><strong>{{ alert_summary.failure_threshold }}</strong></div>
+            <div class="tw-model-row"><span>فاصله تکرار هشدار</span><strong>{{ alert_summary.repeat_interval }} دقیقه</strong></div>
+            <div class="tw-model-row"><span>گیرندگان هشدار</span><strong>{{ alert_summary.recipients_label }}</strong></div>
+            <div class="tw-model-row"><span>پنل‌های دارای هشدار فعال</span><strong>{{ alert_summary.alert_enabled_panel_count }}</strong></div>
         </div>
     </div>
 </section>

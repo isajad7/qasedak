@@ -6,10 +6,16 @@ from urllib.parse import urlsplit
 from django.urls import reverse
 from django.utils import timezone
 
-from store.models import Inbound, Panel, PanelHealthStatus
+from store.models import Inbound, Panel, PanelHealthStatus, Store
 from store.panels import get_safe_panel_adapter
 from store.panels.capabilities import sanitize_capability_metadata
 from store.panels.errors import PanelIntegrationError, safe_error_dict
+from store.panel_health_services import (
+    PanelHealthAlertService,
+    get_panel_health_alert_recipient_summary,
+    panel_alert_failure_threshold_count,
+    panel_alert_repeat_interval_minutes,
+)
 from store.xui_api import XUIService, classify_xui_exception, sanitize_xui_operational_text
 from store.xui_compat import discover_xui_capabilities
 from store.management.commands.sync_xui_topology import Command as SyncXUITopologyCommand
@@ -51,6 +57,9 @@ def panel_action_urls(panel):
         "detail": panel_center_url("admin_store_panel_center_detail", panel.pk),
         "edit": panel_center_url("admin_store_panel_center_edit", panel.pk),
         "test": panel_center_url("admin_store_panel_center_test", panel.pk),
+        "alert_dry_run": panel_center_url("admin_store_panel_center_panel_alerts_dry_run", panel.pk),
+        "alert_enable": panel_center_url("admin_store_panel_center_panel_alert_enable", panel.pk),
+        "alert_disable": panel_center_url("admin_store_panel_center_panel_alert_disable", panel.pk),
         "sync": panel_center_url("admin_store_panel_center_sync", panel.pk),
         "inbounds": panel_center_url("admin_store_panel_center_inbounds", panel.pk),
         "capabilities": panel_center_url("admin_store_panel_center_capabilities", panel.pk),
@@ -139,6 +148,73 @@ def panel_list_items():
 
 def get_panel_queryset():
     return Panel.objects.select_related("store", "health_status").order_by("store__name", "name", "pk")
+
+
+def _alert_settings_url(store=None):
+    if store and getattr(store, "pk", None):
+        return reverse("admin:store_panelhealthalertsettings_change", args=[store.pk])
+    first_store = Store.objects.order_by("pk").first()
+    if first_store:
+        return reverse("admin:store_panelhealthalertsettings_change", args=[first_store.pk])
+    return reverse("admin:store_panelhealthalertsettings_changelist")
+
+
+def _alert_status_label(enabled):
+    return {"label": "فعال", "tone": "emerald"} if enabled else {"label": "غیرفعال", "tone": "slate"}
+
+
+def panel_health_alert_summary(store=None):
+    store = store or Store.objects.filter(is_active=True).order_by("pk").first() or Store.objects.order_by("pk").first()
+    settings = PanelHealthAlertService(store=store).get_settings()
+    recipients = get_panel_health_alert_recipient_summary(store)
+    panels = Panel.objects.all()
+    if store:
+        panels = panels.filter(store=store)
+    alert_enabled_panel_count = panels.filter(is_active=True, health_alert_enabled=True).count()
+    enabled = bool(store and store.panel_health_alerts_enabled and store.panel_monitor_alerts_enabled)
+    return {
+        "store": store,
+        "enabled": enabled,
+        "status_badge": _alert_status_label(enabled),
+        "check_interval": settings.alert_check_interval_minutes,
+        "failure_threshold": settings.failure_threshold_count,
+        "repeat_interval": settings.alert_repeat_interval_minutes,
+        "recipients": recipients,
+        "recipients_label": ", ".join(recipients["masked"]) if recipients["masked"] else "گیرنده ادمین تنظیم نشده",
+        "alert_enabled_panel_count": alert_enabled_panel_count,
+        "settings_url": _alert_settings_url(store),
+        "dry_run_url": reverse("admin_store_panel_center_alerts_dry_run"),
+        "panel_status_url": reverse("admin:store_panel_changelist"),
+    }
+
+
+def panel_health_alert_detail(panel):
+    settings = PanelHealthAlertService().get_settings(panel)
+    try:
+        health = panel.health_status
+    except PanelHealthStatus.DoesNotExist:
+        health = None
+    repeat_interval = panel_alert_repeat_interval_minutes(panel, settings)
+    threshold = panel_alert_failure_threshold_count(panel, settings)
+    override_enabled = bool(panel.alert_repeat_interval_minutes or panel.failure_threshold_count)
+    return {
+        "enabled": bool(panel.health_alert_enabled),
+        "status_badge": _alert_status_label(bool(panel.health_alert_enabled)),
+        "health": health,
+        "health_label": health.get_status_display() if health else "بدون بررسی",
+        "last_error": (health.error_message or health.summary) if health else "-",
+        "consecutive_failures": health.consecutive_failures if health else 0,
+        "last_alert_sent_at": timezone.localtime(health.last_alert_sent_at).strftime("%Y-%m-%d %H:%M") if health and health.last_alert_sent_at else "-",
+        "last_recovery_at": timezone.localtime(health.last_recovery_at).strftime("%Y-%m-%d %H:%M") if health and health.last_recovery_at else "-",
+        "override_enabled": override_enabled,
+        "override_label": "فعال" if override_enabled else "استفاده از تنظیمات کلی",
+        "repeat_interval": repeat_interval,
+        "failure_threshold": threshold,
+        "settings_url": _alert_settings_url(getattr(panel, "store", None)),
+        "dry_run_url": panel_center_url("admin_store_panel_center_panel_alerts_dry_run", panel.pk),
+        "admin_change_url": reverse("admin:store_panel_change", args=[panel.pk]),
+        "test_message_url": reverse("admin:store_panel_health_alert_test", args=[panel.pk]),
+    }
 
 
 def build_test_connection_result(panel):

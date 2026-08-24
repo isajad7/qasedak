@@ -49,8 +49,12 @@ from store.admin_panel_center.views import (
     panel_center_capabilities,
     panel_center_detail,
     panel_center_form,
+    panel_center_alerts_dry_run,
     panel_center_inbounds,
     panel_center_index,
+    panel_center_panel_alert_disable,
+    panel_center_panel_alert_enable,
+    panel_center_panel_alerts_dry_run,
     panel_center_sync,
     panel_center_test,
 )
@@ -307,6 +311,11 @@ urlpatterns = [
         name='admin_store_panel_center_new',
     ),
     path(
+        'admin/store/panel-center/alerts/dry-run/',
+        admin.site.admin_view(panel_center_alerts_dry_run),
+        name='admin_store_panel_center_alerts_dry_run',
+    ),
+    path(
         'admin/store/panel-center/<int:panel_id>/',
         admin.site.admin_view(panel_center_detail),
         name='admin_store_panel_center_detail',
@@ -330,6 +339,21 @@ urlpatterns = [
         'admin/store/panel-center/<int:panel_id>/test/',
         admin.site.admin_view(panel_center_test),
         name='admin_store_panel_center_test',
+    ),
+    path(
+        'admin/store/panel-center/<int:panel_id>/alerts/dry-run/',
+        admin.site.admin_view(panel_center_panel_alerts_dry_run),
+        name='admin_store_panel_center_panel_alerts_dry_run',
+    ),
+    path(
+        'admin/store/panel-center/<int:panel_id>/alerts/enable/',
+        admin.site.admin_view(panel_center_panel_alert_enable),
+        name='admin_store_panel_center_panel_alert_enable',
+    ),
+    path(
+        'admin/store/panel-center/<int:panel_id>/alerts/disable/',
+        admin.site.admin_view(panel_center_panel_alert_disable),
+        name='admin_store_panel_center_panel_alert_disable',
     ),
     path(
         'admin/store/panel-center/<int:panel_id>/sync/',
