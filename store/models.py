@@ -2535,12 +2535,14 @@ class Panel(TimeStampedModel):
     class Family(models.TextChoices):
         XUI = "xui", _("X-UI / Sanaei")
         MARZBAN = "marzban", _("Marzban")
+        PASARGUARD = "pasarguard", _("PasarGuard / پاسارگارد")
         UNKNOWN = "unknown", _("Unknown")
 
     class CapabilityProfile(models.TextChoices):
         LEGACY_SINGLE_NODE = "legacy_single_node", _("Legacy single-node")
         MODERN_SINGLE_NODE = "modern_single_node", _("Modern single-node")
         MODERN_MULTI_NODE = "modern_multi_node", _("Modern multi-node")
+        PASARGUARD_GROUPS = "pasarguard_groups", _("PasarGuard groups")
         UNKNOWN_SAFE = "unknown_safe", _("Unknown safe")
 
     store = models.ForeignKey(
@@ -2561,8 +2563,8 @@ class Panel(TimeStampedModel):
         help_text=_("Panel API family. Existing Sanaei/3X-UI panels use X-UI."),
     )
     url = models.URLField(_("URL"), help_text=_("Full panel URL without trailing slash."))
-    username = models.CharField(_("username"), max_length=100)
-    password = models.CharField(_("password"), max_length=100)
+    username = models.CharField(_("username"), max_length=100, blank=True)
+    password = models.CharField(_("password"), max_length=500)
     proxy_url = models.URLField(
         _("HTTP proxy URL"),
         max_length=500,
@@ -2619,6 +2621,7 @@ class Inbound(TimeStampedModel):
     class XUISource(models.TextChoices):
         LOCAL = "local", _("Local")
         SYNCHRONIZED_NODE = "synchronized_node", _("Synchronized node")
+        PASARGUARD_GROUP = "pasarguard_group", _("PasarGuard group")
 
     class Protocol(models.TextChoices):
         VLESS = "vless", _("VLESS")
@@ -2701,6 +2704,7 @@ class Inbound(TimeStampedModel):
     )
     xui_remote_key = models.CharField(_("X-UI remote key"), max_length=300, blank=True, db_index=True)
     is_synced_from_node = models.BooleanField(_("is synced from node"), default=False, db_index=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
 
     class Meta:
         verbose_name = _("inbound")
@@ -3360,7 +3364,7 @@ class Order(TimeStampedModel):
     username = models.CharField(_("username"), max_length=100, default="admin")
     uuid = models.CharField(_("UUID"), max_length=100, null=True, blank=True)
     sub_link = models.URLField(_("subscription link"), max_length=500, blank=True, null=True)
-    direct_link = models.CharField(_("direct link"), max_length=500, null=True, blank=True)
+    direct_link = models.TextField(_("direct link"), null=True, blank=True)
 
     metadata = models.JSONField(_("metadata"), default=dict, blank=True)
 
@@ -3606,7 +3610,7 @@ class VPNClient(TimeStampedModel):
     uuid = models.CharField(_("UUID"), max_length=100, unique=True, null=True, blank=True)
     sub_id = models.CharField(_("subscription ID"), max_length=100, blank=True)
     sub_link = models.URLField(_("subscription link"), max_length=500, blank=True, null=True)
-    direct_link = models.CharField(_("direct link"), max_length=500, blank=True, null=True)
+    direct_link = models.TextField(_("direct link"), blank=True, null=True)
 
     status = models.CharField(
         _("status"),
@@ -3731,12 +3735,15 @@ class ConfigLink(TimeStampedModel):
         VMESS = "vmess", _("VMess")
         TROJAN = "trojan", _("Trojan")
         SS = "ss", _("Shadowsocks")
+        HYSTERIA2 = "hysteria2", _("Hysteria2")
+        WIREGUARD = "wireguard", _("WireGuard")
         UNKNOWN = "unknown", _("Unknown")
 
     class SourceType(models.TextChoices):
         PANEL_GENERATED = "panel_generated", _("Panel generated")
         MANUAL = "manual", _("Manual")
         IMPORTED_SUBSCRIPTION = "imported_subscription", _("Imported subscription")
+        EXTERNAL_SUBSCRIPTION = "external_subscription", _("External subscription")
         UNKNOWN = "unknown", _("Unknown")
 
     raw_link = models.TextField(_("raw link"))
@@ -3783,6 +3790,14 @@ class ConfigLink(TimeStampedModel):
         null=True,
         blank=True,
     )
+    external_feed = models.ForeignKey(
+        "ExternalSubscriptionFeed",
+        verbose_name=_("external subscription feed"),
+        on_delete=models.SET_NULL,
+        related_name="config_links",
+        null=True,
+        blank=True,
+    )
     is_active = models.BooleanField(_("is active"), default=True, db_index=True)
     metadata = models.JSONField(_("metadata"), default=dict, blank=True)
 
@@ -3794,6 +3809,7 @@ class ConfigLink(TimeStampedModel):
             models.Index(fields=["protocol", "is_active"]),
             models.Index(fields=["source_type", "created_at"]),
             models.Index(fields=["vpn_client", "is_active"]),
+            models.Index(fields=["external_feed", "is_active"]),
         ]
 
     def __str__(self):
@@ -4216,6 +4232,86 @@ class PlanDeliverySource(TimeStampedModel):
             errors["source_type"] = _("Unsupported source type.")
         if errors:
             raise ValidationError(errors)
+
+
+class ExternalSubscriptionFeed(TimeStampedModel):
+    class Status(models.TextChoices):
+        HEALTHY = "healthy", _("Healthy")
+        DEGRADED = "degraded", _("Degraded")
+        ERROR = "error", _("Error")
+        DISABLED = "disabled", _("Disabled")
+
+    provider = models.CharField(_("provider"), max_length=50, db_index=True)
+    active = models.BooleanField(_("active"), default=True, db_index=True)
+    cup = models.ForeignKey(
+        SubscriptionCup,
+        verbose_name=_("subscription cup"),
+        on_delete=models.CASCADE,
+        related_name="external_feeds",
+    )
+    delivery_source = models.ForeignKey(
+        PlanDeliverySource,
+        verbose_name=_("originating plan delivery source"),
+        on_delete=models.SET_NULL,
+        related_name="external_subscription_feeds",
+        null=True,
+        blank=True,
+    )
+    panel = models.ForeignKey(
+        Panel,
+        verbose_name=_("panel"),
+        on_delete=models.SET_NULL,
+        related_name="external_subscription_feeds",
+        null=True,
+        blank=True,
+    )
+    vpn_client = models.ForeignKey(
+        VPNClient,
+        verbose_name=_("VPN client"),
+        on_delete=models.SET_NULL,
+        related_name="external_subscription_feeds",
+        null=True,
+        blank=True,
+    )
+    remote_identity_ref = models.CharField(_("remote identity reference"), max_length=160, blank=True)
+    protected_subscription_url = models.TextField(_("protected upstream subscription URL"), blank=True)
+    resolved_filter_policy = models.JSONField(_("resolved filter policy"), default=dict, blank=True)
+    refresh_interval_hours = models.PositiveIntegerField(_("refresh interval hours"), default=12, validators=[MinValueValidator(1)])
+    next_refresh_at = models.DateTimeField(_("next refresh at"), null=True, blank=True, db_index=True)
+    last_attempt_at = models.DateTimeField(_("last attempt at"), null=True, blank=True)
+    last_success_at = models.DateTimeField(_("last success at"), null=True, blank=True)
+    consecutive_failures = models.PositiveIntegerField(_("consecutive failures"), default=0)
+    status = models.CharField(
+        _("status"),
+        max_length=20,
+        choices=Status.choices,
+        default=Status.HEALTHY,
+        db_index=True,
+    )
+    last_good_config_count = models.PositiveIntegerField(_("last good config count"), default=0)
+    last_seen_upstream_count = models.PositiveIntegerField(_("last seen upstream count"), default=0)
+    last_filtered_count = models.PositiveIntegerField(_("last filtered count"), default=0)
+    last_error_code = models.CharField(_("last error code"), max_length=80, blank=True, db_index=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _("external subscription feed")
+        verbose_name_plural = _("external subscription feeds")
+        ordering = ["next_refresh_at", "id"]
+        indexes = [
+            models.Index(fields=["provider", "status"]),
+            models.Index(fields=["active", "next_refresh_at"]),
+            models.Index(fields=["cup", "status"]),
+            models.Index(fields=["panel", "status"]),
+        ]
+
+    def __str__(self):
+        identity = str(self.remote_identity_ref or "").strip()
+        if identity:
+            identity = f"{identity[:2]}***" if len(identity) <= 8 else f"{identity[:4]}...{identity[-4:]}"
+        else:
+            identity = self.pk or "-"
+        return f"{self.provider}:{identity}:{self.status}"
 
 
 class CupFulfillmentRecipe(TimeStampedModel):

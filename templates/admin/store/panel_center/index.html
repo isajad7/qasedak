@@ -100,7 +100,7 @@
                                     {% csrf_token %}
                                     <button type="submit" class="tw-mini-button tw-mini-button-success">همگام‌سازی</button>
                                 </form>
-                                <a href="{{ item.actions.inbounds }}" class="tw-mini-button">اینباندها</a>
+                                <a href="{{ item.actions.inbounds }}" class="tw-mini-button">{{ item.actions.target_inbounds_label|default:"اینباندها" }}</a>
                             </div>
                         </td>
                     </tr>

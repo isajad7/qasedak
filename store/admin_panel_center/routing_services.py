@@ -24,6 +24,10 @@ from store.plan_route_services import (
 SUPPORTED_ROUTE_PROTOCOLS = {"vless", "vmess", "trojan"}
 
 
+def _is_pasarguard_panel(panel):
+    return str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD
+
+
 @dataclass
 class RoutingOperationResult:
     ok: bool
@@ -161,7 +165,7 @@ def validate_inbound_for_routing(inbound, *, panel=None, require_panel_capabilit
     elif not inbound.panel.is_active:
         errors.append("پنل اینباند غیرفعال است. Inbound panel is inactive.")
     protocol = str(inbound.protocol or "").lower()
-    if protocol not in SUPPORTED_ROUTE_PROTOCOLS:
+    if not _is_pasarguard_panel(getattr(inbound, "panel", None)) and protocol not in SUPPORTED_ROUTE_PROTOCOLS:
         errors.append("پروتکل اینباند در Routing Builder پشتیبانی نمی‌شود. Inbound protocol is not supported by the routing builder.")
     if inbound.max_clients is not None and inbound.current_users >= inbound.max_clients:
         warnings.append("Inbound capacity is currently full.")
@@ -208,9 +212,10 @@ def validate_routing_selection(*, plan, mode, panel=None, inbound=None, inbounds
             errors.append("اینباندهای انتخاب‌شده از چند پنل هستند. این مورد فقط در Multi-panel Builder مجاز است، نه در single-panel route builder. All selected inbounds must belong to the same panel.")
         if panel.pk not in panel_ids and selected:
             errors.append("اینباندهای انتخاب‌شده به پنل انتخاب‌شده وصل نیستند. Selected inbounds do not belong to the selected panel.")
-        if not report.supports_multi_inbound_create:
+        supports_multi_group = _is_pasarguard_panel(panel) and getattr(report, "supports_multi_group_users", False)
+        if not report.supports_multi_inbound_create and not supports_multi_group:
             errors.append("پنل انتخاب‌شده قابلیت supports_multi_inbound_create ندارد. Selected panel does not support multi-inbound create.")
-        if panel.capability_profile != Panel.CapabilityProfile.MODERN_MULTI_NODE:
+        if not supports_multi_group and panel.capability_profile != Panel.CapabilityProfile.MODERN_MULTI_NODE:
             errors.append("حالت multi به capability profile modern_multi_node نیاز دارد. Multi mode requires modern_multi_node capability profile.")
         remote_ids = [str(item.inbound_id) for item in selected]
         if len(set(remote_ids)) != len(remote_ids):
@@ -288,7 +293,7 @@ def preview_routing(*, plan, mode, panel=None, inbound=None, inbounds=None):
         "panel_family": report.family if report else "",
         "capability_profile": report.capability_profile if report else "",
         "endpoint_category": "preview-only",
-        "expected_mode": "multi inboundIds create" if mode == ROUTE_MODE_MULTI else "single create" if mode == ROUTE_MODE_SINGLE else "no route",
+        "expected_mode": "multi group_ids create" if mode == ROUTE_MODE_MULTI and _is_pasarguard_panel(panel) else "multi inboundIds create" if mode == ROUTE_MODE_MULTI else "single create" if mode == ROUTE_MODE_SINGLE else "no route",
         "totalGB": str(plan.volume_gb),
         "duration_days": plan.duration_days,
         "limitIp": plan.device_limit,

@@ -430,6 +430,128 @@ def build_panel_health_result(panel, *, settings=None):
 
     adapter = get_safe_panel_adapter(panel)
     capability_report = adapter.get_capability_report()
+    if getattr(adapter, "family", "") == Panel.Family.PASARGUARD:
+        from .external_subscription_sources import external_feed_health_summary_for_panel
+
+        try:
+            adapter.test_connection()
+        except Exception as exc:
+            error_code, friendly_message = _classify_exception(exc)
+            result = _base_result(
+                panel,
+                settings,
+                status=PanelHealthStatus.Status.ERROR,
+                summary=friendly_message,
+                login_ok=False,
+                error_code=error_code,
+                error_message=friendly_message,
+                metadata=_exception_metadata(exc, panel=panel),
+            )
+            result["response_time_ms"] = int((time.monotonic() - start) * 1000)
+            return result
+
+        all_active_inbounds = list(
+            Inbound.objects.filter(panel=panel, is_active=True).order_by("inbound_id")
+        )
+        ignored_inbounds = [inbound for inbound in all_active_inbounds if not inbound.health_monitor_enabled]
+        active_inbounds = [inbound for inbound in all_active_inbounds if inbound.health_monitor_enabled]
+        ignored_metadata = _ignored_inbound_metadata(ignored_inbounds)
+        metadata_base = {
+            "capability_report": capability_report.to_dict(),
+            "native_raw_delivery": True,
+            "external_subscription_feeds": external_feed_health_summary_for_panel(panel),
+            **ignored_metadata,
+        }
+        if not all_active_inbounds:
+            result = _base_result(
+                panel,
+                settings,
+                status=PanelHealthStatus.Status.WARNING,
+                summary="اتصال PasarGuard موفق بود اما هیچ گروه فعال محلی برای بررسی وجود ندارد.",
+                login_ok=True,
+                error_code="no_active_pasarguard_groups",
+                error_message="هیچ گروه فعال محلی پیدا نشد.",
+                metadata={"inbound_issues": [], "inbound_issue_count": 0, **metadata_base},
+            )
+            result["inbounds_warning"] = 1
+            result["response_time_ms"] = int((time.monotonic() - start) * 1000)
+            return result
+        if not active_inbounds:
+            ignored_count = len(ignored_inbounds)
+            result = _base_result(
+                panel,
+                settings,
+                status=PanelHealthStatus.Status.OK,
+                summary=f"اتصال PasarGuard موفق بود؛ {persian_digits(ignored_count)} گروه ignored نادیده گرفته شد.",
+                login_ok=True,
+                metadata={"inbound_issues": [], "inbound_issue_count": 0, **metadata_base},
+            )
+            result["response_time_ms"] = int((time.monotonic() - start) * 1000)
+            return result
+
+        warnings = []
+        errors = []
+        ok_count = 0
+        feed_health = metadata_base["external_subscription_feeds"]
+        for issue in feed_health.get("issues") or []:
+            target = errors if issue.get("status") == "error" else warnings
+            target.append(
+                {
+                    "inbound_id": "",
+                    "remark": f"External feed {issue.get('feed_id') or '-'}",
+                    "code": issue.get("last_error_code") or "external_subscription_feed_unhealthy",
+                    "message": "Dynamic subscription feed refresh is not healthy.",
+                    "expected": "healthy",
+                    "actual": issue.get("status") or "unknown",
+                    "metadata": issue,
+                }
+            )
+        for inbound in active_inbounds:
+            check = adapter.check_inbound(inbound)
+            if check.ok:
+                ok_count += 1
+                continue
+            issue = _inbound_issue(
+                inbound,
+                check.status or "pasarguard_group_warning",
+                check.message or "گروه PasarGuard قابل استفاده نیست.",
+                expected="active",
+                actual=check.status,
+            )
+            issue["metadata"] = sanitize_operational_metadata(check.metadata, panel=panel)
+            if check.status == "error":
+                errors.append(issue)
+            else:
+                warnings.append(issue)
+
+        issue_count = len(warnings) + len(errors)
+        status = PanelHealthStatus.Status.WARNING if issue_count else PanelHealthStatus.Status.OK
+        summary = (
+            f"اتصال PasarGuard موفق بود؛ {persian_digits(issue_count)} مشکل در گروه‌ها دیده شد"
+            if issue_count
+            else f"PasarGuard سالم است و {persian_digits(ok_count)} گروه فعال بررسی شد"
+        )
+        result = _base_result(
+            panel,
+            settings,
+            status=status,
+            summary=f"{summary}{_ignored_summary_suffix(len(ignored_inbounds))}.",
+            login_ok=True,
+            error_code="pasarguard_group_warning" if warnings else "pasarguard_group_error" if errors else "",
+            error_message=warnings[0]["message"] if warnings else errors[0]["message"] if errors else "",
+            metadata={
+                "inbound_issues": [*warnings, *errors][:20],
+                "inbound_issue_count": issue_count,
+                **metadata_base,
+            },
+        )
+        result["inbounds_checked"] = len(active_inbounds)
+        result["inbounds_ok"] = ok_count
+        result["inbounds_warning"] = len(warnings)
+        result["inbounds_error"] = len(errors)
+        result["response_time_ms"] = int((time.monotonic() - start) * 1000)
+        return result
+
     if getattr(adapter, "family", "") != "xui":
         structured_error = PanelIntegrationError(
             "این خانواده پنل هنوز در مانیتورینگ سلامت پیاده‌سازی نشده است.",

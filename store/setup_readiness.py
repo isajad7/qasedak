@@ -65,10 +65,15 @@ def payment_configured(store):
 
 
 def xui_configured(store):
-    return Panel.objects.filter(
+    panels = Panel.objects.filter(
         Q(store=store) | Q(store__isnull=True),
         is_active=True,
-    ).exclude(url="").exclude(username="").exclude(password="").exists()
+    ).exclude(url="").exclude(password="")
+    return panels.filter(
+        Q(family=Panel.Family.PASARGUARD)
+        | Q(family=Panel.Family.XUI, username__gt="")
+        | Q(family="")
+    ).exists()
 
 
 def inbound_configured(store):
@@ -80,16 +85,21 @@ def inbound_configured(store):
     ).exists()
 
 
-def plans_configured(store):
-    return Plan.objects.filter(
+def active_public_plans(store):
+    plans = Plan.objects.filter(
         Q(store=store) | Q(store__isnull=True),
         is_active=True,
         is_public=True,
         is_custom_volume=False,
-    ).exists()
+    )
+    return plans
 
 
-def routes_configured(store):
+def plans_configured(store):
+    return active_public_plans(store).exists()
+
+
+def legacy_routes_configured(store):
     routes = PlanInboundRoute.objects.filter(
         Q(store=store) | Q(store__isnull=True),
         Q(plan__store=store) | Q(plan__store__isnull=True),
@@ -103,6 +113,40 @@ def routes_configured(store):
         inbound__panel__is_active=True,
     )
     return routes.exists()
+
+
+def plan_has_ready_canonical_delivery(plan, store=None):
+    from .plan_delivery_services import (
+        MODE_DIRECT_LINKS,
+        MODE_SUBSCRIPTION,
+        READINESS_CONFLICT,
+        READINESS_INCOMPLETE,
+        SOURCE_V2_CONFIG,
+        resolve_plan_delivery_configuration,
+    )
+
+    if not plan:
+        return False
+    delivery = resolve_plan_delivery_configuration(plan, store)
+    return bool(
+        delivery.source_of_truth == SOURCE_V2_CONFIG
+        and delivery.effective_mode in {MODE_DIRECT_LINKS, MODE_SUBSCRIPTION}
+        and delivery.readiness_status not in {READINESS_INCOMPLETE, READINESS_CONFLICT}
+        and delivery.source_count > 0
+        and delivery.expected_output_count > 0
+    )
+
+
+def canonical_delivery_configured_count(store):
+    return sum(
+        1
+        for plan in active_public_plans(store).select_related("store").iterator()
+        if plan_has_ready_canonical_delivery(plan, store)
+    )
+
+
+def routes_configured(store):
+    return legacy_routes_configured(store) or canonical_delivery_configured_count(store) > 0
 
 
 def revenue_safe(store):
@@ -123,10 +167,15 @@ def build_store_readiness_checklist(store):
         ),
         ReadinessCheck("telegram", "Telegram", telegram_configured(store), "ربات Telegram فعال با token و admin ID لازم است."),
         ReadinessCheck("payment", "Payment", payment_configured(store), "اطلاعات کارت واقعی لازم است."),
-        ReadinessCheck("xui", "X-UI panel", xui_configured(store), "پنل X-UI فعال با URL، username و password لازم است."),
+        ReadinessCheck("xui", "Operational panel", xui_configured(store), "پنل عملیاتی فعال لازم است؛ X-UI به username/password و PasarGuard به API key نیاز دارد."),
         ReadinessCheck("inbound", "Inbound", inbound_configured(store), "حداقل یک inbound فعال و قابل فروش لازم است."),
         ReadinessCheck("plans", "Plans", plans_configured(store), "حداقل یک پلن عمومی فعال لازم است."),
-        ReadinessCheck("routes", "Plan route", routes_configured(store), "حداقل یک route معتبر از پلن به inbound لازم است."),
+        ReadinessCheck(
+            "routes",
+            "Plan delivery",
+            routes_configured(store),
+            "حداقل یک route معتبر یا تنظیم canonical آماده برای تحویل پلن لازم است.",
+        ),
         ReadinessCheck("revenue", "Revenue dry-run", revenue_safe(store), "Revenue Engine باید enabled و dry_run باشد."),
     ]
 

@@ -61,6 +61,8 @@ PANEL_MODERN_INACTIVE_CREATE_MESSAGE = (
     "این مسیر فقط با deferred/direct create-enabled provisioning مجاز است."
 )
 PLAN_INBOUND_ROUTE_MISSING_MESSAGE = "برای این پلن مسیر سرور/اینباند تعریف نشده است. لطفاً با پشتیبانی تماس بگیرید."
+PLAN_DELIVERY_CONFIG_INCOMPLETE_MESSAGE = "تنظیم تحویل این پلن کامل نیست. لطفاً با پشتیبانی تماس بگیرید."
+PLAN_DELIVERY_V2_CHECKOUT_STRATEGY = "plan_delivery_v2"
 
 
 @dataclass
@@ -126,8 +128,11 @@ def validate_inbound_for_order(inbound, store=None, *, required_slots=1, allow_m
         raise ValidationError(INBOUND_PANEL_INACTIVE_MESSAGE)
     if store and panel.store_id not in (None, store.pk):
         raise ValidationError(INBOUND_STORE_MISMATCH_MESSAGE)
-    if getattr(inbound, "xui_source", "") == Inbound.XUISource.SYNCHRONIZED_NODE and not (inbound.xui_node_id or "").strip():
+    is_pasarguard = str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD
+    if not is_pasarguard and getattr(inbound, "xui_source", "") == Inbound.XUISource.SYNCHRONIZED_NODE and not (inbound.xui_node_id or "").strip():
         raise ValidationError(INBOUND_NODE_SCOPE_MISSING_MESSAGE)
+    if is_pasarguard and not allow_modern_deferred:
+        raise ValidationError(PANEL_MODERN_INACTIVE_CREATE_MESSAGE)
     if getattr(panel, "capability_profile", "") == Panel.CapabilityProfile.UNKNOWN_SAFE:
         raise ValidationError(PANEL_UNKNOWN_COMPATIBILITY_MESSAGE)
     if getattr(panel, "capability_profile", "") in {
@@ -361,6 +366,41 @@ def plan_uses_multi_inbound_bundle(plan):
     return bool(getattr(plan, "multi_inbound_bundle", False))
 
 
+def canonical_delivery_for_checkout(plan, store=None):
+    if not plan:
+        return None, ""
+
+    from .plan_delivery_services import (
+        MODE_GLOBAL_FALLBACK,
+        READINESS_CONFLICT,
+        READINESS_INCOMPLETE,
+        SOURCE_V2_CONFIG,
+        resolve_plan_delivery_configuration,
+    )
+
+    delivery_config = resolve_plan_delivery_configuration(plan, store)
+    if delivery_config.source_of_truth != SOURCE_V2_CONFIG or delivery_config.effective_mode == MODE_GLOBAL_FALLBACK:
+        return None, ""
+
+    if (
+        delivery_config.readiness_status in {READINESS_INCOMPLETE, READINESS_CONFLICT}
+        or delivery_config.source_count < 1
+        or delivery_config.expected_output_count < 1
+    ):
+        logger.warning(
+            "Canonical plan delivery is not checkout-ready plan_id=%s store_id=%s delivery_config_id=%s mode=%s readiness=%s warnings=%s",
+            getattr(plan, "pk", None),
+            getattr(store, "pk", None),
+            delivery_config.delivery_config_id,
+            delivery_config.effective_mode,
+            delivery_config.readiness_status,
+            delivery_config.warnings,
+        )
+        return None, PLAN_DELIVERY_CONFIG_INCOMPLETE_MESSAGE
+
+    return delivery_config, ""
+
+
 def _route_queryset_for_store(route_qs, store):
     if not store:
         return route_qs.annotate(
@@ -564,7 +604,10 @@ def select_inbounds_for_plan(plan, store=None, operator=None, purpose="new_order
             if len(panel_ids) > 1:
                 raise ValidationError("همه اینباندهای bundle باید روی یک پنل باشند.")
             panel = inbounds[0].panel
-            if getattr(panel, "capability_profile", "") != Panel.CapabilityProfile.MODERN_MULTI_NODE:
+            if (
+                str(getattr(panel, "family", "") or "").lower() != Panel.Family.PASARGUARD
+                and getattr(panel, "capability_profile", "") != Panel.CapabilityProfile.MODERN_MULTI_NODE
+            ):
                 raise ValidationError("bundle چند اینباند فقط برای پنل modern multi-node مجاز است.")
             logger.info(
                 "Selected multi-inbound bundle plan_id=%s operator_id=%s store_id=%s inbound_pks=%s purpose=%s quantity=%s",
@@ -959,6 +1002,41 @@ def create_manual_payment_order(
     if not sales_mode_requires_operator(store):
         operator = None
 
+    if getattr(plan, "is_custom_volume", False):
+        order_metadata.update(
+            {
+                "custom_volume": True,
+                "custom_volume_gb": str(plan.volume_gb),
+                "custom_volume_duration_days": plan.duration_days,
+                "custom_volume_price_per_gb": str(store_custom_volume_price_per_gb(store)),
+            }
+        )
+
+    canonical_delivery, canonical_delivery_error = canonical_delivery_for_checkout(plan, store)
+    if canonical_delivery_error:
+        return ProvisionedOrderResult(False, canonical_delivery_error)
+    use_canonical_delivery = canonical_delivery is not None
+    if use_canonical_delivery:
+        if inbound:
+            logger.info(
+                "Ignoring explicit/legacy inbound because canonical plan delivery is active plan_id=%s store_id=%s inbound_pk=%s delivery_config_id=%s",
+                getattr(plan, "pk", None),
+                getattr(store, "pk", None),
+                getattr(inbound, "pk", inbound),
+                canonical_delivery.delivery_config_id,
+            )
+            order_metadata["canonical_delivery_ignored_inbound_pk"] = getattr(inbound, "pk", inbound)
+        inbound = None
+        order_metadata["provisioning_strategy"] = PLAN_DELIVERY_V2_CHECKOUT_STRATEGY
+        order_metadata["plan_delivery_v2"] = {
+            "status": "awaiting_payment",
+            "delivery_config_id": canonical_delivery.delivery_config_id,
+            "delivery_mode": canonical_delivery.effective_mode,
+            "source_of_truth": canonical_delivery.source_of_truth,
+            "source_count": canonical_delivery.source_count,
+            "expected_output_count": canonical_delivery.expected_output_count,
+        }
+
     if inbound:
         try:
             inbound = validate_inbound_for_order(
@@ -976,16 +1054,6 @@ def create_manual_payment_order(
                 exc.messages[0],
             )
             return ProvisionedOrderResult(False, exc.messages[0])
-
-    if getattr(plan, "is_custom_volume", False):
-        order_metadata.update(
-            {
-                "custom_volume": True,
-                "custom_volume_gb": str(plan.volume_gb),
-                "custom_volume_duration_days": plan.duration_days,
-                "custom_volume_price_per_gb": str(store_custom_volume_price_per_gb(store)),
-            }
-        )
 
     duplicate_source = (order_metadata.get("source") or "manual_payment").strip()
     duplicate_lock_key = build_duplicate_order_key(
@@ -1076,7 +1144,9 @@ def create_manual_payment_order(
 
         selected_inbounds = []
         try:
-            if inbound:
+            if use_canonical_delivery:
+                selected_inbounds = []
+            elif inbound:
                 selected_inbounds = [inbound]
             else:
                 selected_inbounds = select_inbounds_for_plan(
@@ -1092,11 +1162,12 @@ def create_manual_payment_order(
             release_discount_usage(reserved_discount)
             return ProvisionedOrderResult(False, exc.messages[0])
         if not inbound:
-            release_discount_usage(reserved_discount)
-            return ProvisionedOrderResult(False, "فعلاً سرور VPN فعالی برای ساخت کانفیگ در دسترس نیست. کمی بعد دوباره تلاش کن.")
+            if not use_canonical_delivery:
+                release_discount_usage(reserved_discount)
+                return ProvisionedOrderResult(False, "فعلاً سرور VPN فعالی برای ساخت کانفیگ در دسترس نیست. کمی بعد دوباره تلاش کن.")
 
         client_result = None
-        provisioning_strategy = ""
+        provisioning_strategy = PLAN_DELIVERY_V2_CHECKOUT_STRATEGY if use_canonical_delivery else ""
         if inbound:
             try:
                 inbound = validate_inbound_for_order(

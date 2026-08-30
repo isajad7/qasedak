@@ -30,10 +30,26 @@ class PanelCenterForm(forms.ModelForm):
             "is_active": _("فعال باشد"),
         }
         help_texts = {
-            "family": _("برای 3X-UI/Sanaei گزینه X-UI را انتخاب کنید. Marzban فعلاً فقط به‌صورت امن و غیرعملیاتی نمایش داده می‌شود."),
+            "family": _("برای 3X-UI/Sanaei گزینه X-UI را انتخاب کنید. برای PasarGuard کلید API در فیلد رمز/کلید ذخیره می‌شود."),
             "url": _("آدرس کامل پنل بدون اسلش انتهایی. اطلاعات ورود داخل URL ذخیره نکنید."),
-            "username": _("برای پنل‌هایی که نام کاربری ندارند، مقدار سازگار با API پنل را وارد کنید."),
+            "username": _("برای PasarGuard لازم نیست."),
         }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["username"].required = False
+        family = self._selected_family()
+        if family == Panel.Family.PASARGUARD:
+            self.fields["username"].widget = forms.HiddenInput()
+            self.fields["password"].label = _("کلید API")
+            self.fields["password"].help_text = _("کلید API پنل PasarGuard با هدر X-Api-Key ارسال می‌شود. مقدار فعلی نمایش داده نمی‌شود.")
+
+    def _selected_family(self):
+        if self.is_bound:
+            return str(self.data.get(self.add_prefix("family")) or "").strip()
+        if self.instance and self.instance.pk:
+            return str(self.instance.family or "").strip()
+        return str(self.initial.get("family") or Panel.Family.XUI).strip()
 
     def clean_url(self):
         return (self.cleaned_data.get("url") or "").strip().rstrip("/")
@@ -53,3 +69,14 @@ class PanelCenterForm(forms.ModelForm):
         if self.instance and self.instance.pk:
             return self.instance.proxy_url
         return ""
+
+    def clean(self):
+        cleaned = super().clean()
+        family = cleaned.get("family")
+        username = str(cleaned.get("username") or "").strip()
+        if family == Panel.Family.PASARGUARD:
+            cleaned["username"] = ""
+            return cleaned
+        if family == Panel.Family.XUI and not username:
+            self.add_error("username", _("برای پنل X-UI نام کاربری لازم است."))
+        return cleaned

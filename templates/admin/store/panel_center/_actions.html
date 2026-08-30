@@ -2,13 +2,13 @@
     <a href="{{ actions.detail }}" class="tw-button tw-button-secondary">مشاهده</a>
     <a href="{{ actions.edit }}" class="tw-button tw-button-secondary">ویرایش</a>
     <a href="{{ actions.capabilities }}" class="tw-button tw-button-secondary">گزارش قابلیت</a>
-    <a href="{{ actions.inbounds }}" class="tw-button tw-button-secondary">اینباندها</a>
+    <a href="{{ actions.inbounds }}" class="tw-button tw-button-secondary">{{ actions.target_inbounds_label|default:"اینباندها" }}</a>
     <form method="post" action="{{ actions.test }}" class="tw-m-0">
         {% csrf_token %}
         <button type="submit" class="tw-button tw-button-secondary">تست اتصال</button>
     </form>
     <form method="post" action="{{ actions.sync }}" class="tw-m-0">
         {% csrf_token %}
-        <button type="submit" class="tw-button tw-button-primary">همگام‌سازی اینباندها</button>
+        <button type="submit" class="tw-button tw-button-primary">{{ actions.target_sync_label|default:"همگام‌سازی اینباندها" }}</button>
     </form>
 </div>

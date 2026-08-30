@@ -24,6 +24,44 @@ from store.management.commands.sync_xui_topology import Command as SyncXUITopolo
 SUPPORTED_PROTOCOLS = {"vless", "vmess", "trojan"}
 
 
+def is_pasarguard_panel(panel):
+    return str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD
+
+
+def target_labels_for_panel(panel):
+    if is_pasarguard_panel(panel):
+        return {
+            "singular": "گروه",
+            "plural": "گروه‌ها",
+            "explorer": "کاوشگر گروه‌ها",
+            "recent": "گروه‌های اخیر",
+            "local_empty": "گروه local برای این پنل ثبت نشده است.",
+            "remote_id": "Group ID",
+            "name": "نام گروه",
+            "protocol": "Delivery",
+            "host_port": "Tags",
+            "node": "وضعیت",
+            "link": "Raw native",
+            "sync": "همگام‌سازی گروه‌ها",
+            "inbounds": "گروه‌ها",
+        }
+    return {
+        "singular": "اینباند",
+        "plural": "اینباندها",
+            "explorer": "کاوشگر اینباندها",
+            "recent": "اینباندهای اخیر",
+        "local_empty": "اینباند local برای این پنل ثبت نشده است.",
+        "remote_id": "Remote ID",
+        "name": "نام",
+        "protocol": "پروتکل",
+        "host_port": "Host / Port",
+        "node": "Node",
+        "link": "لینک",
+        "sync": "همگام‌سازی اینباندها",
+        "inbounds": "اینباندها",
+    }
+
+
 @dataclass
 class PanelActionResult:
     ok: bool
@@ -64,6 +102,9 @@ def panel_action_urls(panel):
         "inbounds": panel_center_url("admin_store_panel_center_inbounds", panel.pk),
         "capabilities": panel_center_url("admin_store_panel_center_capabilities", panel.pk),
         "django_admin": reverse("admin:store_panel_change", args=[panel.pk]),
+        "target_plural": target_labels_for_panel(panel)["plural"],
+        "target_sync_label": target_labels_for_panel(panel)["sync"],
+        "target_inbounds_label": target_labels_for_panel(panel)["inbounds"],
     }
 
 
@@ -86,7 +127,7 @@ def boolean_badge(value):
 
 
 def capability_items(report):
-    return [
+    items = [
         ("ورود", boolean_badge(report.supports_login)),
         ("خواندن اینباندها", boolean_badge(report.supports_read_inbounds)),
         ("ساخت کلاینت", boolean_badge(report.supports_create_client)),
@@ -96,6 +137,18 @@ def capability_items(report):
         ("CSRF در login", boolean_badge(report.requires_csrf_for_login)),
         ("CSRF در write", boolean_badge(report.requires_csrf_for_write)),
     ]
+    if getattr(report, "family", "") == Panel.Family.PASARGUARD:
+        items = [
+            ("API key auth", boolean_badge(report.uses_api_key_auth)),
+            ("خواندن گروه‌ها", boolean_badge(report.supports_read_inbounds)),
+            ("ساخت/ویرایش کاربر", boolean_badge(report.supports_create_client and report.supports_update_client)),
+            ("Disable کاربر", boolean_badge(report.supports_disable_client)),
+            ("Reset usage", boolean_badge(report.supports_reset_usage)),
+            ("چندگروهی با group_ids", boolean_badge(report.supports_multi_group_users)),
+            ("subscription_url", boolean_badge(report.supports_subscription)),
+            ("raw native configs", boolean_badge(report.supports_native_raw_configs)),
+        ]
+    return items
 
 
 def structured_errors_for_capability_report(panel, report):
@@ -138,6 +191,7 @@ def panel_summary(panel):
         "health_label": health.get_status_display() if health else "بدون بررسی",
         "health_checked_at": timezone.localtime(health.last_checked_at).strftime("%Y-%m-%d %H:%M") if health and health.last_checked_at else "-",
         "actions": panel_action_urls(panel),
+        "target_labels": target_labels_for_panel(panel),
     }
 
 
@@ -219,6 +273,45 @@ def panel_health_alert_detail(panel):
 
 def build_test_connection_result(panel):
     adapter = get_safe_panel_adapter(panel)
+    if getattr(adapter, "family", "") == Panel.Family.PASARGUARD:
+        try:
+            api_ok = adapter.test_connection()
+            groups = adapter.list_inbounds()
+            report = adapter.detect_capabilities(live=True, write=False)
+        except Exception as exc:
+            structured = safe_error_dict(
+                exc,
+                error_code="pasarguard_test_connection_failed",
+                layer="pasarguard_api",
+                action="test_connection",
+                message="تست اتصال PasarGuard ناموفق بود.",
+                remediation="آدرس پایه پنل، API key و دسترسی /api/system و /api/groups را بررسی کنید.",
+                panel=panel,
+            )
+            safe_message = structured.get("message") or "تست اتصال PasarGuard ناموفق بود."
+            return PanelActionResult(
+                False,
+                "تست اتصال ناموفق بود",
+                safe_message,
+                details=structured,
+                errors=[safe_message],
+                structured_errors=[structured],
+            )
+        return PanelActionResult(
+            True,
+            "تست اتصال موفق بود",
+            "API key و خواندن گروه‌های PasarGuard با موفقیت انجام شد.",
+            details={
+                "api_ok": bool(api_ok),
+                "read_api_ok": True,
+                "remote_groups": len(groups),
+                "capability_profile": report.capability_profile or "-",
+                "native_raw_delivery": True,
+            },
+            warnings=list(report.warnings),
+            errors=list(report.errors),
+        )
+
     if getattr(adapter, "family", "") != Panel.Family.XUI:
         report = adapter.get_capability_report()
         message = "این پنل هنوز برای تست اتصال عملیاتی قابل استفاده نیست."
@@ -290,6 +383,139 @@ def build_test_connection_result(panel):
 
 def sync_panel_inbounds(panel, *, create_missing=True, available_for_new_orders=True, active_only=True):
     adapter = get_safe_panel_adapter(panel)
+    if getattr(adapter, "family", "") == Panel.Family.PASARGUARD:
+        try:
+            report = adapter.detect_capabilities(live=True, write=False)
+            remote_groups = adapter.list_inbounds()
+            created = 0
+            updated = 0
+            skipped = 0
+            remote_group_ids = []
+            for group in remote_groups:
+                group_id = group.get("id")
+                if group_id is None:
+                    skipped += 1
+                    continue
+                remote_group_ids.append(group_id)
+                exists = Inbound.objects.filter(panel=panel, xui_node_id="", inbound_id=group_id).exists()
+                if not exists and not create_missing:
+                    skipped += 1
+                    continue
+                disabled_known = group.get("is_disabled") is not None
+                group_disabled = group.get("is_disabled") is True
+                group_sellable = bool(available_for_new_orders and disabled_known and not group_disabled)
+                defaults = {
+                    "remark": group.get("name") or f"PasarGuard group {group_id}",
+                    "protocol": Inbound.Protocol.VLESS,
+                    "server_ip": "pasarguard-native",
+                    "port": "0",
+                    "config_params": "{}",
+                    "is_active": bool(disabled_known and not group_disabled),
+                    "available_for_new_orders": group_sellable,
+                    "health_monitor_enabled": True,
+                    "last_synced_at": timezone.now(),
+                    "xui_node_id": "",
+                    "xui_node_name": "",
+                    "xui_source": Inbound.XUISource.PASARGUARD_GROUP,
+                    "xui_remote_key": f"pasarguard_group:{group_id}",
+                    "is_synced_from_node": False,
+                    "metadata": {
+                        "remote_kind": "pasarguard_group",
+                        "group_id": group_id,
+                        "group_name": group.get("name") or "",
+                        "inbound_tags": group.get("inbound_tags") or [],
+                        "inbound_tag_count": len(group.get("inbound_tags") or []),
+                        "is_disabled": group.get("is_disabled"),
+                        "disabled_known": disabled_known,
+                        "inbound_tags_known": bool(group.get("inbound_tags_known", True)),
+                        "remote_source": group.get("source") or "",
+                        "native_raw_delivery": True,
+                    },
+                }
+                _inbound, was_created = Inbound.objects.update_or_create(
+                    panel=panel,
+                    xui_node_id="",
+                    inbound_id=group_id,
+                    defaults=defaults,
+                )
+                if was_created:
+                    created += 1
+                else:
+                    updated += 1
+            stale_count = 0
+            stale_qs = Inbound.objects.filter(panel=panel, xui_source=Inbound.XUISource.PASARGUARD_GROUP)
+            if remote_group_ids:
+                stale_qs = stale_qs.exclude(inbound_id__in=remote_group_ids)
+            for stale in stale_qs:
+                metadata = dict(stale.metadata or {})
+                metadata.update(
+                    {
+                        "remote_kind": "pasarguard_group",
+                        "stale": True,
+                        "stale_marked_at": timezone.now().isoformat(),
+                        "native_raw_delivery": True,
+                    }
+                )
+                stale.is_active = False
+                stale.available_for_new_orders = False
+                stale.metadata = metadata
+                stale.last_synced_at = timezone.now()
+                stale.save(update_fields=["is_active", "available_for_new_orders", "metadata", "last_synced_at", "updated_at"])
+                stale_count += 1
+            panel.capability_profile = Panel.CapabilityProfile.PASARGUARD_GROUPS
+            panel.detected_xui_version = ""
+            panel.last_sync_at = timezone.now()
+            panel.capability_metadata = {
+                "family": Panel.Family.PASARGUARD,
+                "group_count": len(remote_groups),
+                "native_raw_delivery": True,
+                "report": report.to_dict(),
+            }
+            panel.save(
+                update_fields=[
+                    "capability_profile",
+                    "detected_xui_version",
+                    "last_sync_at",
+                    "capability_metadata",
+                    "updated_at",
+                ]
+            )
+        except Exception as exc:
+            structured = safe_error_dict(
+                exc,
+                error_code="pasarguard_group_sync_failed",
+                layer="pasarguard_read",
+                action="sync_groups",
+                message="همگام‌سازی گروه‌های PasarGuard ناموفق بود.",
+                remediation="Test connection را اجرا کنید و دسترسی API key به /api/groups را بررسی کنید.",
+                panel=panel,
+            )
+            safe_message = structured.get("message") or "همگام‌سازی گروه‌های PasarGuard ناموفق بود."
+            return PanelActionResult(
+                False,
+                "همگام‌سازی ناموفق بود",
+                safe_message,
+                errors=[safe_message],
+                structured_errors=[structured],
+            )
+
+        return PanelActionResult(
+            True,
+            "همگام‌سازی انجام شد",
+            "گروه‌های PasarGuard در منابع local ذخیره شدند.",
+            details={
+                "profile": Panel.CapabilityProfile.PASARGUARD_GROUPS,
+                "remote_groups": len(remote_groups),
+                "created": created,
+                "updated": updated,
+                "skipped": skipped,
+                "stale": stale_count,
+                "native_raw_delivery": True,
+            },
+            warnings=list(report.warnings),
+            errors=list(report.errors),
+        )
+
     if getattr(adapter, "family", "") != Panel.Family.XUI:
         report = adapter.get_capability_report()
         message = "همگام‌سازی برای این خانواده پنل هنوز پشتیبانی نمی‌شود."
@@ -385,8 +611,9 @@ def sync_panel_inbounds(panel, *, create_missing=True, available_for_new_orders=
 def inbound_status(inbound):
     warnings = []
     panel = getattr(inbound, "panel", None)
+    is_pasarguard = is_pasarguard_panel(panel)
     if not inbound.is_active:
-        warnings.append("اینباند غیرفعال است.")
+        warnings.append("گروه غیرفعال است." if is_pasarguard else "اینباند غیرفعال است.")
     if not inbound.available_for_new_orders:
         warnings.append("برای فروش جدید فعال نیست.")
     if panel and not panel.is_active:
@@ -394,22 +621,31 @@ def inbound_status(inbound):
     if inbound.max_clients is not None and inbound.current_users >= inbound.max_clients:
         warnings.append("ظرفیت تکمیل شده است.")
     protocol = str(inbound.protocol or "").lower()
-    if protocol and protocol not in SUPPORTED_PROTOCOLS:
+    if not is_pasarguard and protocol and protocol not in SUPPORTED_PROTOCOLS:
         warnings.append("پروتکل برای لینک مستقیم استاندارد پشتیبانی نشده است.")
     return warnings
 
 
 def inbound_rows(panel):
     rows = []
+    labels = target_labels_for_panel(panel)
     for inbound in Inbound.objects.filter(panel=panel).order_by("-is_active", "inbound_id", "pk"):
         warnings = inbound_status(inbound)
+        metadata = inbound.metadata or {}
+        is_pasarguard = is_pasarguard_panel(panel)
         rows.append(
             {
                 "inbound": inbound,
+                "target_labels": labels,
+                "target_kind": "pasarguard_group" if is_pasarguard else "xui_inbound",
                 "warnings": warnings,
                 "tone": "amber" if warnings else "emerald",
                 "sellable": bool(inbound.is_active and inbound.available_for_new_orders and not warnings),
-                "link_support": "پشتیبانی می‌شود" if str(inbound.protocol or "").lower() in SUPPORTED_PROTOCOLS else "نامشخص",
+                "remote_id_label": metadata.get("group_id") if is_pasarguard else inbound.inbound_id,
+                "protocol_label": "native raw" if is_pasarguard else inbound.protocol,
+                "host_port_label": f"{metadata.get('inbound_tag_count', 0)} tag" if is_pasarguard else f"{inbound.server_ip}:{inbound.port}",
+                "node_label": "disabled" if metadata.get("is_disabled") else "unknown" if is_pasarguard and metadata.get("disabled_known") is False else "active" if is_pasarguard else inbound.xui_node_name or inbound.xui_node_id or "local",
+                "link_support": "native raw" if is_pasarguard else "پشتیبانی می‌شود" if str(inbound.protocol or "").lower() in SUPPORTED_PROTOCOLS else "نامشخص",
             }
         )
     return rows

@@ -9,11 +9,13 @@ from django.utils import timezone
 from .db_locking import select_for_update_self
 from .models import Inbound, Order, VPNClient
 from .naming import build_client_display_name
+from .panels import PanelIntegrationError, get_safe_panel_adapter
 from .referral_services import create_referral_reward_for_order
-from .xui_api import delete_client, enable_client, mask_xui_value, renew_client
+from .xui_api import delete_client as xui_delete_client, enable_client, mask_xui_value, renew_client
 
 logger = logging.getLogger(__name__)
 PANEL_LINK_ADMIN_MESSAGE = "این کانفیگ به اینباند و پنل معتبر وصل نیست. لطفاً تنظیمات اینباند و پنل را در ادمین بررسی کن."
+delete_client = xui_delete_client
 
 
 @dataclass
@@ -317,6 +319,25 @@ def deletion_targets_for_order(order):
     return []
 
 
+def delete_panel_client(target):
+    inbound = getattr(target, "inbound", None)
+    panel = getattr(inbound, "panel", None)
+    if panel and str(getattr(panel, "family", "") or "").lower() == "pasarguard":
+        identifier = str(getattr(target, "xui_email", "") or getattr(target, "username", "") or "").strip()
+        if not identifier:
+            logger.warning("PasarGuard delete skipped because remote username is missing target=%s", getattr(target, "pk", None))
+            return False
+        try:
+            return get_safe_panel_adapter(panel).delete_client(inbound, identifier)
+        except PanelIntegrationError as exc:
+            logger.warning("Could not delete PasarGuard user: %s", exc.message)
+            return False
+        except Exception as exc:
+            logger.warning("Could not delete PasarGuard user: %s", exc)
+            return False
+    return xui_delete_client(target)
+
+
 def decrement_inbound_users_for_targets(targets):
     counts_by_inbound = {}
     for target in targets:
@@ -349,21 +370,21 @@ def reject_order(order, *, reason="", user=None, notify=True):
         delete_targets = deletion_targets_for_order(order)
         for target in delete_targets:
             logger.info(
-                "Calling 3xUI delete_client order_id=%s tracking=%s uuid=%s",
+                "Calling panel delete_client order_id=%s tracking=%s uuid=%s",
                 order.pk,
                 order.order_tracking_code,
                 mask_xui_value(target.uuid),
             )
-            if not delete_client(target):
+            if not delete_panel_client(target):
                 logger.warning(
-                    "3xUI delete_client failed order_id=%s tracking=%s uuid=%s",
+                    "Panel delete_client failed order_id=%s tracking=%s uuid=%s",
                     order.pk,
                     order.order_tracking_code,
                     mask_xui_value(target.uuid),
                 )
-                return OrderActionResult(False, "Sanaei/X-UI client deletion failed.")
+                return OrderActionResult(False, "Panel client deletion failed.")
             logger.info(
-                "3xUI delete_client succeeded order_id=%s tracking=%s uuid=%s",
+                "Panel delete_client succeeded order_id=%s tracking=%s uuid=%s",
                 order.pk,
                 order.order_tracking_code,
                 mask_xui_value(target.uuid),
@@ -421,19 +442,19 @@ def cancel_order(order, *, user=None, hide_from_customer=True):
 
         for target in delete_targets:
             logger.info(
-                "Calling 3xUI delete_client for cancel order_id=%s tracking=%s uuid=%s",
+                "Calling panel delete_client for cancel order_id=%s tracking=%s uuid=%s",
                 order.pk,
                 order.order_tracking_code,
                 mask_xui_value(target.uuid),
             )
-            if not delete_client(target):
+            if not delete_panel_client(target):
                 logger.warning(
-                    "3xUI delete_client failed for cancel order_id=%s tracking=%s uuid=%s",
+                    "Panel delete_client failed for cancel order_id=%s tracking=%s uuid=%s",
                     order.pk,
                     order.order_tracking_code,
                     mask_xui_value(target.uuid),
                 )
-                return OrderActionResult(False, "Sanaei/X-UI client deletion failed.")
+                return OrderActionResult(False, "Panel client deletion failed.")
 
         metadata = dict(order.metadata or {})
         metadata["customer_hidden"] = bool(hide_from_customer)

@@ -286,9 +286,10 @@ def sales_inbound_bundle_issues(inbounds, *, store=None):
         panel = inbounds[0].panel
     except Exception:
         panel = None
+    is_pasarguard = str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD
     if not panel:
         errors.append("Bundle panel is missing.")
-    elif panel.capability_profile != Panel.CapabilityProfile.MODERN_MULTI_NODE:
+    elif not is_pasarguard and panel.capability_profile != Panel.CapabilityProfile.MODERN_MULTI_NODE:
         errors.append("Multi-inbound bundle requires a modern multi-node 3X-UI panel.")
 
     for inbound in inbounds:
@@ -322,6 +323,8 @@ def sales_inbound_issues(inbound, *, store=None):
         errors.append("Inbound panel is inactive.")
     elif store and panel.store_id and panel.store_id != store.pk:
         errors.append("Inbound belongs to a different store.")
+    elif str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD:
+        warnings.append("PasarGuard route uses native raw subscription delivery; local direct link reconstruction is bypassed.")
     elif getattr(panel, "capability_profile", "") == Panel.CapabilityProfile.UNKNOWN_SAFE:
         errors.append("X-UI compatibility is unknown; run compatibility audit before selling on this inbound.")
     elif getattr(panel, "capability_profile", "") in {

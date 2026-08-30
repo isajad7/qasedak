@@ -9,7 +9,7 @@
             {% include "admin/store/panel_center/_badge.html" with tone="blue" label=adapter_family icon="fas fa-server" %}
             <h1 class="tw-m-0 tw-mt-2 tw-text-2xl tw-font-black tw-leading-tight tw-text-slate-950">{{ panel.name }}</h1>
             <p class="tw-mt-2 tw-mb-0 tw-max-w-3xl tw-text-sm tw-leading-7 tw-text-slate-600">
-                وضعیت اتصال، قابلیت‌ها و اینباندهای local مرتبط با این پنل.
+                وضعیت اتصال، قابلیت‌ها و {{ target_labels.plural|default:"اینباندها" }}ی local مرتبط با این پنل.
             </p>
         </div>
         <div class="tw-flex tw-flex-col tw-gap-2">
@@ -119,16 +119,16 @@
             <div class="tw-model-row"><span>خانواده</span><strong>{{ report.family }}</strong></div>
             <div class="tw-model-row"><span>نسخه</span><strong>{{ report.detected_version|default:"-" }}</strong></div>
             <div class="tw-model-row"><span>پروفایل</span><strong>{{ report.capability_profile }}</strong></div>
-            <div class="tw-model-row"><span>اینباند local</span><strong>{{ inbound_count }}</strong></div>
+            <div class="tw-model-row"><span>{{ target_labels.singular|default:"اینباند" }} local</span><strong>{{ inbound_count }}</strong></div>
         </div>
     </div>
 </section>
 
 <section class="tw-section">
     <div class="tw-section-heading tw-mb-4">
-        <h2>اینباندهای اخیر</h2>
+        <h2>{{ target_labels.recent|default:"اینباندهای اخیر" }}</h2>
         <a href="{{ actions.inbounds }}" class="tw-mini-button">مشاهده همه</a>
     </div>
-    {% include "admin/store/panel_center/inbound_table.html" with inbound_rows=inbound_rows %}
+    {% include "admin/store/panel_center/inbound_table.html" with inbound_rows=inbound_rows target_labels=target_labels %}
 </section>
 {% endblock %}

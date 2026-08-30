@@ -14,12 +14,20 @@ from .models import (
     Inbound,
     Operator,
     Order,
+    Panel,
     Plan,
     PlanDeliveryConfig,
     PlanDeliverySource,
     PlanInboundRoute,
     Store,
     VPNClient,
+)
+from .external_subscription_sources import (
+    ALL_DYNAMIC_PROTOCOLS,
+    ALL_DYNAMIC_SECURITY,
+    ALL_DYNAMIC_TRANSPORTS,
+    default_external_subscription_filter_policy,
+    normalize_external_subscription_filter_policy,
 )
 from .order_services import format_custom_volume_label, sales_mode_requires_operator
 from .plan_delivery_services import (
@@ -256,6 +264,10 @@ def inbound_label(inbound):
     if not inbound:
         return "-"
     panel_name = safe_label(getattr(getattr(inbound, "panel", None), "name", ""))
+    panel = getattr(inbound, "panel", None)
+    if str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD:
+        group_name = safe_label(inbound.remark or f"Group {inbound.inbound_id}")
+        return f"{panel_name} / group #{inbound.inbound_id} / {group_name}"
     remark = safe_label(inbound.remark or f"Inbound {inbound.inbound_id}")
     node_name = safe_label(getattr(inbound, "xui_node_name", "") or getattr(inbound, "xui_node_id", ""))
     node_part = f" / node {node_name}" if node_name != "-" else ""
@@ -827,12 +839,30 @@ class CatalogPlanForm(forms.Form):
             for value, label in PlanDeliverySource.SourceType.choices
         ]
         self.source_inbound_options = [
-            {"value": str(inbound.pk), "label": inbound_label(inbound)}
+            {
+                "value": str(inbound.pk),
+                "label": inbound_label(inbound),
+                "dynamic_subscription": bool(
+                    getattr(getattr(inbound, "panel", None), "family", "") == Panel.Family.PASARGUARD
+                ),
+            }
             for inbound in self.source_inbound_queryset
         ]
         self.source_pool_options = [
             {"value": str(pool.pk), "label": safe_label(pool.title)}
             for pool in self.source_pool_queryset
+        ]
+        self.dynamic_protocol_options = [
+            {"value": value, "label": str(value).upper() if value not in {"ss"} else "SS"}
+            for value in ALL_DYNAMIC_PROTOCOLS
+        ]
+        self.dynamic_security_options = [
+            {"value": value, "label": value}
+            for value in ALL_DYNAMIC_SECURITY
+        ]
+        self.dynamic_transport_options = [
+            {"value": value, "label": value}
+            for value in ALL_DYNAMIC_TRANSPORTS
         ]
         self.source_rows = self._template_source_rows(initial_source_rows)
 
@@ -849,8 +879,39 @@ class CatalogPlanForm(forms.Form):
             return default
         return str(self.data.get(name)).lower() in {"1", "true", "on", "yes"}
 
+    def _posted_list(self, name):
+        if not self.is_bound:
+            return []
+        if hasattr(self.data, "getlist"):
+            return [str(item or "").strip() for item in self.data.getlist(name) if str(item or "").strip()]
+        value = self.data.get(name)
+        if isinstance(value, (list, tuple)):
+            return [str(item or "").strip() for item in value if str(item or "").strip()]
+        return [str(value or "").strip()] if str(value or "").strip() else []
+
     def _source_field_name(self, index, field):
         return f"{self.source_prefix}-{index}-{field}"
+
+    def _posted_dynamic_policy(self, index):
+        return normalize_external_subscription_filter_policy(
+            {
+                "protocols": self._posted_list(self._source_field_name(index, "dynamic_protocols")),
+                "security": self._posted_list(self._source_field_name(index, "dynamic_security")),
+                "transport": self._posted_list(self._source_field_name(index, "dynamic_transport")),
+                "require_reality_pbk": self._posted_bool(
+                    self._source_field_name(index, "dynamic_require_reality_pbk"),
+                    True,
+                ),
+                "remark_include": self.data.get(self._source_field_name(index, "dynamic_remark_include")) or "",
+                "remark_exclude": self.data.get(self._source_field_name(index, "dynamic_remark_exclude")) or "",
+                "max_configs": self.data.get(self._source_field_name(index, "dynamic_max_configs")) or "",
+                "deduplicate_exact": self._posted_bool(
+                    self._source_field_name(index, "dynamic_deduplicate_exact"),
+                    True,
+                ),
+                "refresh_interval_hours": self.data.get(self._source_field_name(index, "dynamic_refresh_interval_hours")) or "",
+            }
+        )
 
     def _raw_posted_source_row(self, index):
         return {
@@ -865,6 +926,7 @@ class CatalogPlanForm(forms.Form):
             "required": self._posted_bool(self._source_field_name(index, "required")),
             "is_fallback": self._posted_bool(self._source_field_name(index, "is_fallback")),
             "DELETE": self._posted_bool(self._source_field_name(index, "DELETE")),
+            "dynamic_policy": self._posted_dynamic_policy(index),
         }
 
     def _posted_source_rows(self):
@@ -893,13 +955,16 @@ class CatalogPlanForm(forms.Form):
                     "inbound_id": source.inbound_id or "",
                     "inventory_pool_id": source.inventory_pool_id or "",
                     "label": source.label,
-                    "quantity": source.quantity,
-                    "priority": source.priority,
-                    "required": source.required,
-                    "is_fallback": source.is_fallback,
-                }
-            )
-        return rows
+                        "quantity": source.quantity,
+                        "priority": source.priority,
+                        "required": source.required,
+                        "is_fallback": source.is_fallback,
+                        "dynamic_policy": normalize_external_subscription_filter_policy(
+                            (source.metadata or {}).get("dynamic_subscription_policy") or {}
+                        ),
+                    }
+                )
+            return rows
 
     def _blank_source_row(self, index=0):
         return {
@@ -913,13 +978,21 @@ class CatalogPlanForm(forms.Form):
             "priority": (index + 1) * 10,
             "required": True,
             "is_fallback": False,
+            "dynamic_policy": default_external_subscription_filter_policy(),
         }
 
     def _template_source_rows(self, rows):
         display_rows = rows or [self._blank_source_row(0)]
         decorated = []
+        inbound_by_id = {str(inbound.pk): inbound for inbound in self.source_inbound_queryset}
         for index, row in enumerate(display_rows):
             source_type = str(row.get("source_type") or PlanDeliverySource.SourceType.PANEL_INBOUND)
+            dynamic_policy = normalize_external_subscription_filter_policy(row.get("dynamic_policy") or {})
+            inbound = inbound_by_id.get(str(row.get("inbound_id") or ""))
+            supports_dynamic_subscription = bool(
+                inbound
+                and getattr(getattr(inbound, "panel", None), "family", "") == Panel.Family.PASARGUARD
+            )
             decorated.append(
                 {
                     **row,
@@ -932,6 +1005,8 @@ class CatalogPlanForm(forms.Form):
                     "priority": self._as_int(row.get("priority"), (index + 1) * 10),
                     "required": bool(row.get("required")),
                     "is_fallback": bool(row.get("is_fallback")),
+                    "dynamic_policy": dynamic_policy,
+                    "supports_dynamic_subscription": supports_dynamic_subscription,
                 }
             )
         return decorated
@@ -968,6 +1043,7 @@ class CatalogPlanForm(forms.Form):
                 self._source_error(row, _("اولویت نمی‌تواند منفی باشد."))
                 continue
 
+            metadata = {"created_from": "canonical_plan_delivery_editor"}
             source = {
                 "id": self._as_int(row.get("id"), None),
                 "source_type": source_type,
@@ -976,7 +1052,7 @@ class CatalogPlanForm(forms.Form):
                 "priority": priority,
                 "required": bool(row.get("required")),
                 "is_fallback": bool(row.get("is_fallback")),
-                "metadata": {"created_from": "canonical_plan_delivery_editor"},
+                "metadata": metadata,
             }
             if source_type == PlanDeliverySource.SourceType.PANEL_INBOUND:
                 inbound = inbound_by_id.get(str(row.get("inbound_id") or ""))
@@ -987,6 +1063,8 @@ class CatalogPlanForm(forms.Form):
                 if errors:
                     self._source_error(row, " ".join(str(error) for error in errors + warnings))
                     continue
+                if getattr(getattr(inbound, "panel", None), "family", "") == Panel.Family.PASARGUARD:
+                    metadata["dynamic_subscription_policy"] = normalize_external_subscription_filter_policy(row.get("dynamic_policy") or {})
                 source.update({"panel": inbound.panel, "inbound": inbound, "inventory_pool": None})
             else:
                 pool = pool_by_id.get(str(row.get("inventory_pool_id") or ""))

@@ -7,6 +7,7 @@ from django.urls import reverse
 from .admin_catalog import catalog_url
 from .bot_proxy import sanitized_telegram_proxy_url, telegram_proxy_url
 from .models import BotConfiguration, Inbound, Panel, Plan, PlanInboundRoute, RevenueOfferLog, Store
+from .setup_readiness import canonical_delivery_configured_count, plan_has_ready_canonical_delivery
 
 
 SAFE_PLACEHOLDER_CARD_NUMBER = "0000000000000000"
@@ -238,6 +239,8 @@ def plan_has_operator_route(plan, operator, store):
 def missing_route_labels(store):
     missing = []
     for plan in active_sellable_plans(store).prefetch_related("operators"):
+        if plan_has_ready_canonical_delivery(plan, store):
+            continue
         has_general = plan_has_general_route(plan, store)
         if has_general:
             continue
@@ -258,7 +261,7 @@ def invalid_route_count(store):
     return sum(
         1
         for route in route_queryset_for_store(store).filter(is_active=True)
-        if not route_is_usable(route, store)
+        if not plan_has_ready_canonical_delivery(route.plan, store) and not route_is_usable(route, store)
     )
 
 
@@ -479,6 +482,7 @@ def setup_routes_card(store):
     missing = missing_route_labels(store) if store else []
     invalid_count = invalid_route_count(store) if store else 0
     active_route_count = route_queryset_for_store(store).filter(is_active=True).count() if store else 0
+    canonical_count = canonical_delivery_configured_count(store) if store else 0
     if missing:
         status = "error"
         details = [
@@ -490,15 +494,17 @@ def setup_routes_card(store):
         details = [f"{invalid_count} route فعال به inbound/panel نامعتبر یا unavailable اشاره می‌کند."]
     elif active_sellable_plans(store).exists():
         status = "done"
-        details = ["همه پلن‌های sellable route معتبر دارند."]
+        details = ["همه پلن‌های sellable مسیر تحویل معتبر دارند."]
     else:
         status = "warning"
         details = ["برای نصب minimal، نبودن route تا قبل از ساخت پلن قابل انتظار است."]
     details.append(f"Route فعال: {active_route_count}")
+    if canonical_count:
+        details.append(f"تحویل canonical آماده: {canonical_count}")
     return card(
         "plan_routes",
-        "Route پلن‌ها",
-        "اتصال پلن‌های فروش به inboundهای قابل فروش.",
+        "تحویل پلن‌ها",
+        "اتصال پلن‌های فروش به route legacy یا تنظیم canonical.",
         status,
         details,
         with_wizard_action(

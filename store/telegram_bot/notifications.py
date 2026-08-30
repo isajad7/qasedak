@@ -357,15 +357,6 @@ def send_new_order_to_config(
                     admin_user_id,
                     exc,
                 )
-                if send_to_config_func(
-                    config,
-                    text=text,
-                    event_type=BotEventLog.EventType.NEW_ORDER,
-                    order=order,
-                    reply_markup=reply_markup,
-                    chat_id=admin_user_id,
-                ):
-                    sent += 1
                 continue
 
             message_id = extract_sent_message_id_func(payload)

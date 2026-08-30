@@ -549,14 +549,14 @@ class Command(BaseCommand):
         panels = list(Panel.objects.filter(is_active=True).order_by("pk"))
         if not panels:
             if self.global_setup_incomplete():
-                self.warning("Panel", "Setup incomplete: no active X-UI panel exists yet.")
+                self.warning("Panel", "Setup incomplete: no active operational panel exists yet.")
             elif self.has_any_active_sellable_plan():
-                self.error("Panel", "No active X-UI panel exists for active sellable plans.")
+                self.error("Panel", "No active operational panel exists for active sellable plans.")
             else:
-                self.warning("Panel", "No active X-UI panel exists.")
+                self.warning("Panel", "No active operational panel exists.")
             return
 
-        self.ok("Panel", f"{len(panels)} active X-UI panel(s) found.")
+        self.ok("Panel", f"{len(panels)} active operational panel(s) found.")
         for panel in panels:
             subject = f"Panel #{panel.pk} {panel.name}"
             if not (panel.name or "").strip():
@@ -565,8 +565,15 @@ class Command(BaseCommand):
                 self.ok(subject, "Panel URL is configured.")
             else:
                 self.error(subject, "Panel URL is missing or invalid.")
-            if (panel.username or "").strip() and (panel.password or "").strip():
-                self.ok(subject, "Panel username/password are configured.")
+            credentials_ok = bool((panel.password or "").strip()) and (
+                str(getattr(panel, "family", "") or "") == Panel.Family.PASARGUARD
+                or bool((panel.username or "").strip())
+            )
+            if credentials_ok:
+                if str(getattr(panel, "family", "") or "") == Panel.Family.PASARGUARD:
+                    self.ok(subject, "Panel API key is configured.")
+                else:
+                    self.ok(subject, "Panel username/password are configured.")
                 report = get_safe_panel_adapter(panel).get_capability_report()
                 profile_label = report.capability_profile or "unknown"
                 version_label = report.detected_version or "-"
@@ -614,6 +621,8 @@ class Command(BaseCommand):
                     Panel.CapabilityProfile.MODERN_MULTI_NODE,
                 }:
                     self.ok(subject, "Modern 3X-UI paid flow uses deferred create-enabled provisioning.")
+                elif profile_label == Panel.CapabilityProfile.PASARGUARD_GROUPS:
+                    self.ok(subject, "PasarGuard paid flow uses create-enabled native raw delivery.")
                 else:
                     self.ok(subject, f"Panel family={report.family} compatibility profile={profile_label} version={version_label}.")
                 if self.live_xui and report.family == "xui" and report.supported:
@@ -621,7 +630,7 @@ class Command(BaseCommand):
                 elif self.live_xui and report.family != "xui":
                     self.warning(subject, f"Live X-UI check skipped for panel family={report.family}.")
             else:
-                self.error(subject, "Panel username/password are missing.")
+                self.error(subject, "Panel credentials are missing.")
 
     def check_live_panel(self, panel, subject):
         try:
@@ -787,6 +796,8 @@ class Command(BaseCommand):
             return False, "Route panel is inactive."
         if getattr(panel, "capability_profile", "") == Panel.CapabilityProfile.UNKNOWN_SAFE:
             return False, "Route panel X-UI compatibility is unknown_safe."
+        if str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD:
+            return True, "Route panel uses PasarGuard native raw delivery."
         if getattr(inbound, "xui_source", "") == Inbound.XUISource.SYNCHRONIZED_NODE and not (inbound.xui_node_id or "").strip():
             return False, "Route inbound is synchronized from a node but has no node identity."
         if getattr(panel, "capability_profile", "") in {

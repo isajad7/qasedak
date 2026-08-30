@@ -21,7 +21,7 @@
         {% csrf_token %}
         {{ form.non_field_errors }}
         {% for field in form %}
-            <div class="tw-filter-field">
+            <div class="tw-filter-field" data-panel-field="{{ field.name }}">
                 <span>{{ field.label }}</span>
                 {{ field }}
                 {% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}
@@ -34,4 +34,32 @@
         </div>
     </form>
 </section>
+<script>
+    (function () {
+        const family = document.querySelector('[name="{{ form.family.html_name }}"]');
+        const usernameRow = document.querySelector('[data-panel-field="username"]');
+        const passwordRow = document.querySelector('[data-panel-field="password"]');
+        if (!family || !usernameRow || !passwordRow) {
+            return;
+        }
+        const passwordLabel = passwordRow.querySelector('span');
+        const passwordHelp = passwordRow.querySelector('small');
+        const defaultPasswordLabel = passwordLabel ? passwordLabel.textContent : '';
+        const defaultPasswordHelp = passwordHelp ? passwordHelp.textContent : '';
+        function updateFields() {
+            const isPasarGuard = family.value === 'pasarguard';
+            usernameRow.style.display = isPasarGuard ? 'none' : '';
+            if (passwordLabel) {
+                passwordLabel.textContent = isPasarGuard ? 'کلید API' : defaultPasswordLabel;
+            }
+            if (passwordHelp) {
+                passwordHelp.textContent = isPasarGuard
+                    ? 'کلید API پنل PasarGuard با هدر X-Api-Key ارسال می‌شود. مقدار فعلی نمایش داده نمی‌شود.'
+                    : defaultPasswordHelp;
+            }
+        }
+        family.addEventListener('change', updateFields);
+        updateFields();
+    })();
+</script>
 {% endblock %}

@@ -14,14 +14,16 @@ from .models import ConfigLink, CupItem, Inbound, Order, SubscriptionCup, VPNCli
 
 
 logger = logging.getLogger(__name__)
+UNSET = object()
 
 SUPPORTED_PROTOCOLS = {
     ConfigLink.Protocol.VLESS,
     ConfigLink.Protocol.VMESS,
     ConfigLink.Protocol.TROJAN,
     ConfigLink.Protocol.SS,
+    ConfigLink.Protocol.HYSTERIA2,
+    ConfigLink.Protocol.WIREGUARD,
     "ssr",
-    "hysteria2",
     "hy2",
     "tuic",
 }
@@ -106,7 +108,7 @@ def parse_config_link(raw_link):
     remark = ""
 
     try:
-        if protocol in {ConfigLink.Protocol.VLESS, ConfigLink.Protocol.TROJAN, "hysteria2", "hy2", "tuic"}:
+        if protocol in {ConfigLink.Protocol.VLESS, ConfigLink.Protocol.TROJAN, ConfigLink.Protocol.HYSTERIA2, "hy2", "tuic", ConfigLink.Protocol.WIREGUARD}:
             host, port, remark = _parse_standard_url(raw_link)
         elif protocol == ConfigLink.Protocol.SS:
             host, port, remark = _parse_shadowsocks(raw_link)
@@ -133,7 +135,7 @@ def parse_config_link(raw_link):
     )
 
 
-def apply_config_link_parse(config_link, raw_link, *, source_type=None, source_panel=None, source_inbound=None, vpn_client=None, metadata=None):
+def apply_config_link_parse(config_link, raw_link, *, source_type=None, source_panel=None, source_inbound=None, vpn_client=None, external_feed=UNSET, metadata=None):
     parsed = parse_config_link(raw_link)
     config_link.raw_link = parsed.raw_link
     config_link.normalized_link = parsed.normalized_link
@@ -147,13 +149,15 @@ def apply_config_link_parse(config_link, raw_link, *, source_type=None, source_p
     config_link.source_panel = source_panel
     config_link.source_inbound = source_inbound
     config_link.vpn_client = vpn_client
+    if external_feed is not UNSET:
+        config_link.external_feed = external_feed
     config_link.is_active = True
     if metadata is not None:
         config_link.metadata = metadata
     return config_link
 
 
-def create_config_link_from_raw(raw_link, *, source_type=ConfigLink.SourceType.UNKNOWN, source_panel=None, source_inbound=None, vpn_client=None, metadata=None):
+def create_config_link_from_raw(raw_link, *, source_type=ConfigLink.SourceType.UNKNOWN, source_panel=None, source_inbound=None, vpn_client=None, external_feed=None, metadata=None):
     config_link = ConfigLink()
     apply_config_link_parse(
         config_link,
@@ -162,6 +166,7 @@ def create_config_link_from_raw(raw_link, *, source_type=ConfigLink.SourceType.U
         source_panel=source_panel,
         source_inbound=source_inbound,
         vpn_client=vpn_client,
+        external_feed=external_feed,
         metadata=metadata or {},
     )
     config_link.save()

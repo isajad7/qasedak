@@ -18,12 +18,15 @@
   .qadmin-conflict-warning { border: 1px solid #fecaca; background: #fff1f2; color: #991b1b; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
   .qadmin-source-list { display: grid; gap: 12px; margin-top: 12px; }
   .qadmin-source-row { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #fff; }
-  .qadmin-source-row-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-  .qadmin-source-row-title { font-weight: 700; color: #111827; }
-  .qadmin-source-actions { display: flex; justify-content: flex-start; margin-top: 12px; }
-  .qadmin-inline-checks { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding-top: 28px; }
-  .qadmin-inline-checks label { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
-</style>
+	  .qadmin-source-row-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+	  .qadmin-source-row-title { font-weight: 700; color: #111827; }
+	  .qadmin-source-actions { display: flex; justify-content: flex-start; margin-top: 12px; }
+	  .qadmin-inline-checks { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding-top: 28px; }
+	  .qadmin-inline-checks label { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
+	  .qadmin-dynamic-policy { border-top: 1px solid #e5e7eb; margin-top: 12px; padding-top: 12px; }
+	  .qadmin-policy-checks { display: flex; flex-wrap: wrap; gap: 10px; }
+	  .qadmin-policy-checks label { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
+	</style>
 {% endblock %}
 
 {% block breadcrumbs %}
@@ -160,12 +163,12 @@
                             <div class="qadmin-form-field" data-panel-source-field>
                                 <label for="id_source_{{ row.index }}_inbound">Inbound پنل</label>
                                 <select id="id_source_{{ row.index }}_inbound" name="source-{{ row.index }}-inbound" class="plan-delivery-field">
-                                    <option value="">انتخاب کنید</option>
-                                    {% for option in form.source_inbound_options %}
-                                        <option value="{{ option.value }}" {% if option.value == row.inbound_id %}selected{% endif %}>{{ option.label }}</option>
-                                    {% endfor %}
-                                </select>
-                            </div>
+	                                    <option value="">انتخاب کنید</option>
+	                                    {% for option in form.source_inbound_options %}
+	                                        <option value="{{ option.value }}" data-dynamic-subscription="{% if option.dynamic_subscription %}1{% else %}0{% endif %}" {% if option.value == row.inbound_id %}selected{% endif %}>{{ option.label }}</option>
+	                                    {% endfor %}
+	                                </select>
+	                            </div>
                             <div class="qadmin-form-field" data-inventory-source-field>
                                 <label for="id_source_{{ row.index }}_inventory_pool">مخزن کانفیگ</label>
                                 <select id="id_source_{{ row.index }}_inventory_pool" name="source-{{ row.index }}-inventory_pool" class="plan-delivery-field">
@@ -188,12 +191,61 @@
                                 <input id="id_source_{{ row.index }}_priority" type="number" name="source-{{ row.index }}-priority" value="{{ row.priority }}" min="0" class="plan-delivery-field">
                             </div>
                             <div class="qadmin-inline-checks">
-                                <label><input type="checkbox" name="source-{{ row.index }}-required" {% if row.required %}checked{% endif %}> الزامی</label>
-                                <label><input type="checkbox" name="source-{{ row.index }}-is_fallback" {% if row.is_fallback %}checked{% endif %}> fallback</label>
-                            </div>
-                        </div>
-                    </article>
-                {% endfor %}
+	                                <label><input type="checkbox" name="source-{{ row.index }}-required" {% if row.required %}checked{% endif %}> الزامی</label>
+	                                <label><input type="checkbox" name="source-{{ row.index }}-is_fallback" {% if row.is_fallback %}checked{% endif %}> fallback</label>
+	                            </div>
+	                            <div class="qadmin-dynamic-policy" data-dynamic-policy {% if not row.supports_dynamic_subscription %}hidden{% endif %}>
+	                                <h3>Dynamic Subscription Policy</h3>
+	                                <div class="qadmin-form-field">
+	                                    <label>Protocol</label>
+	                                    <div class="qadmin-policy-checks">
+	                                        {% for option in form.dynamic_protocol_options %}
+	                                            <label><input type="checkbox" name="source-{{ row.index }}-dynamic_protocols" value="{{ option.value }}" {% if option.value in row.dynamic_policy.protocols %}checked{% endif %}> {{ option.label }}</label>
+	                                        {% endfor %}
+	                                    </div>
+	                                </div>
+	                                <div class="qadmin-form-field">
+	                                    <label>Security</label>
+	                                    <div class="qadmin-policy-checks">
+	                                        {% for option in form.dynamic_security_options %}
+	                                            <label><input type="checkbox" name="source-{{ row.index }}-dynamic_security" value="{{ option.value }}" {% if option.value in row.dynamic_policy.security %}checked{% endif %}> {{ option.label }}</label>
+	                                        {% endfor %}
+	                                    </div>
+	                                </div>
+	                                <div class="qadmin-form-field">
+	                                    <label>Transport</label>
+	                                    <div class="qadmin-policy-checks">
+	                                        {% for option in form.dynamic_transport_options %}
+	                                            <label><input type="checkbox" name="source-{{ row.index }}-dynamic_transport" value="{{ option.value }}" {% if option.value in row.dynamic_policy.transport %}checked{% endif %}> {{ option.label }}</label>
+	                                        {% endfor %}
+	                                    </div>
+	                                </div>
+	                                <div class="qadmin-form-grid">
+	                                    <div class="qadmin-form-field">
+	                                        <label for="id_source_{{ row.index }}_dynamic_remark_include">Remark include</label>
+	                                        <input id="id_source_{{ row.index }}_dynamic_remark_include" type="text" name="source-{{ row.index }}-dynamic_remark_include" value="{{ row.dynamic_policy.remark_include }}" maxlength="200" class="plan-delivery-field">
+	                                    </div>
+	                                    <div class="qadmin-form-field">
+	                                        <label for="id_source_{{ row.index }}_dynamic_remark_exclude">Remark exclude</label>
+	                                        <input id="id_source_{{ row.index }}_dynamic_remark_exclude" type="text" name="source-{{ row.index }}-dynamic_remark_exclude" value="{{ row.dynamic_policy.remark_exclude }}" maxlength="200" class="plan-delivery-field">
+	                                    </div>
+	                                    <div class="qadmin-form-field">
+	                                        <label for="id_source_{{ row.index }}_dynamic_max_configs">Max configs</label>
+	                                        <input id="id_source_{{ row.index }}_dynamic_max_configs" type="number" name="source-{{ row.index }}-dynamic_max_configs" value="{% if row.dynamic_policy.max_configs %}{{ row.dynamic_policy.max_configs }}{% endif %}" min="1" class="plan-delivery-field">
+	                                    </div>
+	                                    <div class="qadmin-form-field">
+	                                        <label for="id_source_{{ row.index }}_dynamic_refresh_interval_hours">Refresh hours</label>
+	                                        <input id="id_source_{{ row.index }}_dynamic_refresh_interval_hours" type="number" name="source-{{ row.index }}-dynamic_refresh_interval_hours" value="{{ row.dynamic_policy.refresh_interval_hours }}" min="1" class="plan-delivery-field">
+	                                    </div>
+	                                </div>
+	                                <div class="qadmin-inline-checks">
+	                                    <label><input type="checkbox" name="source-{{ row.index }}-dynamic_require_reality_pbk" {% if row.dynamic_policy.require_reality_pbk %}checked{% endif %}> require Reality pbk</label>
+	                                    <label><input type="checkbox" name="source-{{ row.index }}-dynamic_deduplicate_exact" {% if row.dynamic_policy.deduplicate_exact %}checked{% endif %}> exact dedup</label>
+	                                </div>
+	                            </div>
+	                        </div>
+	                    </article>
+	                {% endfor %}
             </div>
             <div class="qadmin-source-actions">
                 <button type="button" class="qadmin-action qadmin-action-secondary" id="add-source">افزودن منبع</button>
@@ -243,12 +295,12 @@
             <div class="qadmin-form-field" data-panel-source-field>
                 <label>Inbound پنل</label>
                 <select name="source-__prefix__-inbound" class="plan-delivery-field">
-                    <option value="">انتخاب کنید</option>
-                    {% for option in form.source_inbound_options %}
-                        <option value="{{ option.value }}">{{ option.label }}</option>
-                    {% endfor %}
-                </select>
-            </div>
+	                    <option value="">انتخاب کنید</option>
+	                    {% for option in form.source_inbound_options %}
+	                        <option value="{{ option.value }}" data-dynamic-subscription="{% if option.dynamic_subscription %}1{% else %}0{% endif %}">{{ option.label }}</option>
+	                    {% endfor %}
+	                </select>
+	            </div>
             <div class="qadmin-form-field" data-inventory-source-field>
                 <label>مخزن کانفیگ</label>
                 <select name="source-__prefix__-inventory_pool" class="plan-delivery-field">
@@ -271,12 +323,61 @@
                 <input type="number" name="source-__prefix__-priority" value="100" min="0" class="plan-delivery-field">
             </div>
             <div class="qadmin-inline-checks">
-                <label><input type="checkbox" name="source-__prefix__-required" checked> الزامی</label>
-                <label><input type="checkbox" name="source-__prefix__-is_fallback"> fallback</label>
-            </div>
-        </div>
-    </article>
-</template>
+	                <label><input type="checkbox" name="source-__prefix__-required" checked> الزامی</label>
+	                <label><input type="checkbox" name="source-__prefix__-is_fallback"> fallback</label>
+	            </div>
+	            <div class="qadmin-dynamic-policy" data-dynamic-policy hidden>
+	                <h3>Dynamic Subscription Policy</h3>
+	                <div class="qadmin-form-field">
+	                    <label>Protocol</label>
+	                    <div class="qadmin-policy-checks">
+	                        {% for option in form.dynamic_protocol_options %}
+	                            <label><input type="checkbox" name="source-__prefix__-dynamic_protocols" value="{{ option.value }}" checked> {{ option.label }}</label>
+	                        {% endfor %}
+	                    </div>
+	                </div>
+	                <div class="qadmin-form-field">
+	                    <label>Security</label>
+	                    <div class="qadmin-policy-checks">
+	                        {% for option in form.dynamic_security_options %}
+	                            <label><input type="checkbox" name="source-__prefix__-dynamic_security" value="{{ option.value }}" checked> {{ option.label }}</label>
+	                        {% endfor %}
+	                    </div>
+	                </div>
+	                <div class="qadmin-form-field">
+	                    <label>Transport</label>
+	                    <div class="qadmin-policy-checks">
+	                        {% for option in form.dynamic_transport_options %}
+	                            <label><input type="checkbox" name="source-__prefix__-dynamic_transport" value="{{ option.value }}" checked> {{ option.label }}</label>
+	                        {% endfor %}
+	                    </div>
+	                </div>
+	                <div class="qadmin-form-grid">
+	                    <div class="qadmin-form-field">
+	                        <label>Remark include</label>
+	                        <input type="text" name="source-__prefix__-dynamic_remark_include" value="" maxlength="200" class="plan-delivery-field">
+	                    </div>
+	                    <div class="qadmin-form-field">
+	                        <label>Remark exclude</label>
+	                        <input type="text" name="source-__prefix__-dynamic_remark_exclude" value="" maxlength="200" class="plan-delivery-field">
+	                    </div>
+	                    <div class="qadmin-form-field">
+	                        <label>Max configs</label>
+	                        <input type="number" name="source-__prefix__-dynamic_max_configs" value="" min="1" class="plan-delivery-field">
+	                    </div>
+	                    <div class="qadmin-form-field">
+	                        <label>Refresh hours</label>
+	                        <input type="number" name="source-__prefix__-dynamic_refresh_interval_hours" value="12" min="1" class="plan-delivery-field">
+	                    </div>
+	                </div>
+	                <div class="qadmin-inline-checks">
+	                    <label><input type="checkbox" name="source-__prefix__-dynamic_require_reality_pbk" checked> require Reality pbk</label>
+	                    <label><input type="checkbox" name="source-__prefix__-dynamic_deduplicate_exact" checked> exact dedup</label>
+	                </div>
+	            </div>
+	        </div>
+	    </article>
+	</template>
 
 <script>
   (function () {
@@ -299,16 +400,22 @@
       });
     }
 
-    function updateSourceRow(row) {
-      var type = row.querySelector("[data-source-type]");
-      var isInventory = type && type.value === "INVENTORY_POOL";
-      row.querySelectorAll("[data-panel-source-field]").forEach(function (field) {
-        field.hidden = isInventory;
-      });
-      row.querySelectorAll("[data-inventory-source-field]").forEach(function (field) {
-        field.hidden = !isInventory;
-      });
-    }
+	    function updateSourceRow(row) {
+	      var type = row.querySelector("[data-source-type]");
+	      var isInventory = type && type.value === "INVENTORY_POOL";
+	      var inboundSelect = row.querySelector("[data-panel-source-field] select");
+	      var selectedInbound = inboundSelect && inboundSelect.selectedOptions && inboundSelect.selectedOptions[0];
+	      var supportsDynamic = !isInventory && selectedInbound && selectedInbound.dataset.dynamicSubscription === "1";
+	      row.querySelectorAll("[data-panel-source-field]").forEach(function (field) {
+	        field.hidden = isInventory;
+	      });
+	      row.querySelectorAll("[data-inventory-source-field]").forEach(function (field) {
+	        field.hidden = !isInventory;
+	      });
+	      row.querySelectorAll("[data-dynamic-policy]").forEach(function (field) {
+	        field.hidden = !supportsDynamic;
+	      });
+	    }
 
     function refreshRows() {
       document.querySelectorAll("[data-source-row]").forEach(updateSourceRow);
@@ -319,11 +426,11 @@
     });
 
     if (list) {
-      list.addEventListener("change", function (event) {
-        if (event.target.matches("[data-source-type]")) {
-          updateSourceRow(event.target.closest("[data-source-row]"));
-        }
-      });
+	      list.addEventListener("change", function (event) {
+	        if (event.target.matches("[data-source-type]") || event.target.closest("[data-panel-source-field]")) {
+	          updateSourceRow(event.target.closest("[data-source-row]"));
+	        }
+	      });
       list.addEventListener("click", function (event) {
         var button = event.target.closest("[data-remove-source]");
         if (!button) {

@@ -13,6 +13,10 @@ SENSITIVE_KEYS = {
     "cookies",
     "session",
     "authorization",
+    "api_key",
+    "apikey",
+    "x-api-key",
+    "x_api_key",
     "proxy_url",
     "sub_id",
     "subid",
@@ -59,14 +63,22 @@ def sanitize_capability_metadata(value):
 
 class CapabilityFlag:
     LOGIN = "login"
+    API_KEY_AUTH = "api_key_auth"
     READ_INBOUNDS = "read_inbounds"
     READ_NODES = "read_nodes"
     WRITE_CLIENTS = "write_clients"
+    UPDATE_CLIENTS = "update_clients"
+    DISABLE_CLIENTS = "disable_clients"
+    RESET_USAGE = "reset_usage"
     MULTI_INBOUND_CLIENTS = "multi_inbound_clients"
+    MULTI_GROUP_USERS = "multi_group_users"
     PRECREATE_DISABLED_CLIENTS = "precreate_disabled_clients"
     PRECISE_CLIENT_SCOPE = "precise_client_scope"
     SUBSCRIPTION_LINKS = "subscription_links"
     DIRECT_LINKS = "direct_links"
+    NATIVE_RAW_CONFIGS = "native_raw_configs"
+    USAGE_INFO = "usage_info"
+    REALITY_NATIVE_DELIVERY = "reality_native_delivery"
     CSRF_LOGIN = "csrf_login"
     CSRF_WRITE = "csrf_write"
 
@@ -128,12 +140,36 @@ class PanelCapabilityReport:
         return self.profile.supports(CapabilityFlag.WRITE_CLIENTS)
 
     @property
+    def supports_update_client(self):
+        return self.profile.supports(CapabilityFlag.UPDATE_CLIENTS)
+
+    @property
+    def supports_disable_client(self):
+        return self.profile.supports(CapabilityFlag.DISABLE_CLIENTS)
+
+    @property
+    def supports_reset_usage(self):
+        return self.profile.supports(CapabilityFlag.RESET_USAGE)
+
+    @property
     def supports_multi_inbound_create(self):
         return self.profile.supports(CapabilityFlag.MULTI_INBOUND_CLIENTS)
 
     @property
+    def supports_multi_group_users(self):
+        return self.profile.supports(CapabilityFlag.MULTI_GROUP_USERS)
+
+    @property
     def supports_subscription(self):
         return self.profile.supports(CapabilityFlag.SUBSCRIPTION_LINKS)
+
+    @property
+    def supports_native_raw_configs(self):
+        return self.profile.supports(CapabilityFlag.NATIVE_RAW_CONFIGS)
+
+    @property
+    def uses_api_key_auth(self):
+        return self.profile.supports(CapabilityFlag.API_KEY_AUTH)
 
     @property
     def requires_csrf_for_login(self):
@@ -153,8 +189,14 @@ class PanelCapabilityReport:
             "supports_read_inbounds": self.supports_read_inbounds,
             "supports_create_client": self.supports_create_client,
             "supports_delete_client": self.supports_delete_client,
+            "supports_update_client": self.supports_update_client,
+            "supports_disable_client": self.supports_disable_client,
+            "supports_reset_usage": self.supports_reset_usage,
             "supports_multi_inbound_create": self.supports_multi_inbound_create,
+            "supports_multi_group_users": self.supports_multi_group_users,
             "supports_subscription": self.supports_subscription,
+            "supports_native_raw_configs": self.supports_native_raw_configs,
+            "uses_api_key_auth": self.uses_api_key_auth,
             "requires_csrf_for_login": self.requires_csrf_for_login,
             "requires_csrf_for_write": self.requires_csrf_for_write,
             "supported_protocols": list(self.supported_protocols),

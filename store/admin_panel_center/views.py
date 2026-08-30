@@ -18,6 +18,7 @@ from store.admin_panel_center.services import (
     safe_capability_report,
     structured_errors_for_capability_report,
     sync_panel_inbounds,
+    target_labels_for_panel,
 )
 from store.models import Panel
 from store.panel_health_services import check_all_panels_health, check_panel_health
@@ -68,21 +69,26 @@ def panel_center_form(request, panel_id=None):
         form = PanelCenterForm(request.POST, instance=panel)
         if form.is_valid():
             saved = form.save()
-            if saved.family == Panel.Family.XUI and saved.is_active:
+            if saved.family in {Panel.Family.XUI, Panel.Family.PASARGUARD} and saved.is_active:
                 result = sync_panel_inbounds(saved, create_missing=True, available_for_new_orders=True, active_only=True)
                 if result.ok:
                     created = int(result.details.get("created") or 0)
                     updated = int(result.details.get("updated") or 0)
-                    messages.success(request, f"پنل ذخیره شد و اینباندها همگام شدند. جدید: {created}، به‌روزرسانی: {updated}.")
+                    labels = target_labels_for_panel(saved)
+                    messages.success(request, f"پنل ذخیره شد و {labels['plural']} همگام شدند. جدید: {created}، به‌روزرسانی: {updated}.")
                     request.session["panel_center_last_result"] = _panel_result_payload(result)
                 else:
-                    messages.warning(request, f"پنل ذخیره شد، اما دریافت اینباندها ناموفق بود: {result.message}")
+                    labels = target_labels_for_panel(saved)
+                    messages.warning(request, f"پنل ذخیره شد، اما دریافت {labels['plural']} ناموفق بود: {result.message}")
                     request.session["panel_center_last_result"] = _panel_result_payload(result)
             else:
                 messages.success(request, "پنل ذخیره شد.")
             return redirect("admin_store_panel_center_detail", saved.pk)
     else:
-        form = PanelCenterForm(instance=panel)
+        initial = {}
+        if not panel and request.GET.get("family") == Panel.Family.PASARGUARD:
+            initial["family"] = Panel.Family.PASARGUARD
+        form = PanelCenterForm(instance=panel, initial=initial)
 
     context = {
         **_base_context(request, "ویرایش پنل" if panel else "افزودن پنل"),
@@ -98,6 +104,7 @@ def panel_center_detail(request, panel_id):
     panel = get_object_or_404(get_panel_queryset(), pk=panel_id)
     adapter, report, report_dict = safe_capability_report(panel)
     rows = inbound_rows(panel)
+    target_labels = target_labels_for_panel(panel)
     last_result = request.session.pop("panel_center_last_result", None)
     context = {
         **_base_context(request, "جزئیات پنل"),
@@ -111,6 +118,7 @@ def panel_center_detail(request, panel_id):
         "alert_detail": panel_health_alert_detail(panel),
         "inbound_rows": rows[:8],
         "inbound_count": len(rows),
+        "target_labels": target_labels,
         "last_result": last_result,
     }
     return TemplateResponse(request, "admin/store/panel_center/panel_detail.html", context)
@@ -136,10 +144,11 @@ def panel_center_inbounds(request, panel_id):
     _require_panel_permission(request)
     panel = get_object_or_404(get_panel_queryset(), pk=panel_id)
     context = {
-        **_base_context(request, "کاوشگر اینباندها"),
+        **_base_context(request, target_labels_for_panel(panel)["explorer"]),
         "panel": panel,
         "actions": panel_action_urls(panel),
         "inbound_rows": inbound_rows(panel),
+        "target_labels": target_labels_for_panel(panel),
     }
     return TemplateResponse(request, "admin/store/panel_center/inbound_explorer.html", context)
 

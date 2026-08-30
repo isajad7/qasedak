@@ -39,6 +39,7 @@ STRATEGY_RENEW_EXISTING_CLIENT = "renew_existing_client"
 MODERN_PROFILES = {
     Panel.CapabilityProfile.MODERN_SINGLE_NODE,
     Panel.CapabilityProfile.MODERN_MULTI_NODE,
+    Panel.CapabilityProfile.PASARGUARD_GROUPS,
 }
 
 
@@ -206,7 +207,8 @@ def resolve_frozen_order_inbounds(order):
     if len(panel_ids) > 1:
         raise XUIError("frozen_multi_provisioning_scope_cross_panel")
     panel = inbounds[0].panel
-    if panel_profile(panel) != Panel.CapabilityProfile.MODERN_MULTI_NODE:
+    is_pasarguard = str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD
+    if not is_pasarguard and panel_profile(panel) != Panel.CapabilityProfile.MODERN_MULTI_NODE:
         raise XUIError("frozen_multi_provisioning_requires_modern_multi_node")
     return inbounds
 
@@ -494,6 +496,170 @@ def _upsert_local_client(order, inbound, client_result):
     return vpn_client, created
 
 
+def _activate_pasarguard_enabled_order_locked(order, *, inbounds, inbound, panel, actor=None, strategy=STRATEGY_DEFERRED_CREATE_ENABLED):
+    from . import order_actions as order_actions_module
+    from .panels import get_safe_panel_adapter
+    from .panels.xui.adapter import XUIProvisioningRequest
+
+    inbounds = list(inbounds or [inbound])
+    if not inbounds:
+        return ProvisioningResult(False, "سفارش route دقیق PasarGuard ندارد.", safe_error="pasarguard_group_required")
+    multi_bundle = len(inbounds) > 1
+    identity = multi_inbound_order_identity(order, inbounds) if multi_bundle else order_identity(order, inbound)
+    metadata = freeze_order_provisioning_metadata(order, inbound, strategy=strategy)
+    metadata["pasarguard_native_delivery"] = True
+    if multi_bundle:
+        metadata["multi_inbound_bundle"] = True
+        metadata["provisioning_scopes"] = [provisioning_scope(bundle_inbound) for bundle_inbound in inbounds]
+        metadata["bundle_inbound_pks"] = [bundle_inbound.pk for bundle_inbound in inbounds]
+        metadata["bundle_inbound_ids"] = [bundle_inbound.inbound_id for bundle_inbound in inbounds]
+    order.inbound = inbound
+    order.metadata = metadata
+    order.is_paid = True
+    order.verification_status = Order.VerificationStatus.VERIFIED
+    order.status = Order.Status.CONFIRMED
+    _mark_provisioning_state(
+        order,
+        Order.ProvisioningStatus.PROVISIONING,
+        idempotency_key=identity["idempotency_key"],
+        increment=True,
+    )
+    order.save(
+        update_fields=[
+            "is_paid",
+            "verification_status",
+            "status",
+            "inbound",
+            "metadata",
+            "provisioning_status",
+            "provisioning_attempts",
+            "provisioning_idempotency_key",
+            "updated_at",
+        ]
+    )
+
+    adapter = get_safe_panel_adapter(panel)
+    clients = []
+    all_raw_links = []
+    try:
+        for index in range(1, order_actions_module.required_client_count(order) + 1):
+            indexed_identity = (
+                identity
+                if index == 1
+                else multi_inbound_order_identity(order, inbounds, index=index)
+                if multi_bundle
+                else order_identity(order, inbound, index=index)
+            )
+            request = XUIProvisioningRequest(
+                email_prefix=indexed_identity["email_prefix"],
+                total_gb=order.plan.volume_gb,
+                duration_days=order.plan.duration_days,
+                inbound=inbound if not multi_bundle else None,
+                inbounds=inbounds,
+                limit_ip=order.plan.device_limit,
+                client_uuid=indexed_identity["uuid"],
+                sub_id=indexed_identity["sub_id"],
+                email=indexed_identity["email"],
+            )
+            client_result = adapter.create_enabled_multi_inbound_client(request)
+            raw_links = [str(link).strip() for link in (client_result.get("raw_links") or []) if str(link).strip()]
+            if not raw_links and str(client_result.get("direct_link") or "").strip():
+                raw_links = [str(client_result.get("direct_link")).strip()]
+            if not raw_links:
+                raise XUIError("pasarguard_raw_empty")
+            client_result = {
+                **client_result,
+                "direct_link": raw_links[0],
+                "raw": {
+                    **(client_result.get("raw") or {}),
+                    "pasarguard_group_pks": [item.pk for item in inbounds],
+                    "pasarguard_group_ids": [item.inbound_id for item in inbounds],
+                    "native_raw_delivery": True,
+                },
+            }
+            vpn_client, created = _upsert_local_client(order, inbound, client_result)
+            if created and multi_bundle:
+                Inbound.objects.filter(pk__in=[item.pk for item in inbounds[1:]]).update(
+                    current_users=F("current_users") + 1,
+                    updated_at=timezone.now(),
+                )
+            clients.append(vpn_client)
+            all_raw_links.extend(raw_links)
+    except Exception as exc:
+        safe_error = _safe_error(exc, panel=panel)
+        logger.warning(
+            "PasarGuard provisioning failed order_id=%s tracking=%s panel=%s inbound=%s error=%s",
+            order.pk,
+            order.order_tracking_code,
+            panel.pk,
+            inbound.pk,
+            safe_error,
+        )
+        _finish_failed_modern_order(
+            order,
+            safe_error=safe_error,
+            idempotency_key=identity["idempotency_key"],
+            strategy=strategy,
+        )
+        return ProvisioningResult(
+            False,
+            "ساخت و تایید کاربر روی PasarGuard ناموفق بود. سفارش تکمیل نشد و قابل retry است.",
+            order_status=order.status,
+            provisioning_status=order.provisioning_status,
+            safe_error=safe_error,
+        )
+
+    primary_client = clients[0] if clients else None
+    order.uuid = primary_client.uuid if primary_client else order.uuid
+    order.sub_link = primary_client.sub_link if primary_client else order.sub_link
+    order.direct_link = all_raw_links[0] if all_raw_links else order.direct_link
+    order.username = order.username or (primary_client.username if primary_client else "")
+    order.mark_payment_verified(user=actor)
+    metadata = dict(order.metadata or {})
+    metadata["panel_provisioning_deferred"] = False
+    metadata["panel_provisioning_reason"] = ""
+    metadata["panel_provisioned_at"] = timezone.now().isoformat()
+    metadata["pasarguard_native_delivery"] = True
+    if all_raw_links:
+        metadata["direct_delivery_links"] = all_raw_links
+    order.metadata = metadata
+    _mark_provisioning_state(
+        order,
+        Order.ProvisioningStatus.PROVISIONED,
+        error="",
+        provisioned_at=timezone.now(),
+        idempotency_key=identity["idempotency_key"],
+    )
+    order.save(
+        update_fields=[
+            "uuid",
+            "sub_link",
+            "direct_link",
+            "username",
+            "inbound",
+            "is_paid",
+            "verification_status",
+            "verified_by",
+            "verified_at",
+            "status",
+            "metadata",
+            "provisioning_status",
+            "last_provisioning_error",
+            "provisioned_at",
+            "provisioning_idempotency_key",
+            "updated_at",
+        ]
+    )
+    return ProvisioningResult(
+        True,
+        "سفارش تایید شد و کاربر PasarGuard فعال شد.",
+        already_provisioned=False,
+        order_status=order.status,
+        provisioning_status=order.provisioning_status,
+        client=primary_client,
+    )
+
+
 def _activate_modern_enabled_order_locked(order, *, actor=None, strategy=STRATEGY_DEFERRED_CREATE_ENABLED):
     from . import order_actions as order_actions_module
 
@@ -514,6 +680,15 @@ def _activate_modern_enabled_order_locked(order, *, actor=None, strategy=STRATEG
     if not inbound or not inbound.panel_id:
         return ProvisioningResult(False, "سفارش route دقیق panel/inbound ندارد.", safe_error="missing_scope")
     panel = inbound.panel
+    if str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD:
+        return _activate_pasarguard_enabled_order_locked(
+            order,
+            inbounds=inbounds,
+            inbound=inbound,
+            panel=panel,
+            actor=actor,
+            strategy=strategy,
+        )
     multi_bundle = bool((order.metadata or {}).get("multi_inbound_bundle") and len(inbounds) > 1)
     identity = multi_inbound_order_identity(order, inbounds) if multi_bundle else order_identity(order, inbound)
     metadata = freeze_order_provisioning_metadata(order, inbound, strategy=strategy)

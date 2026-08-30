@@ -61,6 +61,7 @@ from .models import (
     CustomerAnalyticsReport,
     CustomerReward,
     DiscountCode,
+    ExternalSubscriptionFeed,
     FreeTrialRequest,
     Inbound,
     LegacyWizWizImportJob,
@@ -177,6 +178,11 @@ from .plan_fulfillment_services import (
     plan_fulfillment_status_for_plan,
 )
 from .subscription_cups import build_subscription_cup_url, mask_config_link_for_display, mask_subscription_url, parse_config_link
+from .external_subscription_sources import (
+    refresh_external_subscription_feed,
+    safe_external_subscription_text,
+    source_owned_cup_item_count,
+)
 from .panel_health_services import (
     PanelHealthAlertService,
     get_panel_health_alert_recipient_summary,
@@ -5338,6 +5344,169 @@ def _apply_parsed_link_fields(obj, *, form, change):
     return parsed
 
 
+@admin.register(ExternalSubscriptionFeed)
+class ExternalSubscriptionFeedAdmin(ImportExportModelAdmin):
+    list_display = (
+        "id",
+        "provider",
+        "panel_label",
+        "source_label",
+        "masked_remote_identity",
+        "status",
+        "last_success_at",
+        "next_refresh_at",
+        "last_seen_upstream_count",
+        "last_filtered_count",
+        "source_owned_item_count",
+        "consecutive_failures",
+    )
+    list_filter = ("provider", "status", "active", "panel", "created_at", "next_refresh_at")
+    search_fields = ("remote_identity_ref", "panel__name", "cup__title", "cup__order__order_tracking_code")
+    autocomplete_fields = ("cup", "delivery_source", "panel", "vpn_client")
+    actions = ("refresh_now", "preview", "enable_auto_refresh", "disable_auto_refresh")
+    readonly_fields = (
+        "provider",
+        "cup",
+        "delivery_source",
+        "panel",
+        "vpn_client",
+        "masked_remote_identity",
+        "subscription_url_saved",
+        "status",
+        "last_attempt_at",
+        "last_success_at",
+        "next_refresh_at",
+        "consecutive_failures",
+        "last_good_config_count",
+        "last_seen_upstream_count",
+        "last_filtered_count",
+        "last_error_code",
+        "source_owned_item_count",
+        "policy_safe_summary",
+        "metadata_safe_summary",
+        "created_at",
+        "updated_at",
+    )
+    fieldsets = (
+        (
+            _("Dynamic Subscription Source"),
+            {
+                "fields": (
+                    "provider",
+                    "active",
+                    "status",
+                    "cup",
+                    "delivery_source",
+                    "panel",
+                    "vpn_client",
+                    "masked_remote_identity",
+                    "subscription_url_saved",
+                )
+            },
+        ),
+        (
+            _("Refresh state"),
+            {
+                "fields": (
+                    "last_attempt_at",
+                    "last_success_at",
+                    "next_refresh_at",
+                    "consecutive_failures",
+                    "last_good_config_count",
+                    "last_seen_upstream_count",
+                    "last_filtered_count",
+                    "last_error_code",
+                    "source_owned_item_count",
+                )
+            },
+        ),
+        (
+            _("Policy and metadata"),
+            {
+                "classes": ("collapse",),
+                "fields": ("policy_safe_summary", "metadata_safe_summary", "created_at", "updated_at"),
+            },
+        ),
+    )
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("cup", "delivery_source", "panel", "vpn_client")
+
+    def has_add_permission(self, request):
+        return False
+
+    @admin.display(description=_("Panel"), ordering="panel__name")
+    def panel_label(self, obj):
+        return obj.panel or "-"
+
+    @admin.display(description=_("Source"))
+    def source_label(self, obj):
+        return obj.delivery_source or "-"
+
+    @admin.display(description=_("Remote identity"))
+    def masked_remote_identity(self, obj):
+        value = str(getattr(obj, "remote_identity_ref", "") or "")
+        if not value:
+            return "-"
+        if len(value) <= 8:
+            return f"{value[:2]}***"
+        return f"{value[:4]}...{value[-4:]}"
+
+    @admin.display(description=_("Upstream URL saved"), boolean=True)
+    def subscription_url_saved(self, obj):
+        return bool(getattr(obj, "protected_subscription_url", "") or "")
+
+    @admin.display(description=_("Current Cup items"))
+    def source_owned_item_count(self, obj):
+        return source_owned_cup_item_count(obj)
+
+    @admin.display(description=_("Policy"))
+    def policy_safe_summary(self, obj):
+        return _admin_metadata_safe_summary(getattr(obj, "resolved_filter_policy", {}) or {})
+
+    @admin.display(description=_("Metadata"))
+    def metadata_safe_summary(self, obj):
+        return _admin_metadata_safe_summary(getattr(obj, "metadata", {}) or {})
+
+    @admin.action(description=_("Refresh selected dynamic feeds now"))
+    def refresh_now(self, request, queryset):
+        refreshed = 0
+        failed = 0
+        for feed in queryset:
+            summary = refresh_external_subscription_feed(feed.pk, force=True)
+            refreshed += int(summary.ok)
+            failed += int(not summary.ok)
+        messages.info(request, _("Dynamic feed refresh finished: ok=%(ok)s failed=%(failed)s") % {"ok": refreshed, "failed": failed})
+
+    @admin.action(description=_("Preview selected dynamic feeds"))
+    def preview(self, request, queryset):
+        previews = []
+        for feed in queryset[:10]:
+            summary = refresh_external_subscription_feed(feed.pk, force=True, dry_run=True)
+            previews.append(
+                "feed=%(feed)s input=%(input)s invalid=%(invalid)s selected=%(selected)s status=%(status)s error=%(error)s"
+                % {
+                    "feed": feed.pk,
+                    "input": summary.upstream_count,
+                    "invalid": summary.invalid_count,
+                    "selected": summary.selected_count,
+                    "status": safe_external_subscription_text(summary.status),
+                    "error": safe_external_subscription_text(summary.error_code or "-"),
+                }
+            )
+        messages.info(request, " | ".join(previews) if previews else _("No feeds selected."))
+
+    @admin.action(description=_("Enable auto refresh"))
+    def enable_auto_refresh(self, request, queryset):
+        count = queryset.update(active=True, status=ExternalSubscriptionFeed.Status.HEALTHY, updated_at=timezone.now())
+        messages.success(request, _("Auto refresh enabled for %(count)s feeds.") % {"count": count})
+
+    @admin.action(description=_("Disable auto refresh"))
+    def disable_auto_refresh(self, request, queryset):
+        count = queryset.update(active=False, status=ExternalSubscriptionFeed.Status.DISABLED, updated_at=timezone.now())
+        messages.success(request, _("Auto refresh disabled for %(count)s feeds.") % {"count": count})
+
+
 @admin.register(ConfigInventoryPool)
 class ConfigInventoryPoolAdmin(ImportExportModelAdmin):
     change_list_template = "admin/store/config_inventory/pool_change_list.html"
@@ -6033,11 +6202,12 @@ class ConfigLinkAdmin(ImportExportModelAdmin):
         "source_type",
         "source_panel",
         "source_inbound",
+        "external_feed",
         "vpn_client",
         "is_active",
         "created_at",
     )
-    list_filter = ("protocol", "source_type", "is_active", "source_panel", "source_inbound", "created_at")
+    list_filter = ("protocol", "source_type", "is_active", "source_panel", "source_inbound", "external_feed", "created_at")
     search_fields = (
         "raw_link",
         "normalized_hash",
@@ -6047,7 +6217,7 @@ class ConfigLinkAdmin(ImportExportModelAdmin):
         "vpn_client__xui_email",
         "vpn_client__order__order_tracking_code",
     )
-    autocomplete_fields = ("source_panel", "source_inbound", "vpn_client")
+    autocomplete_fields = ("source_panel", "source_inbound", "vpn_client", "external_feed")
     readonly_fields = (
         "normalized_link_masked",
         "normalized_hash",
@@ -6084,6 +6254,7 @@ class ConfigLinkAdmin(ImportExportModelAdmin):
                     "source_type",
                     "source_panel",
                     "source_inbound",
+                    "external_feed",
                     "vpn_client",
                 )
             },
@@ -6117,6 +6288,7 @@ class ConfigLinkAdmin(ImportExportModelAdmin):
                 "remark": _("نام/Remark"),
                 "is_active": _("فعال"),
                 "metadata": _("Metadata"),
+                "external_feed": _("Dynamic source"),
             },
         )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .errors import PanelFamilyUnsupportedError
 from .marzban.adapter import MarzbanAdapter
+from .pasarguard.adapter import PasarGuardPanelAdapter
 from .unsupported import UnsupportedPanelAdapter
 from .xui.adapter import XUIPanelAdapter
 
@@ -10,6 +11,7 @@ FAMILY_XUI = "xui"
 FAMILY_3X_UI = "3x-ui"
 FAMILY_SANAEI = "sanaei"
 FAMILY_MARZBAN = "marzban"
+FAMILY_PASARGUARD = "pasarguard"
 FAMILY_UNKNOWN = "unknown"
 
 XUI_FAMILIES = {FAMILY_XUI, FAMILY_3X_UI, FAMILY_SANAEI, ""}
@@ -35,6 +37,8 @@ class PanelAdapterFactory:
             return XUIPanelAdapter(panel)
         if family == FAMILY_MARZBAN:
             return MarzbanAdapter(panel)
+        if family == FAMILY_PASARGUARD:
+            return PasarGuardPanelAdapter(panel)
         if family == FAMILY_UNKNOWN:
             return UnsupportedPanelAdapter(panel, family=family, reason="Panel family is unknown; remote operations are disabled.")
         return UnsupportedPanelAdapter(

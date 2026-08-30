@@ -193,6 +193,17 @@ def _next_position(cup):
 
 def _direct_link_entries(remote_result, inbounds):
     inbounds = list(inbounds or [])
+    raw_links = [str(link).strip() for link in (remote_result or {}).get("raw_links") or [] if str(link).strip()]
+    if raw_links:
+        fallback_inbound = inbounds[0] if inbounds else None
+        return [
+            {
+                "inbound": inbounds[index] if index < len(inbounds) else fallback_inbound,
+                "remote_result": remote_result or {},
+                "direct_link": raw_link,
+            }
+            for index, raw_link in enumerate(raw_links)
+        ]
     if len(inbounds) <= 1:
         return [
             {
@@ -227,6 +238,9 @@ def _panel_rule_inbounds(rule):
 
 
 def _inbound_missing_reality_pbk(inbound):
+    panel = getattr(inbound, "panel", None)
+    if str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD:
+        return False
     return inbound.security == Inbound.Security.REALITY and not str(inbound.pbk or "").strip()
 
 

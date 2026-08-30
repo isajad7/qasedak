@@ -5,6 +5,8 @@ import re
 
 SECRET_KEYWORDS = {
     "authorization",
+    "api_key",
+    "apikey",
     "cookie",
     "cookies",
     "csrf",
@@ -21,10 +23,13 @@ SECRET_KEYWORDS = {
     "subscription_link",
     "token",
     "uuid",
+    "x-api-key",
+    "x_api_key",
 }
 
 CONFIG_LINK_RE = re.compile(r"\b(?:vless|vmess|trojan|ss|ssr)://[^\s<>()]+", re.IGNORECASE)
 SUBSCRIPTION_LINK_RE = re.compile(r"https?://[^\s<>()]+/sub/[A-Za-z0-9_-]+", re.IGNORECASE)
+TOKENIZED_URL_RE = re.compile(r"https?://[^\s<>()]+/[A-Za-z0-9_-]{16,}(?:/[^\s<>()]*)?", re.IGNORECASE)
 CREDENTIAL_URL_RE = re.compile(r"https?://[^/\s:@]+:[^@\s/]+@[^\s<>()]+", re.IGNORECASE)
 UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
@@ -66,6 +71,7 @@ def sanitize_error_value(value, *, panel=None):
     text = TRACEBACK_RE.sub("<traceback-redacted>", text)
     text = CONFIG_LINK_RE.sub("<config-link-redacted>", text)
     text = SUBSCRIPTION_LINK_RE.sub("<subscription-link-redacted>", text)
+    text = TOKENIZED_URL_RE.sub("<url-token-redacted>", text)
     text = UUID_RE.sub("<uuid-redacted>", text)
     text = re.sub(r"(?i)(password|token|csrf[-_ ]?token|session|cookie)[\"':=\s]+[^\"'\s,}]+", r"\1=<redacted>", text)
     text = re.sub(r"(?i)\b(subId|sub_id|sub)[\"':=\s/]+[A-Za-z0-9_-]{8,}\b", r"\1=<sub-id-redacted>", text)

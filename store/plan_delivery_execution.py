@@ -9,13 +9,34 @@ from django.db import transaction
 from django.utils import timezone
 
 from .config_inventory_services import ConfigInventoryError, allocate_assets_from_pool
+from .db_locking import select_for_update_self
+from .external_subscription_sources import (
+    preview_external_subscription_filter,
+    register_external_subscription_feed_snapshot,
+)
 from .models import ConfigAllocation, ConfigLink, CupItem, Inbound, Order, Panel, PlanDeliveryConfig, PlanDeliverySource, SubscriptionCup
+from .panels import get_safe_panel_adapter
+from .panels.xui.adapter import XUIProvisioningRequest
 from .plan_delivery_services import MODE_DIRECT_LINKS, MODE_GLOBAL_FALLBACK, MODE_SUBSCRIPTION, active_delivery_sources
 from .subscription_cups import build_subscription_cup_url, create_config_link_from_raw
 from .xui_api import XUIError
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DynamicFeedInitialSnapshot:
+    provider: str
+    panel: Panel
+    delivery_source: PlanDeliverySource
+    vpn_client: object | None
+    protected_subscription_url: str
+    remote_identity_ref: str
+    raw_links: list[str] = field(default_factory=list)
+    config_links: list[ConfigLink] = field(default_factory=list)
+    filter_result: object | None = None
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -29,6 +50,7 @@ class SourceExecutionResult:
     config_links: list[ConfigLink] = field(default_factory=list)
     vpn_clients: list = field(default_factory=list)
     raw_links: list[str] = field(default_factory=list)
+    dynamic_feeds: list[DynamicFeedInitialSnapshot] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -147,6 +169,10 @@ def _validate_panel_inbound(inbound):
         raise XUIError("reality_missing_public_key")
 
 
+def _is_pasarguard_panel(panel):
+    return str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD
+
+
 def _panel_config_link(raw_link, *, source, vpn_client=None, metadata=None):
     return create_config_link_from_raw(
         raw_link,
@@ -209,6 +235,131 @@ def _execute_single_panel_source(order, source):
                 result.raw_links.append(direct_link)
                 result.config_links.append(config_link)
             result.vpn_clients.append(vpn_client)
+        result.output_count = len(result.raw_links)
+        result.ok = bool(result.output_count)
+    except Exception as exc:
+        result.errors.append(_source_safe_error(exc, panel=panel))
+    return result
+
+
+def _execute_pasarguard_panel_group(order, sources, *, dynamic_subscription=False):
+    from . import provisioning_services
+    from django.db.models import F
+
+    sources = list(sources)
+    first_source = sources[0]
+    inbounds = [source.inbound for source in sources if source.inbound_id]
+    panel = first_source.panel or (inbounds[0].panel if inbounds else None)
+    result = SourceExecutionResult(
+        source_ids=[source.pk for source in sources],
+        source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+        required=any(source.required for source in sources),
+        is_fallback=any(source.is_fallback for source in sources),
+    )
+    try:
+        if not panel or not _is_pasarguard_panel(panel):
+            raise XUIError("pasarguard_panel_required")
+        if not inbounds:
+            raise XUIError("pasarguard_group_required")
+        if any(inbound.panel_id != panel.pk for inbound in inbounds):
+            raise XUIError("pasarguard_cross_panel_group_selection")
+        adapter = get_safe_panel_adapter(panel)
+        report = adapter.get_capability_report()
+        if not report.supports_create_client:
+            raise XUIError("pasarguard_panel_does_not_support_create")
+        quantity = max(max(int(source.quantity or 1) for source in sources), 1)
+        for index in range(1, quantity + 1):
+            identity = provisioning_services.multi_inbound_order_identity(order, inbounds, index=index)
+            request = XUIProvisioningRequest(
+                email_prefix=identity["email_prefix"],
+                total_gb=order.plan.volume_gb,
+                duration_days=order.plan.duration_days,
+                inbound=inbounds[0] if len(inbounds) == 1 else None,
+                inbounds=inbounds,
+                limit_ip=order.plan.device_limit,
+                client_uuid=identity["uuid"],
+                sub_id=identity["sub_id"],
+                email=identity["email"],
+            )
+            client_result = adapter.create_enabled_multi_inbound_client(request)
+            raw_links = [str(link).strip() for link in (client_result.get("raw_links") or []) if str(link).strip()]
+            if not raw_links and str(client_result.get("direct_link") or "").strip():
+                raw_links = [str(client_result.get("direct_link")).strip()]
+            if not raw_links:
+                raise XUIError("pasarguard_raw_subscription_empty")
+            client_result = {
+                **client_result,
+                "direct_link": raw_links[0],
+                "raw": {
+                    **(client_result.get("raw") or {}),
+                    "pasarguard_group_pks": [inbound.pk for inbound in inbounds],
+                    "pasarguard_group_ids": [inbound.inbound_id for inbound in inbounds],
+                    "native_raw_delivery": True,
+                },
+            }
+            vpn_client, created = provisioning_services._upsert_local_client(order, inbounds[0], client_result)
+            if created and len(inbounds) > 1:
+                Inbound.objects.filter(pk__in=[inbound.pk for inbound in inbounds[1:]]).update(
+                    current_users=F("current_users") + 1,
+                    updated_at=timezone.now(),
+                )
+            result.vpn_clients.append(vpn_client)
+            selected_raw_links = raw_links
+            filter_result = None
+            if dynamic_subscription:
+                filter_result = preview_external_subscription_filter(raw_links, source=first_source)
+                if filter_result.selected_count <= 0:
+                    raise XUIError("pasarguard_dynamic_subscription_filter_empty")
+                selected_raw_links = [item.raw_link for item in filter_result.selected_configs]
+                result.warnings.extend(
+                    [
+                        f"pasarguard_dynamic_subscription_invalid_configs={filter_result.invalid_count}"
+                    ]
+                    if filter_result.invalid_count
+                    else []
+                )
+
+            created_config_links = []
+            for raw_index, raw_link in enumerate(selected_raw_links, start=1):
+                config_link = _panel_config_link(
+                    raw_link,
+                    source=first_source,
+                    vpn_client=vpn_client,
+                    metadata={
+                        "source": "plan_delivery_v2_pasarguard_raw",
+                        "plan_delivery_source_ids": [source.pk for source in sources],
+                        "panel_id": panel.pk,
+                        "pasarguard_group_pks": [inbound.pk for inbound in inbounds],
+                        "pasarguard_group_ids": [inbound.inbound_id for inbound in inbounds],
+                        "raw_index": raw_index,
+                        "native_raw_delivery": True,
+                        "external_subscription_initial": bool(dynamic_subscription),
+                    },
+                )
+                result.raw_links.append(raw_link)
+                result.config_links.append(config_link)
+                created_config_links.append(config_link)
+
+            if dynamic_subscription:
+                result.dynamic_feeds.append(
+                    DynamicFeedInitialSnapshot(
+                        provider=Panel.Family.PASARGUARD,
+                        panel=panel,
+                        delivery_source=first_source,
+                        vpn_client=vpn_client,
+                        protected_subscription_url=str(client_result.get("sub_link") or ""),
+                        remote_identity_ref=str(client_result.get("email") or ""),
+                        raw_links=raw_links,
+                        config_links=created_config_links,
+                        filter_result=filter_result,
+                        metadata={
+                            "source": "plan_delivery_v2_pasarguard_dynamic_subscription",
+                            "plan_delivery_source_ids": [source.pk for source in sources],
+                            "pasarguard_group_pks": [inbound.pk for inbound in inbounds],
+                            "pasarguard_group_ids": [inbound.inbound_id for inbound in inbounds],
+                        },
+                    )
+                )
         result.output_count = len(result.raw_links)
         result.ok = bool(result.output_count)
     except Exception as exc:
@@ -302,7 +453,7 @@ def _execute_multi_panel_group(order, sources):
     return result
 
 
-def _execute_panel_sources(order, sources):
+def _execute_panel_sources(order, sources, *, dynamic_subscription=False):
     grouped = {}
     for source in sources:
         grouped.setdefault(_panel_group_key(source), []).append(source)
@@ -310,7 +461,9 @@ def _execute_panel_sources(order, sources):
     for group_sources in grouped.values():
         group_sources = sorted(group_sources, key=lambda source: (source.priority, source.pk))
         panel = group_sources[0].panel or group_sources[0].inbound.panel
-        if len(group_sources) > 1 and panel.capability_profile == Panel.CapabilityProfile.MODERN_MULTI_NODE:
+        if _is_pasarguard_panel(panel):
+            results.append(_execute_pasarguard_panel_group(order, group_sources, dynamic_subscription=dynamic_subscription))
+        elif len(group_sources) > 1 and panel.capability_profile == Panel.CapabilityProfile.MODERN_MULTI_NODE:
             results.append(_execute_multi_panel_group(order, group_sources))
         else:
             for source in group_sources:
@@ -354,7 +507,7 @@ def _execute_inventory_source(order, source):
     return result
 
 
-def _execute_sources(order, sources):
+def _execute_sources(order, sources, *, dynamic_subscription=False):
     panel_sources = [
         source
         for source in sources
@@ -367,7 +520,7 @@ def _execute_sources(order, sources):
     ]
     results = []
     if panel_sources:
-        results.extend(_execute_panel_sources(order, panel_sources))
+        results.extend(_execute_panel_sources(order, panel_sources, dynamic_subscription=dynamic_subscription))
     for source in inventory_sources:
         results.append(_execute_inventory_source(order, source))
     return results
@@ -425,13 +578,15 @@ def _successful_outputs(results):
     raw_links = []
     config_links = []
     vpn_clients = []
+    dynamic_feeds = []
     for result in results:
         if not result.ok:
             continue
         raw_links.extend(result.raw_links)
         config_links.extend(result.config_links)
         vpn_clients.extend(result.vpn_clients)
-    return raw_links, config_links, vpn_clients
+        dynamic_feeds.extend(result.dynamic_feeds)
+    return raw_links, config_links, vpn_clients, dynamic_feeds
 
 
 def _should_use_fallback(results):
@@ -442,13 +597,30 @@ def _should_use_fallback(results):
     return any(result.errors for result in results)
 
 
-def _finish_success_order(order, delivery_config, *, mode, raw_links, config_links, vpn_clients, source_results, actor=None):
+def _finish_success_order(order, delivery_config, *, mode, raw_links, config_links, vpn_clients, source_results, dynamic_feeds=None, actor=None):
     from . import provisioning_services
 
     primary_client = vpn_clients[0] if vpn_clients else None
     subscription_cups = []
+    registered_feeds = []
     if mode == MODE_SUBSCRIPTION:
         cup = _ensure_subscription_cup(order, delivery_config, config_links)
+        for snapshot in dynamic_feeds or []:
+            registered_feeds.append(
+                register_external_subscription_feed_snapshot(
+                    cup=cup,
+                    source=snapshot.delivery_source,
+                    panel=snapshot.panel,
+                    vpn_client=snapshot.vpn_client,
+                    protected_subscription_url=snapshot.protected_subscription_url,
+                    remote_identity_ref=snapshot.remote_identity_ref,
+                    raw_links=snapshot.raw_links,
+                    config_links=snapshot.config_links,
+                    filter_result=snapshot.filter_result,
+                    provider=snapshot.provider,
+                    metadata=snapshot.metadata,
+                )
+            )
         subscription_cups = [cup]
         order.sub_link = build_subscription_cup_url(cup, store=order.store)
         order.direct_link = ""
@@ -473,6 +645,7 @@ def _finish_success_order(order, delivery_config, *, mode, raw_links, config_lin
         "config_link_count": len(config_links),
         "vpn_client_count": len(vpn_clients),
         "subscription_cup_ids": [cup.pk for cup in subscription_cups],
+        "external_feed_ids": [feed.pk for feed in registered_feeds] if mode == MODE_SUBSCRIPTION else [],
     }
     if mode == MODE_DIRECT_LINKS:
         metadata["direct_delivery_links"] = raw_links
@@ -528,9 +701,9 @@ def execute_plan_delivery(order, delivery_config, actor=None, dry_run=False):
     idempotency_key = _stable_idempotency_key(order, delivery_config)
     with transaction.atomic():
         delivery_config = (
-            PlanDeliveryConfig.objects.select_for_update()
-            .select_related("plan", "plan__store")
-            .get(pk=delivery_config.pk)
+            select_for_update_self(
+                PlanDeliveryConfig.objects.select_related("plan", "plan__store")
+            ).get(pk=delivery_config.pk)
         )
         sources = list(active_delivery_sources(delivery_config))
         if not sources:
@@ -545,11 +718,21 @@ def execute_plan_delivery(order, delivery_config, actor=None, dry_run=False):
         _mark_order_provisioning(order, idempotency_key=idempotency_key)
         primary_sources = [source for source in sources if not source.is_fallback]
         fallback_sources = [source for source in sources if source.is_fallback]
-        source_results = _execute_sources(order, primary_sources)
+        source_results = _execute_sources(
+            order,
+            primary_sources,
+            dynamic_subscription=delivery_config.delivery_mode == MODE_SUBSCRIPTION,
+        )
         if fallback_sources and _should_use_fallback(source_results):
-            source_results.extend(_execute_sources(order, fallback_sources))
+            source_results.extend(
+                _execute_sources(
+                    order,
+                    fallback_sources,
+                    dynamic_subscription=delivery_config.delivery_mode == MODE_SUBSCRIPTION,
+                )
+            )
 
-        raw_links, config_links, vpn_clients = _successful_outputs(source_results)
+        raw_links, config_links, vpn_clients, dynamic_feeds = _successful_outputs(source_results)
         required_failures = [
             result
             for result in source_results
@@ -582,6 +765,7 @@ def execute_plan_delivery(order, delivery_config, actor=None, dry_run=False):
             config_links=config_links,
             vpn_clients=vpn_clients,
             source_results=source_results,
+            dynamic_feeds=dynamic_feeds,
             actor=actor,
         )
     return PlanDeliveryResult(

@@ -3,13 +3,13 @@
         <thead>
             <tr>
                 <th>PK</th>
-                <th>Remote ID</th>
-                <th>پروتکل</th>
-                <th>نام</th>
-                <th>Host / Port</th>
-                <th>Node</th>
+                <th>{{ target_labels.remote_id|default:"Remote ID" }}</th>
+                <th>{{ target_labels.protocol|default:"پروتکل" }}</th>
+                <th>{{ target_labels.name|default:"نام" }}</th>
+                <th>{{ target_labels.host_port|default:"Host / Port" }}</th>
+                <th>{{ target_labels.node|default:"Node" }}</th>
                 <th>فروش</th>
-                <th>لینک</th>
+                <th>{{ target_labels.link|default:"لینک" }}</th>
                 <th>آخرین sync</th>
                 <th>هشدار</th>
             </tr>
@@ -18,16 +18,16 @@
             {% for row in inbound_rows %}
                 <tr>
                     <td>{{ row.inbound.pk }}</td>
-                    <td>{{ row.inbound.inbound_id }}</td>
-                    <td>{{ row.inbound.protocol }}</td>
+                    <td>{{ row.remote_id_label }}</td>
+                    <td>{{ row.protocol_label }}</td>
                     <td>
                         <strong>{{ row.inbound.remark|default:"-" }}</strong>
                     </td>
                     <td>
-                        <code class="tw-safe-command">{{ row.inbound.server_ip }}:{{ row.inbound.port }}</code>
+                        <code class="tw-safe-command">{{ row.host_port_label }}</code>
                     </td>
                     <td>
-                        {{ row.inbound.xui_node_name|default:row.inbound.xui_node_id|default:"local" }}
+                        {{ row.node_label }}
                     </td>
                     <td>
                         {% if row.sellable %}
@@ -63,7 +63,7 @@
                 </tr>
             {% empty %}
                 <tr>
-                    <td colspan="10"><div class="tw-empty-state">اینباند local برای این پنل ثبت نشده است.</div></td>
+                    <td colspan="10"><div class="tw-empty-state">{{ target_labels.local_empty|default:"اینباند local برای این پنل ثبت نشده است." }}</div></td>
                 </tr>
             {% endfor %}
         </tbody>
