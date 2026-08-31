@@ -1,0 +1,95 @@
+- generic [ref=f6e2]:
+  - banner [ref=f6e3]:
+    - generic [ref=f6e5]:
+      - link "صفحه اصلی" [ref=f6e6] [cursor=pointer]:
+        - /url: /
+        - generic [ref=f6e10]:
+          - generic [ref=f6e11]: آزادنت
+          - generic [ref=f6e12]: WireBrain
+      - navigation "ناوبری اصلی" [ref=f6e13]:
+        - link "خرید" [ref=f6e14] [cursor=pointer]:
+          - /url: /
+        - link "پشتیبانی" [ref=f6e15] [cursor=pointer]:
+          - /url: /support/
+        - link "داشبورد" [ref=f6e16] [cursor=pointer]:
+          - /url: /dashboard/
+      - link "پشتیبانی" [ref=f6e18] [cursor=pointer]:
+        - /url: /support/
+  - main [ref=f6e23]:
+    - dialog [ref=f6e24]:
+      - generic [ref=f6e25]:
+        - heading "رسید ثبت شد" [level=2] [ref=f6e29]
+        - paragraph [ref=f6e30]: بعد از تایید رسیدت توسط ادمین، کانفیگت فعال میشه. اگر لینک آماده است، الان می‌تونی کپی‌اش کنی و وارد برنامه‌ات کنی و منتظر بمونی فعال شه.
+        - link "باشه" [ref=f6e31] [cursor=pointer]:
+          - /url: /order/e3c216ea-7c93-43bc-83be-00f9c9eff93e/
+    - generic [ref=f6e32]:
+      - link "بک" [ref=f6e33] [cursor=pointer]:
+        - /url: /
+      - generic [ref=f6e34]:
+        - generic [ref=f6e35]:
+          - generic [ref=f6e36]:
+            - paragraph [ref=f6e37]: سفارش
+            - heading "5 گیگ" [level=1] [ref=f6e38]
+            - paragraph [ref=f6e39]: f63084dacb2e4795a2fa7ff96937f74e
+          - generic [ref=f6e40]: Pending verification
+        - generic [ref=f6e41]:
+          - generic [ref=f6e42]:
+            - paragraph [ref=f6e43]: حجم
+            - paragraph [ref=f6e44]: 5 GB
+          - generic [ref=f6e45]:
+            - paragraph [ref=f6e46]: مدت
+            - paragraph [ref=f6e47]: 30 روز
+          - generic [ref=f6e48]:
+            - paragraph [ref=f6e49]: مبلغ
+            - paragraph [ref=f6e50]: 45,000 تومان
+      - generic [ref=f6e52]:
+        - generic [ref=f6e53]:
+          - paragraph [ref=f6e54]: اتصال به ربات تلگرام 🤖
+          - heading "پیگیری سفارش در ربات" [level=2] [ref=f6e55]
+          - paragraph [ref=f6e56]: برای پیگیری سفارش و دریافت یادآوری تمدید، حساب خود را به ربات وصل کنید.
+        - link "اتصال به ربات تلگرام" [ref=f6e58] [cursor=pointer]:
+          - /url: https://t.me/AzadlandVpnBot?start=link_bPil0QslBroUGTmxGnSOx8wJ4t-ixGkJwEsAm-opXUA
+      - generic [ref=f6e59]:
+        - generic [ref=f6e60]:
+          - heading "لینک‌ها" [level=2] [ref=f6e61]
+          - generic [ref=f6e62]: بعد از چک رسید فعال می‌شود
+        - article [ref=f6e64]:
+          - generic [ref=f6e65]:
+            - button "کپی کانفیگ" [ref=f6e66]
+            - button "کپی لینک" [ref=f6e68]
+  - contentinfo [ref=f6e70]:
+    - generic [ref=f6e71]:
+      - generic [ref=f6e72]:
+        - generic [ref=f6e73]:
+          - link "آزادنت WireBrain" [ref=f6e74] [cursor=pointer]:
+            - /url: /
+            - generic [ref=f6e79]:
+              - generic [ref=f6e80]: آزادنت
+              - generic [ref=f6e81]: WireBrain
+          - paragraph [ref=f6e82]: پلن مناسب را انتخاب کن، پرداخت را ثبت کن و بعد از تایید، لینک‌های دسترسی آماده می‌شوند.
+        - generic [ref=f6e83]:
+          - heading "دسترسی سریع" [level=2] [ref=f6e84]
+          - list [ref=f6e85]:
+            - listitem [ref=f6e86]:
+              - link "خرید و صفحه اصلی" [ref=f6e87] [cursor=pointer]:
+                - /url: /
+            - listitem [ref=f6e88]:
+              - link "پشتیبانی داخل سایت" [ref=f6e89] [cursor=pointer]:
+                - /url: /support/
+            - listitem [ref=f6e90]:
+              - link "داشبورد" [ref=f6e91] [cursor=pointer]:
+                - /url: /dashboard/
+        - generic [ref=f6e92]:
+          - heading "ارتباط با ما" [level=2] [ref=f6e93]
+          - generic [ref=f6e94]:
+            - link "چت پشتیبانی Online" [ref=f6e95] [cursor=pointer]:
+              - /url: /support/
+              - generic [ref=f6e96]: چت پشتیبانی
+              - generic [ref=f6e97]: Online
+            - link "پشتیبانی تلگرام @Azadnet_Support_01" [ref=f6e98] [cursor=pointer]:
+              - /url: https://t.me/Azadnet_Support_01
+              - generic [ref=f6e99]: پشتیبانی تلگرام
+              - generic [ref=f6e100]: "@Azadnet_Support_01"
+      - generic [ref=f6e101]:
+        - paragraph [ref=f6e102]: © 2026 آزادنت. همه حقوق محفوظ است.
+        - paragraph [ref=f6e103]: تحویل پس از تایید پرداخت انجام می‌شود.

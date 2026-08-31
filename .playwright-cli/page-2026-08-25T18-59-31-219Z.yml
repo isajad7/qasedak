@@ -1,0 +1,183 @@
+- generic [ref=f5e2]:
+  - banner [ref=f5e3]:
+    - generic [ref=f5e5]:
+      - link "صفحه اصلی" [ref=f5e6] [cursor=pointer]:
+        - /url: /
+        - generic [ref=f5e10]:
+          - generic [ref=f5e11]: آزادنت
+          - generic [ref=f5e12]: WireBrain
+      - navigation "ناوبری اصلی" [ref=f5e13]:
+        - link "خرید" [ref=f5e14] [cursor=pointer]:
+          - /url: /
+        - link "پشتیبانی" [ref=f5e15] [cursor=pointer]:
+          - /url: /support/
+        - link "داشبورد" [ref=f5e16] [cursor=pointer]:
+          - /url: /dashboard/
+      - link "پشتیبانی" [ref=f5e18] [cursor=pointer]:
+        - /url: /support/
+  - main [ref=f5e23]:
+    - generic [ref=f5e24]:
+      - generic [ref=f5e25]:
+        - generic [ref=f5e26]:
+          - generic [ref=f5e27]:
+            - generic [ref=f5e28]:
+              - paragraph [ref=f5e29]: انتخاب پلن
+              - heading "یکی رو بردار" [level=1] [ref=f5e30]
+            - generic [ref=f5e31]:
+              - generic [ref=f5e32]: پلن‌های بیشتر
+              - generic [ref=f5e33]: ››
+          - generic [ref=f5e34]:
+            - generic [ref=f5e36]:
+              - button "5 گیگ 5 GB 30 روز قابل انتخاب 45,000 تومان" [pressed] [ref=f5e37]:
+                - generic [ref=f5e38]:
+                  - generic [ref=f5e39]:
+                    - generic [ref=f5e40]: 5 گیگ
+                    - generic [ref=f5e41]: 5 GB
+                  - generic [ref=f5e42]: 30 روز
+                - generic [ref=f5e43]:
+                  - generic [ref=f5e44]: قابل انتخاب
+                  - generic [ref=f5e45]: 45,000 تومان
+              - button "10 گیگ 10 GB 30 روز قابل انتخاب 90,000 تومان" [ref=f5e46]:
+                - generic [ref=f5e47]:
+                  - generic [ref=f5e48]:
+                    - generic [ref=f5e49]: 10 گیگ
+                    - generic [ref=f5e50]: 10 GB
+                  - generic [ref=f5e51]: 30 روز
+                - generic [ref=f5e52]:
+                  - generic [ref=f5e53]: قابل انتخاب
+                  - generic [ref=f5e54]: 90,000 تومان
+              - button "20 گیگ 20 GB 30 روز قابل انتخاب 180,000 تومان" [ref=f5e55]:
+                - generic [ref=f5e56]:
+                  - generic [ref=f5e57]:
+                    - generic [ref=f5e58]: 20 گیگ
+                    - generic [ref=f5e59]: 20 GB
+                  - generic [ref=f5e60]: 30 روز
+                - generic [ref=f5e61]:
+                  - generic [ref=f5e62]: قابل انتخاب
+                  - generic [ref=f5e63]: 180,000 تومان
+              - button "30 گیگ 30 GB 30 روز قابل انتخاب 270,000 تومان" [ref=f5e64]:
+                - generic [ref=f5e65]:
+                  - generic [ref=f5e66]:
+                    - generic [ref=f5e67]: 30 گیگ
+                    - generic [ref=f5e68]: 30 GB
+                  - generic [ref=f5e69]: 30 روز
+                - generic [ref=f5e70]:
+                  - generic [ref=f5e71]: قابل انتخاب
+                  - generic [ref=f5e72]: 270,000 تومان
+              - button "50 گیگ 50 GB 30 روز قابل انتخاب 450,000 تومان" [ref=f5e73]:
+                - generic [ref=f5e74]:
+                  - generic [ref=f5e75]:
+                    - generic [ref=f5e76]: 50 گیگ
+                    - generic [ref=f5e77]: 50 GB
+                  - generic [ref=f5e78]: 30 روز
+                - generic [ref=f5e79]:
+                  - generic [ref=f5e80]: قابل انتخاب
+                  - generic [ref=f5e81]: 450,000 تومان
+              - button "75 گیگ 75 GB 30 روز قابل انتخاب 675,000 تومان" [ref=f5e82]:
+                - generic [ref=f5e83]:
+                  - generic [ref=f5e84]:
+                    - generic [ref=f5e85]: 75 گیگ
+                    - generic [ref=f5e86]: 75 GB
+                  - generic [ref=f5e87]: 30 روز
+                - generic [ref=f5e88]:
+                  - generic [ref=f5e89]: قابل انتخاب
+                  - generic [ref=f5e90]: 675,000 تومان
+              - button "100 گیگ 100 GB 30 روز قابل انتخاب 900,000 تومان" [ref=f5e91]:
+                - generic [ref=f5e92]:
+                  - generic [ref=f5e93]:
+                    - generic [ref=f5e94]: 100 گیگ
+                    - generic [ref=f5e95]: 100 GB
+                  - generic [ref=f5e96]: 30 روز
+                - generic [ref=f5e97]:
+                  - generic [ref=f5e98]: قابل انتخاب
+                  - generic [ref=f5e99]: 900,000 تومان
+              - button "حجم دلخواه 10 GB 30 روز حجم به گیگابایت 10 هر گیگ 9,000 تومان 90,000 تومان" [ref=f5e100]:
+                - generic [ref=f5e101]:
+                  - generic [ref=f5e102]:
+                    - generic [ref=f5e103]: حجم دلخواه
+                    - generic [ref=f5e104]: 10 GB
+                  - generic [ref=f5e105]: 30 روز
+                - generic [ref=f5e106]:
+                  - generic [ref=f5e107]: حجم به گیگابایت
+                  - spinbutton "حجم به گیگابایت" [ref=f5e108]: "10"
+                - generic [ref=f5e109]:
+                  - generic [ref=f5e110]: هر گیگ 9,000 تومان
+                  - generic [ref=f5e111]: 90,000 تومان
+            - button "پلن بعدی" [ref=f5e112]:
+              - generic [ref=f5e113]: ›
+            - generic:
+              - generic: بقیه پلن‌ها
+              - generic: ››
+          - generic [ref=f5e114]:
+            - button "پلن قبلی" [disabled] [ref=f5e115]:
+              - generic [ref=f5e116]: ‹
+            - generic [ref=f5e117]:
+              - generic [ref=f5e118]: 1 از 8
+              - generic "پلن‌ها" [ref=f5e119]:
+                - button "پلن 1" [ref=f5e120]
+                - button "پلن 2" [ref=f5e121]
+                - button "پلن 3" [ref=f5e122]
+                - button "پلن 4" [ref=f5e123]
+                - button "پلن 5" [ref=f5e124]
+                - button "پلن 6" [ref=f5e125]
+                - button "پلن 7" [ref=f5e126]
+                - button "حجم دلخواه" [ref=f5e127]
+            - button "پلن بعدی" [ref=f5e128]:
+              - generic [ref=f5e129]: ›
+        - generic [ref=f5e130]:
+          - generic [ref=f5e132]:
+            - paragraph [ref=f5e133]: پرداخت
+            - heading "کارت به کارت" [level=2] [ref=f5e134]
+          - generic [ref=f5e135]:
+            - generic [ref=f5e137]:
+              - generic [ref=f5e138]:
+                - paragraph [ref=f5e139]: 5 گیگ
+                - paragraph [ref=f5e140]: 5 GB / 30 روز
+              - paragraph [ref=f5e141]: 45,000 تومان
+            - generic [ref=f5e142]:
+              - paragraph [ref=f5e143]: شماره کارت
+              - paragraph [ref=f5e144]: "5041721226122548"
+              - paragraph [ref=f5e145]: به نام داودی
+            - generic [ref=f5e146]:
+              - generic [ref=f5e147]: ارسال عکس رسید
+              - button "Choose File" [ref=f5e148]
+            - group [ref=f5e149]:
+              - generic "منو" [ref=f5e150] [cursor=pointer]
+            - button "ثبت رسید و رفتن به سفارش" [ref=f5e151]
+      - generic [ref=f5e153]: انتخاب کن هزینشو کارت به کارت کن رسید رو بزار کانفیگ رو بردار رسید رو چک میکنم فعال میشه
+  - contentinfo [ref=f5e154]:
+    - generic [ref=f5e155]:
+      - generic [ref=f5e156]:
+        - generic [ref=f5e157]:
+          - link "آزادنت WireBrain" [ref=f5e158] [cursor=pointer]:
+            - /url: /
+            - generic [ref=f5e163]:
+              - generic [ref=f5e164]: آزادنت
+              - generic [ref=f5e165]: WireBrain
+          - paragraph [ref=f5e166]: پلن مناسب را انتخاب کن، پرداخت را ثبت کن و بعد از تایید، لینک‌های دسترسی آماده می‌شوند.
+        - generic [ref=f5e167]:
+          - heading "دسترسی سریع" [level=2] [ref=f5e168]
+          - list [ref=f5e169]:
+            - listitem [ref=f5e170]:
+              - link "خرید و صفحه اصلی" [ref=f5e171] [cursor=pointer]:
+                - /url: /
+            - listitem [ref=f5e172]:
+              - link "پشتیبانی داخل سایت" [ref=f5e173] [cursor=pointer]:
+                - /url: /support/
+            - listitem [ref=f5e174]:
+              - link "داشبورد" [ref=f5e175] [cursor=pointer]:
+                - /url: /dashboard/
+        - generic [ref=f5e176]:
+          - heading "ارتباط با ما" [level=2] [ref=f5e177]
+          - generic [ref=f5e178]:
+            - link "چت پشتیبانی Online" [ref=f5e179] [cursor=pointer]:
+              - /url: /support/
+              - generic [ref=f5e180]: چت پشتیبانی
+              - generic [ref=f5e181]: Online
+            - link "پشتیبانی تلگرام @Azadnet_Support_01" [ref=f5e182] [cursor=pointer]:
+              - /url: https://t.me/Azadnet_Support_01
+              - generic [ref=f5e183]: پشتیبانی تلگرام
+              - generic [ref=f5e184]: "@Azadnet_Support_01"
+      - generic [ref=f5e185]:
+        - paragraph [ref=f5e186]: © 2026 آزادنت. همه حقوق محفوظ است.
+        - paragraph [ref=f5e187]: تحویل پس از تایید پرداخت انجام می‌شود.
