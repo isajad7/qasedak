@@ -45,6 +45,7 @@ from .plan_route_services import (
     get_valid_sales_inbounds,
     sales_inbound_issues,
 )
+from .source_sellability import source_requires_sellability_verification, source_verification_ui_state
 
 
 ROUTE_STATUS_READY = "ready"
@@ -807,9 +808,25 @@ class CatalogPlanForm(forms.Form):
         selected_pool_ids = {row.get("inventory_pool_id") for row in initial_source_rows if row.get("inventory_pool_id")}
 
         sales_ready_ids = list(get_sales_ready_inbounds(self.store).values_list("pk", flat=True))
+        verifiable_sources = Inbound.objects.select_related("panel").filter(
+            panel__family=Panel.Family.PASARGUARD,
+            xui_source=Inbound.XUISource.PASARGUARD_GROUP,
+            panel__is_active=True,
+        )
+        if self.store and self.store.pk:
+            verifiable_sources = verifiable_sources.filter(
+                models.Q(panel__store=self.store) | models.Q(panel__store__isnull=True)
+            )
+        verifiable_source_ids = [
+            inbound.pk for inbound in verifiable_sources if source_requires_sellability_verification(inbound)
+        ]
         self.source_inbound_queryset = (
             Inbound.objects.select_related("panel")
-            .filter(models.Q(pk__in=sales_ready_ids) | models.Q(pk__in=selected_inbound_ids))
+            .filter(
+                models.Q(pk__in=sales_ready_ids)
+                | models.Q(pk__in=selected_inbound_ids)
+                | models.Q(pk__in=verifiable_source_ids)
+            )
             .order_by("panel__name", "inbound_id", "pk")
         )
 
@@ -841,10 +858,16 @@ class CatalogPlanForm(forms.Form):
         self.source_inbound_options = [
             {
                 "value": str(inbound.pk),
-                "label": inbound_label(inbound),
+                "label": (
+                    f"{inbound_label(inbound)} / {source_verification_ui_state(inbound)['label']}"
+                    if source_requires_sellability_verification(inbound)
+                    else inbound_label(inbound)
+                ),
                 "dynamic_subscription": bool(
                     getattr(getattr(inbound, "panel", None), "family", "") == Panel.Family.PASARGUARD
                 ),
+                "verification_state": source_verification_ui_state(inbound)["label"],
+                "verification_blocking": source_verification_ui_state(inbound)["blocking"],
             }
             for inbound in self.source_inbound_queryset
         ]
@@ -993,6 +1016,7 @@ class CatalogPlanForm(forms.Form):
                 inbound
                 and getattr(getattr(inbound, "panel", None), "family", "") == Panel.Family.PASARGUARD
             )
+            verification = source_verification_ui_state(inbound) if inbound else {}
             decorated.append(
                 {
                     **row,
@@ -1007,6 +1031,9 @@ class CatalogPlanForm(forms.Form):
                     "is_fallback": bool(row.get("is_fallback")),
                     "dynamic_policy": dynamic_policy,
                     "supports_dynamic_subscription": supports_dynamic_subscription,
+                    "verification_state": verification.get("label", ""),
+                    "verification_tone": verification.get("tone", "slate"),
+                    "verification_blocking": verification.get("blocking", False),
                 }
             )
         return decorated

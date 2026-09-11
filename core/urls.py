@@ -57,6 +57,7 @@ from store.admin_panel_center.views import (
     panel_center_panel_alerts_dry_run,
     panel_center_sync,
     panel_center_test,
+    panel_center_verify_source,
 )
 from store.admin_panel_center.routing_views import (
     routing_detail,
@@ -359,6 +360,11 @@ urlpatterns = [
         'admin/store/panel-center/<int:panel_id>/sync/',
         admin.site.admin_view(panel_center_sync),
         name='admin_store_panel_center_sync',
+    ),
+    path(
+        'admin/store/panel-center/source/<int:inbound_id>/verify-sellability/',
+        admin.site.admin_view(panel_center_verify_source),
+        name='admin_store_panel_center_verify_source',
     ),
     path(
         'admin/store/panel-center/routing/',

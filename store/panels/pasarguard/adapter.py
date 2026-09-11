@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from decimal import Decimal
 
 from store.panels.xui.adapter import XUIProvisioningRequest
 
 from ..capabilities import CapabilityFlag, CapabilityProfile, InboundHealthResult, PanelCapabilityReport
-from ..errors import PanelIntegrationError, PanelOperationUnsupportedError
+from ..errors import PanelIntegrationError, PanelOperationUnsupportedError, sanitize_error_value
 from .client import PasarGuardClient
 from .errors import (
     PasarGuardCreateUserError,
@@ -64,6 +65,7 @@ def _pasarguard_flags():
             CapabilityFlag.NATIVE_RAW_CONFIGS,
             CapabilityFlag.USAGE_INFO,
             CapabilityFlag.REALITY_NATIVE_DELIVERY,
+            CapabilityFlag.SELLABILITY_PROBE,
         }
     )
 
@@ -117,6 +119,7 @@ def _safe_remote_user_id(user):
 
 class PasarGuardPanelAdapter:
     family = "pasarguard"
+    supports_sellability_probe = True
 
     def __init__(self, panel, *, client=None):
         self.panel = panel
@@ -325,6 +328,150 @@ class PasarGuardPanelAdapter:
             if code.endswith("_404") or context_status == 404:
                 return None
             raise
+
+    def _probe_error_code(self, exc, *, phase):
+        code = str(getattr(exc, "error_code", "") or "").strip()
+        if phase in {"create", "update"}:
+            return "remote_create_failed"
+        if phase == "subscription":
+            if code == "pasarguard_subscription_missing":
+                return "subscription_missing"
+            if "links_empty" in code:
+                return "native_links_empty"
+            if "links" in code or "subscription" in code:
+                return "native_links_fetch_failed"
+        if code == "pasarguard_group_disabled":
+            return "source_not_allowed"
+        return sanitize_error_value(code or "source_verification_failed")[:80]
+
+    def _probe_cleanup(self, source, username):
+        if not str(username or "").strip():
+            return False, "cleanup_identity_missing"
+        try:
+            self.delete_client(source, username)
+            return self._get_user_or_none(username) is None, ""
+        except Exception as exc:
+            return False, sanitize_error_value(str(exc or ""), panel=self.panel)[:160]
+
+    def probe_source_sellability(self, source):
+        from store.external_subscription_sources import filter_native_configs
+
+        group_id = _group_id_from_inbound(source)
+        context = f"sellability-probe:{getattr(self.panel, 'pk', '')}:{getattr(source, 'pk', '')}:{group_id}"
+        client_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"qasedak:{context}:uuid"))
+        sub_id = hashlib.sha256(f"qasedak:{context}:sub".encode("utf-8")).hexdigest()[:16]
+        email_prefix = f"qasedak_verify_{getattr(source, 'pk', group_id) or group_id}"
+        request = XUIProvisioningRequest(
+            email_prefix=email_prefix,
+            total_gb=Decimal("0.001"),
+            duration_days=1,
+            inbound=source,
+            inbounds=[source],
+            limit_ip=1,
+            client_uuid=client_uuid,
+            sub_id=sub_id,
+            email=email_prefix,
+        )
+        group_ids = [group_id]
+        marker = pasarguard_note_marker(self._request_context(request, group_ids))
+        username = normalize_pasarguard_username(request.email or request.email_prefix, context=self._request_context(request, group_ids))
+        phase = "validate_group"
+        created_or_reused = False
+        created_new = False
+        cleanup_succeeded = False
+        cleanup_error = ""
+        filter_result = None
+        error_code = ""
+        safe_details = {
+            "source_id": getattr(source, "pk", None),
+            "group_id": group_id,
+            "cleanup_attempted": False,
+            "cleanup_confirmed": False,
+        }
+        try:
+            self._verify_groups([source])
+            phase = "lookup"
+            existing = self._get_user_or_none(username)
+            if existing and not user_note_matches_context(existing, marker):
+                raise PasarGuardUserConflictError(
+                    "کاربر PasarGuard با همین نام وجود دارد اما marker تأیید فروش با آن هم‌خوان نیست.",
+                    error_code="source_not_allowed",
+                    panel=self.panel,
+                    panel_family=self.family,
+                    safe_context={"username_saved": True, "group_ids": group_ids},
+                )
+            payload, _expires_at = self._payload(request, username, marker, group_ids, existing_user=existing)
+            phase = "update" if existing else "create"
+            user = self.client.modify_user(username, payload) if existing else self.client.create_user(payload)
+            created_or_reused = True
+            created_new = not bool(existing)
+            user = user if isinstance(user, dict) else {}
+            subscription_url = str(user.get("subscription_url") or (existing or {}).get("subscription_url") or "").strip()
+            if not subscription_url:
+                fetched = self._get_user_or_none(username) or {}
+                subscription_url = str(fetched.get("subscription_url") or "").strip()
+                user = {**fetched, **user}
+            if not subscription_url:
+                error_code = "subscription_missing"
+            else:
+                phase = "subscription"
+                raw_links = list(self.client.fetch_native_links(subscription_url) or [])
+                filter_result = filter_native_configs(raw_links, {"require_reality_pbk": True})
+                if not raw_links:
+                    error_code = "native_links_empty"
+                elif (filter_result.invalid_reasons or {}).get("reality_missing_pbk"):
+                    error_code = "reality_pbk_missing"
+                elif filter_result.selected_count <= 0:
+                    error_code = "native_links_empty"
+            safe_details.update(
+                {
+                    "created_new": created_new,
+                    "reused_existing": created_or_reused and not created_new,
+                    "observed_config_count": filter_result.selected_count if filter_result else 0,
+                    "upstream_count": filter_result.upstream_count if filter_result else 0,
+                    "parsed_count": filter_result.parsed_count if filter_result else 0,
+                    "invalid_count": filter_result.invalid_count if filter_result else 0,
+                    "protocol_counts": dict(filter_result.protocol_counts) if filter_result else {},
+                    "security_counts": dict(filter_result.security_counts) if filter_result else {},
+                    "invalid_reasons": dict(filter_result.invalid_reasons) if filter_result else {},
+                }
+            )
+        except PanelIntegrationError as exc:
+            error_code = self._probe_error_code(exc, phase=phase)
+            safe_details["provider_error_code"] = sanitize_error_value(getattr(exc, "error_code", "") or "")
+        except Exception as exc:
+            error_code = "source_verification_failed"
+            safe_details["error"] = sanitize_error_value(str(exc or ""), panel=self.panel)[:160]
+        finally:
+            if created_or_reused:
+                cleanup_succeeded, cleanup_error = self._probe_cleanup(source, username)
+                safe_details["cleanup_attempted"] = True
+                safe_details["cleanup_confirmed"] = cleanup_succeeded
+                if cleanup_error:
+                    safe_details["cleanup_error"] = cleanup_error
+
+        if created_or_reused and not cleanup_succeeded:
+            error_code = "cleanup_failed"
+        if error_code:
+            return {
+                "ok": False,
+                "error_code": error_code,
+                "observed_config_count": 0,
+                "protocol_counts": dict(filter_result.protocol_counts) if filter_result else {},
+                "reality_count": int((filter_result.security_counts or {}).get("reality", 0)) if filter_result else 0,
+                "pbk_validation_ok": False,
+                "cleanup_succeeded": cleanup_succeeded,
+                "safe_details": safe_details,
+            }
+        return {
+            "ok": True,
+            "observed_config_count": filter_result.selected_count if filter_result else 0,
+            "protocol_counts": dict(filter_result.protocol_counts) if filter_result else {},
+            "reality_count": int((filter_result.security_counts or {}).get("reality", 0)) if filter_result else 0,
+            "pbk_validation_ok": True,
+            "cleanup_succeeded": cleanup_succeeded,
+            "safe_details": safe_details,
+        }
 
     def _user_result(self, *, request, username, user, group_ids, raw_links, expires_at, marker):
         local_uuid = request.client_uuid or str(uuid.uuid5(uuid.NAMESPACE_URL, f"pasarguard:{self.panel.pk}:{username}"))

@@ -8,13 +8,18 @@ from django.utils import timezone
 
 from store.models import Inbound, Panel, PanelHealthStatus, Store
 from store.panels import get_safe_panel_adapter
-from store.panels.capabilities import sanitize_capability_metadata
+from store.panels.capabilities import CapabilityFlag, sanitize_capability_metadata
 from store.panels.errors import PanelIntegrationError, safe_error_dict
 from store.panel_health_services import (
     PanelHealthAlertService,
     get_panel_health_alert_recipient_summary,
     panel_alert_failure_threshold_count,
     panel_alert_repeat_interval_minutes,
+)
+from store.source_sellability import (
+    source_requires_sellability_verification,
+    source_sellability_issues,
+    source_verification_ui_state,
 )
 from store.xui_api import XUIService, classify_xui_exception, sanitize_xui_operational_text
 from store.xui_compat import discover_xui_capabilities
@@ -138,6 +143,7 @@ def capability_items(report):
         ("CSRF در write", boolean_badge(report.requires_csrf_for_write)),
     ]
     if getattr(report, "family", "") == Panel.Family.PASARGUARD:
+        profile = getattr(report, "profile", None)
         items = [
             ("API key auth", boolean_badge(report.uses_api_key_auth)),
             ("خواندن گروه‌ها", boolean_badge(report.supports_read_inbounds)),
@@ -147,6 +153,10 @@ def capability_items(report):
             ("چندگروهی با group_ids", boolean_badge(report.supports_multi_group_users)),
             ("subscription_url", boolean_badge(report.supports_subscription)),
             ("raw native configs", boolean_badge(report.supports_native_raw_configs)),
+            (
+                "Verify for Sale probe",
+                boolean_badge(bool(profile and profile.supports(CapabilityFlag.SELLABILITY_PROBE))),
+            ),
         ]
     return items
 
@@ -397,20 +407,26 @@ def sync_panel_inbounds(panel, *, create_missing=True, available_for_new_orders=
                     skipped += 1
                     continue
                 remote_group_ids.append(group_id)
-                exists = Inbound.objects.filter(panel=panel, xui_node_id="", inbound_id=group_id).exists()
-                if not exists and not create_missing:
+                existing = Inbound.objects.filter(panel=panel, xui_node_id="", inbound_id=group_id).first()
+                if not existing and not create_missing:
                     skipped += 1
                     continue
                 disabled_known = group.get("is_disabled") is not None
                 group_disabled = group.get("is_disabled") is True
-                group_sellable = bool(available_for_new_orders and disabled_known and not group_disabled)
+                existing_verified = bool(
+                    existing
+                    and existing.verification_status == Inbound.VerificationStatus.VERIFIED_SELLABLE
+                    and source_requires_sellability_verification(existing)
+                )
+                group_active = bool((disabled_known and not group_disabled) or (not disabled_known and existing_verified))
+                group_sellable = bool(available_for_new_orders and group_active)
                 defaults = {
                     "remark": group.get("name") or f"PasarGuard group {group_id}",
                     "protocol": Inbound.Protocol.VLESS,
                     "server_ip": "pasarguard-native",
                     "port": "0",
                     "config_params": "{}",
-                    "is_active": bool(disabled_known and not group_disabled),
+                    "is_active": group_active,
                     "available_for_new_orders": group_sellable,
                     "health_monitor_enabled": True,
                     "last_synced_at": timezone.now(),
@@ -623,6 +639,9 @@ def inbound_status(inbound):
     protocol = str(inbound.protocol or "").lower()
     if not is_pasarguard and protocol and protocol not in SUPPORTED_PROTOCOLS:
         warnings.append("پروتکل برای لینک مستقیم استاندارد پشتیبانی نشده است.")
+    verification_errors, verification_warnings = source_sellability_issues(inbound)
+    warnings.extend(verification_errors)
+    warnings.extend(verification_warnings)
     return warnings
 
 
@@ -633,6 +652,10 @@ def inbound_rows(panel):
         warnings = inbound_status(inbound)
         metadata = inbound.metadata or {}
         is_pasarguard = is_pasarguard_panel(panel)
+        verification = source_verification_ui_state(inbound)
+        blocking_warnings = [warning for warning in warnings if warning != "Sellability verification is older than 7 days."]
+        simple_only = bool(is_pasarguard and source_requires_sellability_verification(inbound))
+        verified_at = getattr(inbound, "verified_at", None)
         rows.append(
             {
                 "inbound": inbound,
@@ -640,8 +663,17 @@ def inbound_rows(panel):
                 "target_kind": "pasarguard_group" if is_pasarguard else "xui_inbound",
                 "warnings": warnings,
                 "tone": "amber" if warnings else "emerald",
-                "sellable": bool(inbound.is_active and inbound.available_for_new_orders and not warnings),
+                "sellable": bool(inbound.is_active and inbound.available_for_new_orders and not blocking_warnings),
                 "remote_id_label": metadata.get("group_id") if is_pasarguard else inbound.inbound_id,
+                "discovery_label": "Simple API" if simple_only else "Full API" if is_pasarguard else "Panel API",
+                "details_label": "Unavailable" if simple_only else "Available" if is_pasarguard else "Available",
+                "verification": verification,
+                "verification_error_code": inbound.last_verification_error_code or "",
+                "verified_at": verified_at,
+                "last_verified_config_count": inbound.last_verified_config_count,
+                "verify_source_url": panel_center_url("admin_store_panel_center_verify_source", inbound.pk)
+                if is_pasarguard
+                else "",
                 "protocol_label": "native raw" if is_pasarguard else inbound.protocol,
                 "host_port_label": f"{metadata.get('inbound_tag_count', 0)} tag" if is_pasarguard else f"{inbound.server_ip}:{inbound.port}",
                 "node_label": "disabled" if metadata.get("is_disabled") else "unknown" if is_pasarguard and metadata.get("disabled_known") is False else "active" if is_pasarguard else inbound.xui_node_name or inbound.xui_node_id or "local",

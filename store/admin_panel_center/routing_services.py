@@ -12,6 +12,7 @@ from store.admin_panel_center.routing_forms import ROUTE_MODE_MULTI, ROUTE_MODE_
 from store.models import Inbound, Order, Panel, Plan, PlanInboundRoute, VPNClient
 from store.panels import get_safe_panel_adapter
 from store.panels.errors import RoutingValidationError
+from store.source_sellability import source_sellability_issues
 from store.plan_route_services import (
     BULK_ROUTE_STRATEGY_REPLACE_ACTIVE,
     active_routes_for_plan_operator,
@@ -167,6 +168,9 @@ def validate_inbound_for_routing(inbound, *, panel=None, require_panel_capabilit
     protocol = str(inbound.protocol or "").lower()
     if not _is_pasarguard_panel(getattr(inbound, "panel", None)) and protocol not in SUPPORTED_ROUTE_PROTOCOLS:
         errors.append("پروتکل اینباند در Routing Builder پشتیبانی نمی‌شود. Inbound protocol is not supported by the routing builder.")
+    verification_errors, verification_warnings = source_sellability_issues(inbound)
+    errors.extend(verification_errors)
+    warnings.extend(verification_warnings)
     if inbound.max_clients is not None and inbound.current_users >= inbound.max_clients:
         warnings.append("Inbound capacity is currently full.")
     if require_panel_capability and inbound.panel_id:

@@ -156,7 +156,7 @@
 
     <section id="access" class="space-y-3">
         {% for card in dashboard_cards %}
-            {% with order=card.order client=card.client stats=card.stats %}
+            {% with order=card.order client=card.client stats=card.stats delivery=card.customer_delivery %}
                 <article class="dashboard-pass group rounded-[1.25rem] border border-white/10 bg-white/85 p-4 shadow-[0_14px_34px_rgba(15,23,42,0.06)]">
                     <a href="{% url 'order_detail' order_id=order.public_id %}" class="flex items-center gap-4">
                         <div class="min-w-0 flex-1">
@@ -177,10 +177,21 @@
                         </div>
                     </a>
 
-                    <div class="mt-4 flex items-center justify-between gap-2">
+                    <div class="mt-4 flex flex-wrap items-center justify-between gap-2" data-copy-scope>
                         <a href="{% url 'order_detail' order_id=order.public_id %}" class="inline-flex rounded-full border border-sky-300/30 bg-sky-50 px-3 py-1.5 text-[11px] font-black text-sky-700 transition-colors hover:bg-sky-100">
                             جزئیات
                         </a>
+                        {% if delivery.is_ready %}
+                            {% if delivery.customer_subscription_url %}
+                                <button type="button" data-copy-access-link data-copy-value="{{ delivery.customer_subscription_url }}" data-copy-success="لینک اشتراک کپی شد" class="inline-flex rounded-full border border-emerald-300/40 bg-emerald-50 px-3 py-1.5 text-[11px] font-black text-emerald-700 transition-colors hover:bg-emerald-100">
+                                    <span data-copy-button-text>کپی لینک</span>
+                                </button>
+                            {% elif delivery.primary_direct_link %}
+                                <button type="button" data-copy-access-link data-copy-value="{{ delivery.primary_direct_link }}" data-copy-success="کانفیگ کپی شد" class="inline-flex rounded-full border border-emerald-300/40 bg-emerald-50 px-3 py-1.5 text-[11px] font-black text-emerald-700 transition-colors hover:bg-emerald-100">
+                                    <span data-copy-button-text>کپی کانفیگ</span>
+                                </button>
+                            {% endif %}
+                        {% endif %}
                         <form action="{% url 'delete_order' order_id=order.public_id %}" method="post" onsubmit="return confirm('این بسته از داشبورد حذف شود؟');">
                             {% csrf_token %}
                             <button type="submit" class="inline-flex rounded-full border border-red-300/40 bg-red-50 px-3 py-1.5 text-[11px] font-black text-red-700 transition-colors hover:bg-red-100">

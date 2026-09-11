@@ -4,6 +4,10 @@ from decimal import Decimal, InvalidOperation
 
 from django.core.cache import cache
 
+from store.customer_delivery import (
+    customer_delivery_link_groups_for_client,
+    resolve_customer_client_delivery,
+)
 from store.jalali import persian_digits
 from store.models import VPNClient
 from store.referral_services import get_available_referral_gb
@@ -82,11 +86,13 @@ def bot_client_label(client):
 
 
 def client_config_links(vpn_client):
+    delivery = resolve_customer_client_delivery(vpn_client)
     links = []
-    if vpn_client.sub_link:
-        links.append(("لینک اشتراک", vpn_client.sub_link))
-    if vpn_client.direct_link:
-        links.append(("لینک مستقیم", vpn_client.direct_link))
+    if delivery.is_ready and delivery.customer_subscription_url:
+        links.append(("لینک اشتراک", delivery.customer_subscription_url))
+    for index, direct_link in enumerate(delivery.customer_direct_links, start=1):
+        label = f"لینک مستقیم {persian_digits(index)}" if len(delivery.customer_direct_links) > 1 else "لینک مستقیم"
+        links.append((label, direct_link))
     return links
 
 
@@ -250,7 +256,8 @@ def active_subscription_lines(
                 f"تاریخ پایان: {expiry_label}",
             ]
         )
-        if client.sub_link or client.direct_link:
+        delivery = resolve_customer_client_delivery(client)
+        if delivery.is_ready:
             lines.append("برای دریافت لینک، دکمه «دریافت لینک» را بزنید.")
         else:
             lines.append("لینک کانفیگ هنوز آماده نیست.")
@@ -330,9 +337,10 @@ def format_client_config(
         f"مصرف‌شده: {used_gb} از {total_gb} گیگابایت",
         f"انقضا: {bot_datetime(stats.get('expiry_at') or client.expires_at)}",
     ]
-    if include_config_notice and (client.sub_link or client.direct_link):
+    delivery = resolve_customer_client_delivery(client)
+    if include_config_notice and delivery.is_ready:
         lines.extend(["", "کانفیگ در پیام بعدی ارسال می‌شود."])
-    elif not client.sub_link and not client.direct_link:
+    elif not delivery.is_ready:
         lines.extend(["", "لینک کانفیگ هنوز برای این سفارش آماده نیست."])
     if stats.get("panel_available") is False:
         lines.extend(["", "دسترسی به پنل ثنایی موقتاً برقرار نشد؛ آخرین اطلاعات ذخیره‌شده نمایش داده شد."])
@@ -349,7 +357,7 @@ def send_client_config_messages(
     bot_user=None,
     sync_stats=sync_vpn_client_stats,
 ):
-    links = client_config_links(vpn_client)
+    groups = customer_delivery_link_groups_for_client(vpn_client)
     summary_text = format_client_config(
         vpn_client,
         stats=stats,
@@ -357,7 +365,7 @@ def send_client_config_messages(
         include_config_notice=False,
         sync_stats=sync_stats,
     )
-    if not links:
+    if not groups:
         client.send_message(
             summary_text,
             chat_id=chat_id,
@@ -368,14 +376,18 @@ def send_client_config_messages(
     summary_lines = summary_text.splitlines()
     title = f"✅ {summary_lines[0]}" if summary_lines else "✅ کانفیگ شما آماده شد"
     detail_lines = [line for line in summary_lines[2:] if line != "━━━━━━━━━━━━━━"]
-    send_config_links_message(
-        client,
-        chat_id,
-        subscription_link=vpn_client.sub_link,
-        direct_link=vpn_client.direct_link,
-        title=title,
-        detail_lines=detail_lines,
-    )
+    for group in groups:
+        group_title = title
+        if group.get("label"):
+            group_title = f"{title} - {group['label']}"
+        send_config_links_message(
+            client,
+            chat_id,
+            subscription_link=group.get("subscription_link", ""),
+            direct_link=group.get("direct_link", ""),
+            title=group_title,
+            detail_lines=detail_lines,
+        )
     return {"ok": True, "handled": True}
 
 

@@ -13,10 +13,16 @@ from django.db.models import F, Q
 from django.utils import timezone
 
 from .jalali import format_jalali_datetime, persian_digits
-from .models import Customer, FreeTrialRequest, Inbound, VPNClient
+from .models import Customer, FreeTrialRequest, Inbound, Panel, VPNClient
 from .naming import build_trial_client_name
 from .order_services import get_current_store
-from .xui_api import bytes_from_gb, create_trial_client_details, delete_client, mask_xui_value
+from .panels import PanelIntegrationError, get_safe_panel_adapter
+from .xui_api import (
+    bytes_from_gb,
+    create_trial_client_details as create_xui_trial_client_details,
+    delete_client as delete_xui_client,
+    mask_xui_value,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -158,10 +164,82 @@ def sanitize_free_trial_log_value(value):
     return CONFIG_LINK_LOG_RE.sub("<config-link-redacted>", str(value or ""))
 
 
+def _is_pasarguard_panel(panel):
+    return str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD
+
+
+def _trial_duration_days(duration_hours):
+    try:
+        hours = int(duration_hours or 0)
+    except (TypeError, ValueError):
+        hours = 0
+    return max((hours + 23) // 24, 1)
+
+
+def create_trial_client_details(email_prefix, total_gb, duration_hours, panel, inbound, limit_ip=1):
+    if not _is_pasarguard_panel(panel):
+        return create_xui_trial_client_details(
+            email_prefix=email_prefix,
+            total_gb=total_gb,
+            duration_hours=duration_hours,
+            panel=panel,
+            inbound=inbound,
+            limit_ip=limit_ip,
+        )
+    try:
+        request = SimpleNamespace(
+            email_prefix=email_prefix,
+            total_gb=total_gb,
+            duration_days=_trial_duration_days(duration_hours),
+            inbound=inbound,
+            inbounds=[inbound] if inbound else [],
+            limit_ip=limit_ip,
+            client_uuid="",
+            sub_id="",
+            email="",
+        )
+        return get_safe_panel_adapter(panel).create_enabled_client(request)
+    except Exception as exc:
+        logger.warning(
+            "Could not create free trial PasarGuard client: %s",
+            sanitize_free_trial_log_value(exc),
+        )
+        return None
+
+
+def delete_client(target):
+    inbound = getattr(target, "inbound", None)
+    panel = getattr(inbound, "panel", None)
+    if not _is_pasarguard_panel(panel):
+        return delete_xui_client(target)
+    identifier = str(
+        getattr(target, "xui_email", "")
+        or getattr(target, "username", "")
+        or getattr(target, "email", "")
+        or ""
+    ).strip()
+    if not identifier:
+        return False
+    try:
+        return get_safe_panel_adapter(panel).delete_client(inbound, identifier, allow_multi_scope=True)
+    except PanelIntegrationError as exc:
+        logger.warning("Could not delete free trial PasarGuard client: %s", sanitize_free_trial_log_value(exc.message))
+        return False
+    except Exception as exc:
+        logger.warning("Could not delete free trial PasarGuard client: %s", sanitize_free_trial_log_value(exc))
+        return False
+
+
 def cleanup_panel_trial_client(client_result, inbound, *, trial_request=None):
     if not client_result or not client_result.get("uuid") or not inbound:
         return False
-    target = SimpleNamespace(inbound=inbound, uuid=client_result.get("uuid"))
+    target = SimpleNamespace(
+        inbound=inbound,
+        uuid=client_result.get("uuid"),
+        username=client_result.get("email") or "",
+        xui_email=client_result.get("email") or "",
+        email=client_result.get("email") or "",
+    )
     deleted = delete_client(target)
     log_context = {
         "request_id": getattr(trial_request, "pk", None),

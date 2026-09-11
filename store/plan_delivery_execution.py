@@ -67,6 +67,9 @@ class PlanDeliveryResult:
     config_links: list[ConfigLink] = field(default_factory=list)
     vpn_clients: list = field(default_factory=list)
     subscription_cups: list[SubscriptionCup] = field(default_factory=list)
+    customer_subscription_url: str = ""
+    customer_config_count: int = 0
+    protected_upstream_subscription_urls: list[str] = field(default_factory=list)
 
 
 def preview_plan_delivery(delivery_config):
@@ -574,6 +577,12 @@ def _ensure_subscription_cup(order, delivery_config, config_links):
     return cup
 
 
+def _cup_active_item_count(cup):
+    if not cup:
+        return 0
+    return CupItem.objects.filter(cup=cup, is_active=True, config_link__is_active=True).count()
+
+
 def _successful_outputs(results):
     raw_links = []
     config_links = []
@@ -768,6 +777,13 @@ def execute_plan_delivery(order, delivery_config, actor=None, dry_run=False):
             dynamic_feeds=dynamic_feeds,
             actor=actor,
         )
+        customer_subscription_url = order.sub_link if delivery_config.delivery_mode == MODE_SUBSCRIPTION else ""
+        customer_config_count = _cup_active_item_count(subscription_cups[0]) if subscription_cups else 0
+        protected_upstream_subscription_urls = [
+            str(snapshot.protected_subscription_url or "")
+            for snapshot in dynamic_feeds
+            if str(snapshot.protected_subscription_url or "").strip()
+        ]
     return PlanDeliveryResult(
         intercepted=True,
         ok=True,
@@ -778,4 +794,7 @@ def execute_plan_delivery(order, delivery_config, actor=None, dry_run=False):
         config_links=config_links,
         vpn_clients=vpn_clients,
         subscription_cups=subscription_cups,
+        customer_subscription_url=customer_subscription_url,
+        customer_config_count=customer_config_count,
+        protected_upstream_subscription_urls=protected_upstream_subscription_urls,
     )

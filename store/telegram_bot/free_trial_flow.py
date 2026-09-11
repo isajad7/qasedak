@@ -35,6 +35,16 @@ def free_trial_keyboard():
     }
 
 
+def free_trial_subscription_link_is_internal(vpn_client):
+    raw = getattr(vpn_client, "xui_raw", None) or {}
+    if not isinstance(raw, dict):
+        return False
+    return bool(
+        str(raw.get("family") or "").lower() == "pasarguard"
+        or raw.get("native_raw_delivery")
+    )
+
+
 def start_free_trial_flow(client, config, bot_user, *, chat_id, is_admin_bot_user_func=default_is_admin_bot_user):
     try:
         settings = validate_free_trial_settings(bot_config=config)
@@ -82,7 +92,7 @@ def confirm_free_trial_flow(client, config, bot_user, *, chat_id, is_admin_bot_u
         )
     else:
         trial_request = result.request
-        subscription_link = getattr(result.vpn_client, "sub_link", "")
+        subscription_link = "" if free_trial_subscription_link_is_internal(result.vpn_client) else getattr(result.vpn_client, "sub_link", "")
         direct_link = getattr(result.vpn_client, "direct_link", "") or (trial_request.config_link if trial_request else "")
         if not direct_link and not subscription_link and trial_request:
             direct_link = trial_request.config_link

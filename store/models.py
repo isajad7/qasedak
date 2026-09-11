@@ -2623,6 +2623,11 @@ class Inbound(TimeStampedModel):
         SYNCHRONIZED_NODE = "synchronized_node", _("Synchronized node")
         PASARGUARD_GROUP = "pasarguard_group", _("PasarGuard group")
 
+    class VerificationStatus(models.TextChoices):
+        UNVERIFIED = "unverified", _("Unverified")
+        VERIFIED_SELLABLE = "verified_sellable", _("Verified sellable")
+        VERIFICATION_FAILED = "verification_failed", _("Verification failed")
+
     class Protocol(models.TextChoices):
         VLESS = "vless", _("VLESS")
         VMESS = "vmess", _("VMESS")
@@ -2704,6 +2709,18 @@ class Inbound(TimeStampedModel):
     )
     xui_remote_key = models.CharField(_("X-UI remote key"), max_length=300, blank=True, db_index=True)
     is_synced_from_node = models.BooleanField(_("is synced from node"), default=False, db_index=True)
+    verification_status = models.CharField(
+        _("sellability verification status"),
+        max_length=30,
+        choices=VerificationStatus.choices,
+        default=VerificationStatus.UNVERIFIED,
+        db_index=True,
+    )
+    verified_at = models.DateTimeField(_("verified at"), blank=True, null=True, db_index=True)
+    verification_method = models.CharField(_("verification method"), max_length=80, blank=True)
+    last_verified_config_count = models.PositiveIntegerField(_("last verified config count"), default=0)
+    last_verification_error_code = models.CharField(_("last verification error code"), max_length=80, blank=True, db_index=True)
+    verification_attempted_at = models.DateTimeField(_("verification attempted at"), blank=True, null=True)
     metadata = models.JSONField(_("metadata"), default=dict, blank=True)
 
     class Meta:
@@ -2763,6 +2780,31 @@ class Inbound(TimeStampedModel):
     @property
     def has_capacity(self):
         return self.max_clients is None or self.current_users < self.max_clients
+
+    @property
+    def requires_sellability_verification(self):
+        panel = None
+        try:
+            panel = self.panel
+        except (Panel.DoesNotExist, AttributeError):
+            panel = None
+        metadata = dict(self.metadata or {})
+        return bool(
+            panel
+            and str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD
+            and self.xui_source == self.XUISource.PASARGUARD_GROUP
+            and (
+                metadata.get("remote_source") == "groups_simple"
+                or metadata.get("disabled_known") is False
+                or metadata.get("inbound_tags_known") is False
+            )
+        )
+
+    @property
+    def sellability_verification_is_stale(self):
+        if self.verification_status != self.VerificationStatus.VERIFIED_SELLABLE or not self.verified_at:
+            return False
+        return self.verified_at <= timezone.now() - timedelta(days=7)
 
 
 class PlanInboundRoute(TimeStampedModel):
@@ -2892,6 +2934,11 @@ class PlanInboundRoute(TimeStampedModel):
                 errors["inbound"] = _("Inbound route فعال باید فعال باشد.")
             elif not inbound.available_for_new_orders:
                 errors["inbound"] = _("Inbound legacy یا خارج از فروش جدید نمی‌تواند route فعال داشته باشد.")
+            elif (
+                getattr(inbound, "requires_sellability_verification", False)
+                and inbound.verification_status != Inbound.VerificationStatus.VERIFIED_SELLABLE
+            ):
+                errors["inbound"] = _("Remote source must be verified for sale before it can be used in an active route.")
             elif not panel:
                 errors["inbound"] = _("Inbound route فعال باید به پنل معتبر وصل باشد.")
             elif not panel.is_active:

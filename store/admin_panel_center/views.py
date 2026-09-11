@@ -20,8 +20,9 @@ from store.admin_panel_center.services import (
     sync_panel_inbounds,
     target_labels_for_panel,
 )
-from store.models import Panel
+from store.models import Inbound, Panel
 from store.panel_health_services import check_all_panels_health, check_panel_health
+from store.source_sellability import verify_panel_source_sellability
 
 
 def _require_panel_permission(request, perm="store.view_panel"):
@@ -229,4 +230,29 @@ def panel_center_sync(request, panel_id):
     else:
         messages.warning(request, result.message)
     request.session["panel_center_last_result"] = _panel_result_payload(result)
+    return redirect("admin_store_panel_center_detail", panel.pk)
+
+
+@require_POST
+def panel_center_verify_source(request, inbound_id):
+    _require_panel_permission(request, "store.change_inbound")
+    source = get_object_or_404(Inbound.objects.select_related("panel"), pk=inbound_id)
+    panel = source.panel
+    result = verify_panel_source_sellability(source.pk, actor=request.user)
+    payload = result.to_safe_dict()
+    request.session["panel_center_last_result"] = {
+        "ok": result.ok,
+        "title": "Sellability verification",
+        "message": "Source verified for sale." if result.ok else "Source verification failed.",
+        "details": payload,
+        "warnings": result.warnings,
+        "errors": [result.error_code] if result.error_code else [],
+        "structured_errors": [],
+    }
+    if result.ok:
+        messages.success(request, "منبع برای فروش تأیید شد.")
+    elif result.error_code == "cleanup_failed":
+        messages.error(request, "تأیید فروش شکست خورد: cleanup کاربر تستی تأیید نشد.")
+    else:
+        messages.warning(request, f"تأیید فروش شکست خورد: {result.error_code or 'verification_failed'}")
     return redirect("admin_store_panel_center_detail", panel.pk)

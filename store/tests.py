@@ -499,6 +499,63 @@ class SubscriptionCupMVPTests(TestCase):
         }
         return adapter
 
+    def create_simple_pasarguard_group_source(self, *, group_id=29, verified=False, active=False, available=False):
+        panel = Panel.objects.create(
+            store=self.store,
+            name=f"PasarGuard simple {group_id}",
+            family=Panel.Family.PASARGUARD,
+            url="https://pasarguard.example.com",
+            username="",
+            password="pg-api-key-secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.PASARGUARD_GROUPS,
+        )
+        source = Inbound.objects.create(
+            panel=panel,
+            inbound_id=group_id,
+            remark="Seller",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="pasarguard-native",
+            port="0",
+            config_params="{}",
+            security=Inbound.Security.REALITY,
+            is_active=active,
+            available_for_new_orders=available,
+            xui_source=Inbound.XUISource.PASARGUARD_GROUP,
+            xui_remote_key=f"pasarguard_group:{group_id}",
+            metadata={
+                "remote_kind": "pasarguard_group",
+                "group_id": group_id,
+                "group_name": "Seller",
+                "inbound_tags": [],
+                "inbound_tag_count": 0,
+                "is_disabled": None,
+                "disabled_known": False,
+                "inbound_tags_known": False,
+                "remote_source": "groups_simple",
+                "native_raw_delivery": True,
+            },
+        )
+        if verified:
+            source.verification_status = Inbound.VerificationStatus.VERIFIED_SELLABLE
+            source.verified_at = timezone.now()
+            source.verification_method = "provisioning_probe"
+            source.last_verified_config_count = 1
+            source.is_active = True
+            source.available_for_new_orders = True
+            source.save(
+                update_fields=[
+                    "verification_status",
+                    "verified_at",
+                    "verification_method",
+                    "last_verified_config_count",
+                    "is_active",
+                    "available_for_new_orders",
+                    "updated_at",
+                ]
+            )
+        return panel, source
+
     def vmess_link(self, *, remark="VMess", host="vmess.example.com", port="443", net="ws", tls="tls"):
         payload = base64.urlsafe_b64encode(
             json.dumps(
@@ -571,6 +628,41 @@ class SubscriptionCupMVPTests(TestCase):
         client = SimpleNamespace(fetch_native_links=Mock(side_effect=error) if error else Mock(return_value=list(links or [])))
         return SimpleNamespace(client=client)
 
+    def capture_bot_client(self):
+        class CaptureBotClient:
+            config = SimpleNamespace(provider=BotConfiguration.Provider.TELEGRAM)
+
+            def __init__(self):
+                self.messages = []
+
+            def send_message(self, text, **kwargs):
+                self.messages.append({"text": text, **kwargs})
+                return object()
+
+        return CaptureBotClient()
+
+    def set_customer_cookie(self, customer=None):
+        response = HttpResponse()
+        response.set_signed_cookie(
+            CUSTOMER_COOKIE_NAME,
+            str((customer or self.customer).public_id),
+            salt=CUSTOMER_COOKIE_SALT,
+        )
+        self.client.cookies[CUSTOMER_COOKIE_NAME] = response.cookies[CUSTOMER_COOKIE_NAME].value
+
+    def ready_stats(self, client=None):
+        client = client or self.vpn_client
+        total = getattr(client, "traffic_limit_bytes", 0) or self.plan.traffic_limit_bytes
+        return {
+            "is_enabled": True,
+            "is_expired": False,
+            "total_traffic_bytes": total,
+            "used_traffic_bytes": 0,
+            "remaining_traffic_bytes": total,
+            "panel_available": True,
+            "expiry_at": getattr(client, "expires_at", None) or timezone.now() + timedelta(days=30),
+        }
+
     def test_plan_delivery_v2_pasarguard_groups_create_one_user_and_preserve_raw_direct_links(self):
         from .provisioning_services import approve_and_provision_order
 
@@ -609,9 +701,22 @@ class SubscriptionCupMVPTests(TestCase):
         vpn_client = VPNClient.objects.get(order=order, inbound=groups[0])
         self.assertEqual(vpn_client.direct_link, raw_links[0])
         self.assertEqual((vpn_client.xui_raw or {}).get("native_raw_delivery"), True)
+        from .telegram_bot.order_delivery import order_config_link_groups
+
+        groups_for_customer = order_config_link_groups(order)
+        self.assertEqual([group["direct_link"] for group in groups_for_customer], raw_links)
+        self.assertTrue(all(not group["subscription_link"] for group in groups_for_customer))
 
     def test_plan_delivery_v2_pasarguard_subscription_cup_uses_native_raw_links(self):
+        from .plan_delivery_execution import execute_plan_delivery
         from .provisioning_services import approve_and_provision_order
+        from .subscription_cups import build_subscription_cup_url
+        from .telegram_bot.order_delivery import (
+            approved_order_detail_lines,
+            order_config_link_groups,
+            order_config_links,
+            send_customer_order_event_message,
+        )
 
         panel, groups = self.create_pasarguard_panel_and_groups()
         raw_links = [
@@ -642,6 +747,9 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertEqual(order.direct_link, "")
         self.assertIn("/sub/", order.sub_link)
         cup = SubscriptionCup.objects.get(order=order, vpn_client__isnull=True)
+        qasedak_subscription_url = build_subscription_cup_url(cup, store=self.store)
+        self.assertEqual(order.sub_link, qasedak_subscription_url)
+        self.assertNotIn("pasarguard.example.com", order.sub_link)
         self.assertEqual(
             list(CupItem.objects.filter(cup=cup, is_active=True).order_by("position").values_list("config_link__raw_link", flat=True)),
             raw_links,
@@ -655,6 +763,305 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertEqual(
             ConfigLink.objects.filter(external_feed=feed, source_type=ConfigLink.SourceType.EXTERNAL_SUBSCRIPTION).count(),
             2,
+        )
+        groups_for_customer = order_config_link_groups(order)
+        self.assertEqual(groups_for_customer, [{
+            "label": "",
+            "subscription_link": qasedak_subscription_url,
+            "direct_link": "",
+            "project_subscription_link": "",
+            "project_client_link": "",
+        }])
+        self.assertEqual(order_config_links(order), [("کانفیگ - لینک اشتراک", qasedak_subscription_url)])
+        self.assertIn("تعداد کانفیگ: ۲", approved_order_detail_lines(order))
+
+        from .customer_delivery import (
+            customer_delivery_link_groups_for_client,
+            resolve_customer_order_delivery,
+        )
+
+        delivery = resolve_customer_order_delivery(order)
+        self.assertEqual(delivery.delivery_mode, PlanDeliveryConfig.DeliveryMode.SUBSCRIPTION)
+        self.assertEqual(delivery.customer_subscription_url, qasedak_subscription_url)
+        self.assertEqual(delivery.customer_direct_links, ())
+        self.assertEqual(
+            delivery.config_count,
+            CupItem.objects.filter(cup=cup, is_active=True, config_link__is_active=True).count(),
+        )
+        self.assertTrue(delivery.is_ready)
+        safe_payload = json.dumps(delivery.to_safe_dict(), ensure_ascii=False)
+        self.assertNotIn("pasarguard.example.com", safe_payload)
+        self.assertNotIn("private-token", safe_payload)
+        self.assertNotIn("vless://", safe_payload)
+        vpn_client = VPNClient.objects.get(order=order, inbound=groups[0])
+        self.assertEqual(customer_delivery_link_groups_for_client(vpn_client)[0]["subscription_link"], qasedak_subscription_url)
+
+        bot_client = self.capture_bot_client()
+        sent = send_customer_order_event_message(
+            bot_client,
+            order,
+            event_type="approved",
+            chat_id="100",
+            format_customer_order_event_func=lambda order, event_type: "approved",
+        )
+        rendered_message = "\n".join(message["text"] for message in bot_client.messages)
+        rendered_keyboard = json.dumps([message.get("reply_markup") for message in bot_client.messages], ensure_ascii=False)
+        self.assertEqual(sent, 1)
+        self.assertIn(qasedak_subscription_url, rendered_message)
+        self.assertIn(qasedak_subscription_url, rendered_keyboard)
+        self.assertIn("تعداد کانفیگ: ۲", rendered_message)
+        self.assertNotIn("pasarguard.example.com", rendered_message)
+        self.assertNotIn("pasarguard.example.com", rendered_keyboard)
+        self.assertNotIn("private-token", rendered_message)
+        self.assertNotIn("private-token", rendered_keyboard)
+        self.assertNotIn("vless://", rendered_message)
+        self.assertNotIn("vless://", rendered_keyboard)
+        self.assertNotIn("vmess://", rendered_message)
+        self.assertNotIn("vmess://", rendered_keyboard)
+
+        original_cup_token = cup.token
+        original_customer_url = order.sub_link
+        with patch("store.plan_delivery_execution.get_safe_panel_adapter", return_value=adapter):
+            retry_result = execute_plan_delivery(order, config)
+        order.refresh_from_db()
+        cup.refresh_from_db()
+
+        self.assertTrue(retry_result.ok)
+        self.assertEqual(cup.token, original_cup_token)
+        self.assertEqual(order.sub_link, original_customer_url)
+        self.assertEqual(retry_result.customer_subscription_url, original_customer_url)
+        self.assertEqual(retry_result.customer_config_count, 2)
+        self.assertEqual(retry_result.protected_upstream_subscription_urls, ["https://pasarguard.example.com/s/private-token"])
+        self.assertEqual(SubscriptionCup.objects.filter(order=order, vpn_client__isnull=True).count(), 1)
+
+    def test_website_pasarguard_subscription_delivery_uses_qasedak_cup_only(self):
+        from .provisioning_services import approve_and_provision_order
+        from .subscription_cups import build_subscription_cup_url
+
+        panel, groups = self.create_pasarguard_panel_and_groups()
+        raw_links = [
+            self.direct_link(621, host="pg-web-one.example.com"),
+            self.vmess_link(remark="PG Web VMess", host="pg-web-two.example.com"),
+        ]
+        adapter = self.pasarguard_adapter(raw_links)
+        config = PlanDeliveryConfig.objects.create(
+            plan=self.plan,
+            delivery_mode=PlanDeliveryConfig.DeliveryMode.SUBSCRIPTION,
+        )
+        for priority, group in enumerate(groups, start=1):
+            PlanDeliverySource.objects.create(
+                delivery_config=config,
+                source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+                panel=panel,
+                inbound=group,
+                quantity=1,
+                priority=priority,
+            )
+        order = self.create_pending_order(username="v2-pg-web-sub")
+
+        with patch("store.plan_delivery_execution.get_safe_panel_adapter", return_value=adapter):
+            result = approve_and_provision_order(order, notify=False)
+
+        self.assertTrue(result.ok)
+        order.refresh_from_db()
+        cup = SubscriptionCup.objects.get(order=order, vpn_client__isnull=True)
+        qasedak_subscription_url = build_subscription_cup_url(cup, store=self.store)
+        self.set_customer_cookie(order.customer)
+
+        order_response = self.client.get(reverse("order_detail", kwargs={"order_id": order.public_id}))
+        self.assertContains(order_response, qasedak_subscription_url)
+        self.assertContains(order_response, "۲ کانفیگ")
+        self.assertNotContains(order_response, "pasarguard.example.com")
+        self.assertNotContains(order_response, "private-token")
+        self.assertNotContains(order_response, "vless://")
+        self.assertNotContains(order_response, "vmess://")
+
+        vpn_client = VPNClient.objects.get(order=order)
+        with patch("store.views.sync_vpn_client_stats", return_value=self.ready_stats(vpn_client)):
+            detail_response = self.client.get(
+                reverse("config_detail", args=[order.order_tracking_code, vpn_client.public_id])
+            )
+        self.assertContains(detail_response, qasedak_subscription_url)
+        self.assertNotContains(detail_response, "pasarguard.example.com")
+        self.assertNotContains(detail_response, "private-token")
+        self.assertNotContains(detail_response, "vless://")
+        self.assertNotContains(detail_response, "vmess://")
+
+        with patch("store.views.sync_vpn_client_stats", return_value=self.ready_stats(vpn_client)):
+            dashboard_response = self.client.get(reverse("dashboard"))
+        self.assertContains(dashboard_response, qasedak_subscription_url)
+        self.assertNotContains(dashboard_response, "pasarguard.example.com")
+        self.assertNotContains(dashboard_response, "private-token")
+        self.assertNotContains(dashboard_response, "vless://")
+        self.assertNotContains(dashboard_response, "vmess://")
+
+    def test_website_v2_direct_links_preserve_direct_outputs_without_subscription_leak(self):
+        from .provisioning_services import approve_and_provision_order
+
+        panel, groups = self.create_pasarguard_panel_and_groups()
+        raw_links = [
+            self.reality_link(622, host="pg-web-direct-one.example.com"),
+            "trojan://password@pg-web-direct-two.example.com:443#PG-Web-Trojan",
+        ]
+        adapter = self.pasarguard_adapter(raw_links)
+        config = PlanDeliveryConfig.objects.create(
+            plan=self.plan,
+            delivery_mode=PlanDeliveryConfig.DeliveryMode.DIRECT_LINKS,
+        )
+        for priority, group in enumerate(groups, start=1):
+            PlanDeliverySource.objects.create(
+                delivery_config=config,
+                source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+                panel=panel,
+                inbound=group,
+                quantity=1,
+                priority=priority,
+            )
+        order = self.create_pending_order(username="v2-pg-web-direct")
+
+        with patch("store.plan_delivery_execution.get_safe_panel_adapter", return_value=adapter):
+            result = approve_and_provision_order(order, notify=False)
+
+        self.assertTrue(result.ok)
+        self.set_customer_cookie(order.customer)
+        response = self.client.get(reverse("order_detail", kwargs={"order_id": order.public_id}))
+
+        self.assertContains(response, "pg-web-direct-one.example.com")
+        self.assertContains(response, "pg-web-direct-two.example.com")
+        self.assertNotContains(response, "pasarguard.example.com/s/private-token")
+        self.assertNotContains(response, "کپی لینک اشتراک")
+
+        vpn_client = VPNClient.objects.get(order=order)
+        with patch("store.views.sync_vpn_client_stats", return_value=self.ready_stats(vpn_client)):
+            detail_response = self.client.get(
+                reverse("config_detail", args=[order.order_tracking_code, vpn_client.public_id])
+            )
+        self.assertContains(detail_response, "pg-web-direct-one.example.com")
+        self.assertContains(detail_response, "pg-web-direct-two.example.com")
+        self.assertNotContains(detail_response, "pasarguard.example.com/s/private-token")
+
+    def test_new_v2_subscription_missing_cup_never_falls_back_to_provider_links(self):
+        from .customer_delivery import (
+            customer_delivery_link_groups,
+            resolve_customer_order_delivery,
+        )
+
+        upstream_subscription = "https://pasarguard.example.com/s/private-missing-cup-token"
+        provider_direct = self.direct_link(623, host="pg-missing-cup-direct.example.com")
+        order = Order.objects.create(
+            store=self.store,
+            customer=self.customer,
+            plan=self.plan,
+            inbound=self.inbound,
+            status=Order.Status.COMPLETED,
+            verification_status=Order.VerificationStatus.VERIFIED,
+            is_paid=True,
+            username="v2-missing-cup",
+            sub_link=upstream_subscription,
+            direct_link=provider_direct,
+            metadata={
+                "plan_delivery_v2": {
+                    "status": "provisioned",
+                    "delivery_mode": PlanDeliveryConfig.DeliveryMode.SUBSCRIPTION,
+                    "config_link_count": 1,
+                }
+            },
+        )
+        vpn_client = self.create_vpn_client(order=order, direct_link=provider_direct)
+        vpn_client.sub_link = upstream_subscription
+        vpn_client.save(update_fields=["sub_link", "updated_at"])
+
+        delivery = resolve_customer_order_delivery(order)
+
+        self.assertFalse(delivery.is_ready)
+        self.assertEqual(delivery.customer_subscription_url, "")
+        self.assertEqual(delivery.customer_direct_links, ())
+        self.assertEqual(delivery.config_count, 0)
+        self.assertEqual(delivery.diagnostic, "v2_subscription_cup_missing")
+        self.assertEqual(customer_delivery_link_groups(order), [])
+
+        self.set_customer_cookie(order.customer)
+        response = self.client.get(reverse("order_detail", kwargs={"order_id": order.public_id}))
+        self.assertContains(response, "لینک این سفارش هنوز آماده نیست")
+        self.assertNotContains(response, "pasarguard.example.com")
+        self.assertNotContains(response, "private-missing-cup-token")
+        self.assertNotContains(response, "vless://")
+
+        with patch("store.views.sync_vpn_client_stats", return_value=self.ready_stats(vpn_client)):
+            detail_response = self.client.get(
+                reverse("config_detail", args=[order.order_tracking_code, vpn_client.public_id])
+            )
+        self.assertNotContains(detail_response, "pasarguard.example.com")
+        self.assertNotContains(detail_response, "private-missing-cup-token")
+        self.assertNotContains(detail_response, "vless://")
+
+    def test_legacy_website_delivery_keeps_existing_links_explicitly(self):
+        from .customer_delivery import resolve_customer_order_delivery
+
+        delivery = resolve_customer_order_delivery(self.order)
+
+        self.assertTrue(delivery.legacy)
+        self.assertEqual(delivery.customer_subscription_url, self.order.sub_link)
+        self.assertEqual(delivery.customer_direct_links, (self.order.direct_link,))
+        self.set_customer_cookie(self.order.customer)
+        response = self.client.get(reverse("order_detail", kwargs={"order_id": self.order.public_id}))
+
+        self.assertContains(response, self.vpn_client.sub_link)
+        self.assertContains(response, "node-1.example.com")
+
+    def test_dynamic_subscription_refresh_keeps_customer_cup_url_and_updates_count(self):
+        from .customer_delivery import resolve_customer_order_delivery
+        from .external_subscription_sources import refresh_external_subscription_feed
+        from .provisioning_services import approve_and_provision_order
+        from .subscription_cups import build_subscription_cup_url
+
+        panel, groups = self.create_pasarguard_panel_and_groups()
+        initial_links = [self.direct_link(624, host="pg-dynamic-initial.example.com")]
+        adapter = self.pasarguard_adapter(initial_links)
+        config = PlanDeliveryConfig.objects.create(
+            plan=self.plan,
+            delivery_mode=PlanDeliveryConfig.DeliveryMode.SUBSCRIPTION,
+        )
+        PlanDeliverySource.objects.create(
+            delivery_config=config,
+            source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+            panel=panel,
+            inbound=groups[0],
+            quantity=1,
+            priority=1,
+            metadata={"dynamic_subscription_policy": {"max_configs": 3}},
+        )
+        order = self.create_pending_order(username="v2-pg-dynamic-web")
+
+        with patch("store.plan_delivery_execution.get_safe_panel_adapter", return_value=adapter):
+            result = approve_and_provision_order(order, notify=False)
+
+        self.assertTrue(result.ok)
+        order.refresh_from_db()
+        cup = SubscriptionCup.objects.get(order=order, vpn_client__isnull=True)
+        original_url = build_subscription_cup_url(cup, store=self.store)
+        feed = ExternalSubscriptionFeed.objects.get(cup=cup)
+
+        replacement_links = [
+            self.direct_link(625, host="pg-dynamic-refresh-one.example.com"),
+            self.direct_link(626, host="pg-dynamic-refresh-two.example.com"),
+        ]
+        summary = refresh_external_subscription_feed(
+            feed.pk,
+            force=True,
+            candidate_raw_links=replacement_links,
+        )
+        order.refresh_from_db()
+        cup.refresh_from_db()
+        delivery = resolve_customer_order_delivery(order)
+
+        self.assertTrue(summary.ok)
+        self.assertEqual(order.sub_link, original_url)
+        self.assertEqual(delivery.customer_subscription_url, original_url)
+        self.assertEqual(delivery.config_count, 2)
+        self.assertEqual(
+            list(CupItem.objects.filter(cup=cup, is_active=True).values_list("config_link__raw_link", flat=True)),
+            replacement_links,
         )
 
     def test_dynamic_native_parser_preserves_raw_and_reads_reality_metadata(self):
@@ -702,6 +1109,156 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertEqual(parsed.transport, "grpc")
         self.assertEqual(parsed.remark, "VMess Meta")
         self.assertEqual(parsed.host, "vmess-meta.example.com")
+
+    def test_sellability_verification_service_persists_success_without_raw_configs(self):
+        from .source_sellability import verify_panel_source_sellability
+
+        panel, source = self.create_simple_pasarguard_group_source(group_id=29)
+        raw_link = self.reality_link(660, host="verified-source.example.com")
+        adapter = SimpleNamespace(
+            family="pasarguard",
+            supports_sellability_probe=True,
+            probe_source_sellability=Mock(
+                return_value={
+                    "ok": True,
+                    "observed_config_count": 1,
+                    "protocol_counts": {"vless": 1},
+                    "reality_count": 1,
+                    "pbk_validation_ok": True,
+                    "cleanup_succeeded": True,
+                    "safe_details": {
+                        "subscription_url": "https://pasarguard.example.com/s/privateProbeToken123456",
+                        "sample_config": raw_link,
+                    },
+                }
+            ),
+        )
+
+        result = verify_panel_source_sellability(source.pk, adapter_factory=lambda _panel: adapter)
+
+        self.assertTrue(result.ok)
+        source.refresh_from_db()
+        self.assertEqual(source.verification_status, Inbound.VerificationStatus.VERIFIED_SELLABLE)
+        self.assertTrue(source.is_active)
+        self.assertTrue(source.available_for_new_orders)
+        self.assertIsNotNone(source.verified_at)
+        self.assertEqual(source.last_verified_config_count, 1)
+        self.assertEqual(source.last_verification_error_code, "")
+        rendered_source = json.dumps(source.metadata, ensure_ascii=False)
+        rendered_audit = json.dumps(BotEventLog.objects.latest("pk").raw_payload, ensure_ascii=False)
+        self.assertNotIn("privateProbeToken123456", rendered_source)
+        self.assertNotIn("privateProbeToken123456", rendered_audit)
+        self.assertNotIn("vless://", rendered_source)
+        self.assertNotIn("vless://", rendered_audit)
+
+    def test_sellability_verification_cleanup_failure_persists_failed_not_sellable(self):
+        from .source_sellability import verify_panel_source_sellability
+
+        _panel, source = self.create_simple_pasarguard_group_source(
+            group_id=29,
+            verified=True,
+            active=True,
+            available=True,
+        )
+        previous_attempt = source.verification_attempted_at
+        adapter = SimpleNamespace(
+            family="pasarguard",
+            supports_sellability_probe=True,
+            probe_source_sellability=Mock(
+                return_value={
+                    "ok": True,
+                    "observed_config_count": 1,
+                    "protocol_counts": {"vless": 1},
+                    "reality_count": 1,
+                    "pbk_validation_ok": True,
+                    "cleanup_succeeded": False,
+                }
+            ),
+        )
+
+        result = verify_panel_source_sellability(source.pk, adapter_factory=lambda _panel: adapter)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "cleanup_failed")
+        source.refresh_from_db()
+        self.assertEqual(source.verification_status, Inbound.VerificationStatus.VERIFICATION_FAILED)
+        self.assertFalse(source.is_active)
+        self.assertFalse(source.available_for_new_orders)
+        self.assertIsNone(source.verified_at)
+        self.assertEqual(source.last_verified_config_count, 0)
+        self.assertEqual(source.last_verification_error_code, "cleanup_failed")
+        self.assertNotEqual(source.verification_attempted_at, previous_attempt)
+
+    def test_unverified_simple_source_is_listed_for_verification_but_blocked_for_new_sales(self):
+        from django.http import QueryDict
+
+        from .admin_catalog import CatalogPlanForm
+        from .plan_route_services import get_valid_sales_inbounds, sales_inbound_issues
+
+        _panel, source = self.create_simple_pasarguard_group_source(group_id=29, active=True, available=True)
+
+        self.assertTrue(source.requires_sellability_verification)
+        self.assertNotIn(source, list(get_valid_sales_inbounds(self.store)))
+        self.assertIn(self.inbound, list(get_valid_sales_inbounds(self.store)))
+        errors, warnings = sales_inbound_issues(source, store=self.store)
+        self.assertTrue(errors)
+        self.assertIn(
+            "PasarGuard route uses native raw subscription delivery; local direct link reconstruction is bypassed.",
+            warnings,
+        )
+        form = CatalogPlanForm(store=self.store, plan=self.plan)
+        option = next(item for item in form.source_inbound_options if item["value"] == str(source.pk))
+        self.assertEqual(option["verification_state"], "UNVERIFIED")
+        self.assertTrue(option["verification_blocking"])
+
+        data = QueryDict("", mutable=True)
+        data.update(
+            {
+                "name": self.plan.name,
+                "volume_gb": str(self.plan.volume_gb),
+                "duration_days": str(self.plan.duration_days),
+                "price": str(self.plan.price),
+                "currency": self.plan.currency,
+                "device_limit": str(self.plan.device_limit),
+                "sort_order": str(self.plan.sort_order),
+                "delivery_mode": PlanDeliveryConfig.DeliveryMode.SUBSCRIPTION,
+                "failure_policy": PlanDeliveryConfig.FailurePolicy.STRICT,
+                "source-TOTAL_FORMS": "1",
+                "source-0-source_type": PlanDeliverySource.SourceType.PANEL_INBOUND,
+                "source-0-inbound": str(source.pk),
+                "source-0-label": "Unverified PG",
+                "source-0-quantity": "1",
+                "source-0-priority": "10",
+                "source-0-required": "on",
+            }
+        )
+        bound_form = CatalogPlanForm(data, store=self.store, plan=self.plan)
+
+        self.assertFalse(bound_form.is_valid())
+        self.assertIn("unverified", " ".join(str(error) for error in bound_form.source_errors).lower())
+        with self.assertRaises(ValidationError):
+            PlanInboundRoute(plan=self.plan, inbound=source, is_active=True).full_clean()
+
+    def test_verified_stale_simple_source_remains_selectable_with_warning(self):
+        from .plan_route_services import get_valid_sales_inbounds, sales_inbound_issues
+        from .source_sellability import source_sellability_is_stale, source_verification_ui_state
+
+        _panel, source = self.create_simple_pasarguard_group_source(
+            group_id=29,
+            verified=True,
+            active=True,
+            available=True,
+        )
+        source.verified_at = timezone.now() - timedelta(days=8)
+        source.save(update_fields=["verified_at", "updated_at"])
+
+        self.assertTrue(source_sellability_is_stale(source))
+        self.assertIn(source, list(get_valid_sales_inbounds(self.store)))
+        errors, warnings = sales_inbound_issues(source, store=self.store)
+        self.assertEqual(errors, [])
+        self.assertIn("Sellability verification is older than 7 days.", warnings)
+        self.assertFalse(source_verification_ui_state(source)["blocking"])
+        PlanInboundRoute(plan=self.plan, inbound=source, is_active=True).full_clean()
 
     def test_dynamic_filter_protocol_security_transport_and_remark(self):
         from .external_subscription_sources import filter_native_configs
@@ -849,14 +1406,17 @@ class SubscriptionCupMVPTests(TestCase):
         first = self.direct_link(691, host="first.example.com")
         second = self.direct_link(692, host="second.example.com")
         feed, cup, _source, _panel = self.create_dynamic_feed_with_links([first])
+        original_cup_token = cup.token
         refresh_external_subscription_feed(feed.pk, candidate_raw_links=[])
         feed.refresh_from_db()
         self.assertEqual(feed.consecutive_failures, 1)
 
         summary = refresh_external_subscription_feed(feed.pk, force=True, candidate_raw_links=[second])
 
+        cup.refresh_from_db()
         feed.refresh_from_db()
         self.assertTrue(summary.ok)
+        self.assertEqual(cup.token, original_cup_token)
         self.assertEqual(feed.status, ExternalSubscriptionFeed.Status.HEALTHY)
         self.assertEqual(feed.consecutive_failures, 0)
         self.assertEqual(feed.last_good_config_count, 1)
@@ -980,7 +1540,10 @@ class SubscriptionCupMVPTests(TestCase):
         self.assertEqual(policy["refresh_interval_hours"], 6)
 
     def test_plan_delivery_v2_pasarguard_and_inventory_subscription_hybrid_preserves_all_links(self):
+        from .customer_delivery import resolve_customer_order_delivery
         from .provisioning_services import approve_and_provision_order
+        from .subscription_cups import build_subscription_cup_url
+        from .telegram_bot.order_delivery import approved_order_detail_lines, order_config_link_groups
 
         panel, groups = self.create_pasarguard_panel_and_groups()
         pg_links = [self.reality_link(630, host="pg-hybrid.example.com")]
@@ -1021,6 +1584,76 @@ class SubscriptionCupMVPTests(TestCase):
             pg_links + inventory_links,
         )
         self.assertEqual(ConfigAllocation.objects.filter(order=order, cup=cup, status=ConfigAllocation.Status.ACTIVE).count(), 1)
+        self.assertIn("تعداد کانفیگ: ۲", approved_order_detail_lines(order))
+        self.assertEqual(resolve_customer_order_delivery(order).config_count, 2)
+        self.assertEqual(order_config_link_groups(order)[0]["subscription_link"], build_subscription_cup_url(cup, store=self.store))
+        self.assertEqual(order_config_link_groups(order)[0]["direct_link"], "")
+
+    def test_plan_delivery_v2_xui_subscription_customer_delivery_uses_cup_url(self):
+        from .provisioning_services import approve_and_provision_order
+        from .subscription_cups import build_subscription_cup_url
+        from .telegram_bot.order_delivery import order_config_link_groups, send_customer_order_event_message
+
+        xui_link = self.direct_link(632, host="xui-subscription.example.com")
+        xui_result = {
+            "email": "xui_subscription_user",
+            "uuid": "bbbbbbbb-bbbb-4bbb-8bbb-000000000632",
+            "sub_id": "xui-provider-sub",
+            "sub_link": "https://panel.example.com/sub/xui-provider-sub",
+            "direct_link": xui_link,
+            "raw": {"family": "xui"},
+        }
+        config = PlanDeliveryConfig.objects.create(
+            plan=self.plan,
+            delivery_mode=PlanDeliveryConfig.DeliveryMode.SUBSCRIPTION,
+        )
+        PlanDeliverySource.objects.create(
+            delivery_config=config,
+            source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+            panel=self.panel,
+            inbound=self.inbound,
+            quantity=1,
+            priority=1,
+        )
+        order = self.create_pending_order(username="v2-xui-sub")
+
+        with patch(
+            "store.provisioning_services.lookup_existing_remote_client",
+            side_effect=[None, xui_result],
+        ), patch(
+            "store.provisioning_services.create_enabled_client_details",
+            return_value=xui_result,
+        ):
+            result = approve_and_provision_order(order, notify=False)
+
+        self.assertTrue(result.ok)
+        order.refresh_from_db()
+        cup = SubscriptionCup.objects.get(order=order, vpn_client__isnull=True)
+        qasedak_subscription_url = build_subscription_cup_url(cup, store=self.store)
+        self.assertEqual(order.sub_link, qasedak_subscription_url)
+        self.assertEqual(order.direct_link, "")
+        self.assertEqual(order_config_link_groups(order)[0]["subscription_link"], qasedak_subscription_url)
+        self.assertEqual(order_config_link_groups(order)[0]["direct_link"], "")
+
+        bot_client = self.capture_bot_client()
+        send_customer_order_event_message(
+            bot_client,
+            order,
+            event_type="approved",
+            chat_id="100",
+            format_customer_order_event_func=lambda order, event_type: "approved",
+        )
+        rendered = "\n".join(message["text"] for message in bot_client.messages)
+        self.assertIn(qasedak_subscription_url, rendered)
+        self.assertIn("تعداد کانفیگ: ۱", rendered)
+        self.assertNotIn("panel.example.com/sub/xui-provider-sub", rendered)
+        self.assertNotIn("vless://", rendered)
+
+        self.set_customer_cookie(order.customer)
+        response = self.client.get(reverse("order_detail", kwargs={"order_id": order.public_id}))
+        self.assertContains(response, qasedak_subscription_url)
+        self.assertNotContains(response, "panel.example.com/sub/xui-provider-sub")
+        self.assertNotContains(response, "vless://")
 
     def test_plan_delivery_v2_xui_and_pasarguard_direct_hybrid_keeps_both_panel_outputs(self):
         from .provisioning_services import approve_and_provision_order
@@ -5626,6 +6259,48 @@ class PanelAdapterFactoryTests(TestCase):
             is_active=True,
         )
 
+    def reality_link(self, index=701, host="reality.example.com"):
+        return (
+            f"vless://aaaaaaaa-aaaa-4aaa-8aaa-{index:012d}@{host}:443"
+            "?type=tcp&security=reality&pbk=PUBLICKEYVALUE&fp=chrome"
+            "&sni=front.example.com&sid=abcd1234&flow=xtls-rprx-vision#Reality"
+        )
+
+    def create_simple_pasarguard_group_source(self, *, group_id=29):
+        panel = Panel.objects.create(
+            store=self.store,
+            name=f"PasarGuard simple {group_id}",
+            family=Panel.Family.PASARGUARD,
+            url="https://pasarguard.example.com",
+            username="",
+            password="pg-api-key-secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.PASARGUARD_GROUPS,
+        )
+        source = Inbound.objects.create(
+            panel=panel,
+            inbound_id=group_id,
+            remark="Seller",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="pasarguard-native",
+            port="0",
+            config_params="{}",
+            security=Inbound.Security.REALITY,
+            is_active=False,
+            available_for_new_orders=False,
+            xui_source=Inbound.XUISource.PASARGUARD_GROUP,
+            xui_remote_key=f"pasarguard_group:{group_id}",
+            metadata={
+                "remote_kind": "pasarguard_group",
+                "group_id": group_id,
+                "remote_source": "groups_simple",
+                "disabled_known": False,
+                "inbound_tags_known": False,
+                "native_raw_delivery": True,
+            },
+        )
+        return panel, source
+
     def test_factory_defaults_existing_panel_model_to_xui_adapter(self):
         from .panels import CapabilityFlag, get_panel_adapter
         from .panels.xui import XUIPanelAdapter
@@ -5692,6 +6367,7 @@ class PanelAdapterFactoryTests(TestCase):
         self.assertTrue(report.uses_api_key_auth)
         self.assertFalse(report.requires_csrf_for_login)
         self.assertIn(CapabilityFlag.NATIVE_RAW_CONFIGS, report.profile.flags)
+        self.assertIn(CapabilityFlag.SELLABILITY_PROBE, report.profile.flags)
         self.assertEqual(report_dict["supported_protocols"], ["native_raw"])
         self.assertFalse(report_dict["metadata"]["local_link_reconstruction"])
 
@@ -5923,6 +6599,149 @@ class PanelAdapterFactoryTests(TestCase):
         self.assertEqual(result["direct_link"], raw_links[0])
         self.assertEqual(result["sub_link"], "https://pasarguard.example.com/s/privateToken123456")
         self.assertTrue(result["raw"]["native_raw_delivery"])
+
+    def test_pasarguard_sellability_probe_success_creates_fetches_and_cleans_up(self):
+        from .panels.pasarguard import PasarGuardClient, PasarGuardPanelAdapter
+
+        panel, source = self.create_simple_pasarguard_group_source(group_id=1)
+        raw_links = [
+            self.reality_link(720, host="probe.example.com"),
+            "trojan://password@probe.example.com:443#Probe-Trojan",
+        ]
+        session = DummyPasarGuardSession(
+            responses=[
+                DummyPasarGuardResponse({"id": 1, "name": "Seller", "inbound_tags": ["tag-a"], "is_disabled": False}),
+                DummyPasarGuardResponse({}, status_code=404, text="not found"),
+                DummyPasarGuardResponse({"id": 10, "subscription_url": "https://pasarguard.example.com/s/probeToken123456"}),
+                DummyPasarGuardResponse({}, status_code=204, text=""),
+                DummyPasarGuardResponse({}, status_code=404, text="not found"),
+            ],
+            raw_responses=[DummyPasarGuardResponse({}, text="\n".join(raw_links))],
+        )
+        adapter = PasarGuardPanelAdapter(panel, client=PasarGuardClient(panel, session=session))
+
+        result = adapter.probe_source_sellability(source)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["observed_config_count"], 2)
+        self.assertEqual(result["protocol_counts"]["vless"], 1)
+        self.assertEqual(result["protocol_counts"]["trojan"], 1)
+        self.assertEqual(result["reality_count"], 1)
+        self.assertTrue(result["pbk_validation_ok"])
+        self.assertTrue(result["cleanup_succeeded"])
+        created_username = session.calls[2]["json"]["username"]
+        self.assertTrue(created_username.startswith("qasedak_verify"))
+        methods_paths = [(call["method"], urlsplit(call["url"]).path) for call in session.calls]
+        self.assertEqual(
+            methods_paths,
+            [
+                ("GET", "/api/group/1"),
+                ("GET", f"/api/user/{created_username}"),
+                ("POST", "/api/user"),
+                ("DELETE", f"/api/user/{created_username}"),
+                ("GET", f"/api/user/{created_username}"),
+            ],
+        )
+        self.assertEqual(session.calls[2]["json"]["group_ids"], [1])
+        self.assertEqual(session.calls[2]["json"]["data_limit"], 1073741)
+        self.assertEqual(session.calls[2]["json"]["hwid_limit"], 1)
+        self.assertTrue(session.get_calls[0]["url"].endswith("/s/probeToken123456/links"))
+        self.assertNotIn("raw_links", result["safe_details"])
+        self.assertNotIn("subscription_url", result["safe_details"])
+
+    def test_pasarguard_sellability_probe_fails_reality_without_pbk_and_cleans_up(self):
+        from .panels.pasarguard import PasarGuardClient, PasarGuardPanelAdapter
+
+        panel, source = self.create_simple_pasarguard_group_source(group_id=1)
+        raw_link = (
+            "vless://aaaaaaaa-aaaa-4aaa-8aaa-000000000721@probe.example.com:443"
+            "?type=tcp&security=reality&sni=front.example.com#MissingPBK"
+        )
+        session = DummyPasarGuardSession(
+            responses=[
+                DummyPasarGuardResponse({"id": 1, "name": "Seller", "inbound_tags": [], "is_disabled": False}),
+                DummyPasarGuardResponse({}, status_code=404, text="not found"),
+                DummyPasarGuardResponse({"id": 10, "subscription_url": "https://pasarguard.example.com/s/probeToken123456"}),
+                DummyPasarGuardResponse({}, status_code=204, text=""),
+                DummyPasarGuardResponse({}, status_code=404, text="not found"),
+            ],
+            raw_responses=[DummyPasarGuardResponse({}, text=raw_link)],
+        )
+        adapter = PasarGuardPanelAdapter(panel, client=PasarGuardClient(panel, session=session))
+
+        result = adapter.probe_source_sellability(source)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "reality_pbk_missing")
+        self.assertTrue(result["cleanup_succeeded"])
+        self.assertEqual(result["safe_details"]["invalid_reasons"]["reality_missing_pbk"], 1)
+
+    def test_pasarguard_sellability_probe_zero_configs_and_create_failure_are_safe_failures(self):
+        from .panels.pasarguard import PasarGuardClient, PasarGuardPanelAdapter
+
+        panel, source = self.create_simple_pasarguard_group_source(group_id=1)
+        empty_session = DummyPasarGuardSession(
+            responses=[
+                DummyPasarGuardResponse({"id": 1, "name": "Seller", "inbound_tags": [], "is_disabled": False}),
+                DummyPasarGuardResponse({}, status_code=404, text="not found"),
+                DummyPasarGuardResponse({"id": 10, "subscription_url": "https://pasarguard.example.com/s/probeToken123456"}),
+                DummyPasarGuardResponse({}, status_code=204, text=""),
+                DummyPasarGuardResponse({}, status_code=404, text="not found"),
+            ],
+            raw_responses=[
+                DummyPasarGuardResponse({}, text=""),
+                DummyPasarGuardResponse({"body": {"links": []}}),
+            ],
+        )
+        empty_adapter = PasarGuardPanelAdapter(panel, client=PasarGuardClient(panel, session=empty_session))
+
+        empty_result = empty_adapter.probe_source_sellability(source)
+
+        self.assertFalse(empty_result["ok"])
+        self.assertEqual(empty_result["error_code"], "native_links_empty")
+        self.assertTrue(empty_result["cleanup_succeeded"])
+
+        create_failure_session = DummyPasarGuardSession(
+            responses=[
+                DummyPasarGuardResponse({"id": 1, "name": "Seller", "inbound_tags": [], "is_disabled": False}),
+                DummyPasarGuardResponse({}, status_code=404, text="not found"),
+                DummyPasarGuardResponse({}, status_code=500, text="create failed pg-api-key-secret"),
+            ]
+        )
+        create_failure_adapter = PasarGuardPanelAdapter(
+            panel,
+            client=PasarGuardClient(panel, session=create_failure_session),
+        )
+
+        create_failure_result = create_failure_adapter.probe_source_sellability(source)
+
+        self.assertFalse(create_failure_result["ok"])
+        self.assertEqual(create_failure_result["error_code"], "remote_create_failed")
+        self.assertFalse(create_failure_result["cleanup_succeeded"])
+        self.assertEqual(create_failure_adapter.client.session.get_calls, [])
+
+    def test_pasarguard_sellability_probe_cleanup_failure_blocks_success(self):
+        from .panels.pasarguard import PasarGuardClient, PasarGuardPanelAdapter
+
+        panel, source = self.create_simple_pasarguard_group_source(group_id=1)
+        session = DummyPasarGuardSession(
+            responses=[
+                DummyPasarGuardResponse({"id": 1, "name": "Seller", "inbound_tags": [], "is_disabled": False}),
+                DummyPasarGuardResponse({}, status_code=404, text="not found"),
+                DummyPasarGuardResponse({"id": 10, "subscription_url": "https://pasarguard.example.com/s/probeToken123456"}),
+                DummyPasarGuardResponse({}, status_code=500, text="delete failed pg-api-key-secret"),
+            ],
+            raw_responses=[DummyPasarGuardResponse({}, text=self.reality_link(722, host="probe.example.com"))],
+        )
+        adapter = PasarGuardPanelAdapter(panel, client=PasarGuardClient(panel, session=session))
+
+        result = adapter.probe_source_sellability(source)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "cleanup_failed")
+        self.assertFalse(result["cleanup_succeeded"])
+        self.assertTrue(result["safe_details"]["cleanup_attempted"])
+        self.assertNotIn("pg-api-key-secret", json.dumps(result, ensure_ascii=False))
 
     def test_pasarguard_links_primary_succeeds_when_raw_browser_links_are_empty(self):
         from .panels.pasarguard import PasarGuardClient, PasarGuardPanelAdapter
@@ -11357,6 +12176,70 @@ class FreeTrialServiceTests(TestCase):
         self.assertEqual(xui_mock.call_args.kwargs["inbound"], self.inbound)
         self.assertEqual(xui_mock.call_args.kwargs["duration_hours"], 24)
 
+    def test_pasarguard_free_trial_uses_adapter_and_persists_native_direct_link(self):
+        from .free_trial_services import create_free_trial_for_customer
+
+        pg_panel = Panel.objects.create(
+            store=self.store,
+            name="PasarGuard trial",
+            family=Panel.Family.PASARGUARD,
+            capability_profile=Panel.CapabilityProfile.PASARGUARD_GROUPS,
+            url="https://pasarguard.example.com",
+            username="",
+            password="pg-secret",
+            is_active=True,
+        )
+        pg_inbound = Inbound.objects.create(
+            panel=pg_panel,
+            inbound_id=29,
+            remark="Seller",
+            server_ip="pasarguard-native",
+            port="0",
+            config_params="{}",
+            is_active=True,
+            available_for_new_orders=True,
+            xui_source=Inbound.XUISource.PASARGUARD_GROUP,
+            verification_status=Inbound.VerificationStatus.VERIFIED_SELLABLE,
+            last_verified_config_count=35,
+        )
+        self.store.free_trial_panel = pg_panel
+        self.store.free_trial_inbound = pg_inbound
+        self.store.free_trial_duration_hours = 25
+        self.store.save(update_fields=["free_trial_panel", "free_trial_inbound", "free_trial_duration_hours", "updated_at"])
+        adapter = Mock()
+        adapter.create_enabled_client.return_value = {
+            "uuid": "77777777-7777-4777-8777-777777777777",
+            "email": "trial_pg_42",
+            "sub_id": "pg-sub",
+            "sub_link": "https://pasarguard.example.com/sub/private-token",
+            "direct_link": "vless://pasarguard-direct.example.com",
+            "raw_links": ["vless://pasarguard-direct.example.com"],
+            "expires_at": timezone.now() + timedelta(days=2),
+            "xui_node_id": "",
+            "remote_client_key": "pasarguard:panel:user:trial_pg_42",
+            "raw": {"family": "pasarguard", "native_raw_delivery": True, "subscription_url_saved": True},
+        }
+
+        with patch("store.free_trial_services.get_safe_panel_adapter", return_value=adapter):
+            result = create_free_trial_for_customer(self.customer, telegram_user_id="42", store=self.store)
+
+        self.assertTrue(result.success)
+        adapter.create_enabled_client.assert_called_once()
+        request = adapter.create_enabled_client.call_args.args[0]
+        self.assertEqual(request.inbound, pg_inbound)
+        self.assertEqual(request.inbounds, [pg_inbound])
+        self.assertEqual(request.duration_days, 2)
+        self.assertEqual(request.limit_ip, 1)
+        trial_request = FreeTrialRequest.objects.get()
+        self.assertEqual(trial_request.panel, pg_panel)
+        self.assertEqual(trial_request.inbound, pg_inbound)
+        self.assertEqual(trial_request.config_link, "vless://pasarguard-direct.example.com")
+        vpn_client = trial_request.vpn_client
+        self.assertEqual(vpn_client.inbound, pg_inbound)
+        self.assertEqual(vpn_client.sub_link, "https://pasarguard.example.com/sub/private-token")
+        self.assertEqual(vpn_client.direct_link, "vless://pasarguard-direct.example.com")
+        self.assertEqual((vpn_client.xui_raw or {}).get("family"), "pasarguard")
+
     @patch("store.free_trial_services.create_trial_client_details")
     def test_fast_duplicate_click_is_blocked_by_lock_before_xui_call(self, xui_mock):
         from .free_trial_services import create_free_trial_for_customer
@@ -12581,9 +13464,85 @@ class AdminPanelCenterTests(TestCase):
         group = Inbound.objects.get(panel=panel, inbound_id=29)
         self.assertFalse(group.is_active)
         self.assertFalse(group.available_for_new_orders)
+        self.assertEqual(group.verification_status, Inbound.VerificationStatus.UNVERIFIED)
+        self.assertIsNone(group.verified_at)
+        self.assertEqual(group.last_verified_config_count, 0)
         self.assertIsNone((group.metadata or {}).get("is_disabled"))
         self.assertFalse((group.metadata or {}).get("disabled_known"))
         self.assertFalse((group.metadata or {}).get("inbound_tags_known"))
+        self.assertTrue(group.requires_sellability_verification)
+
+    def test_panel_center_verify_source_action_marks_group_verified_without_secret_output(self):
+        panel = Panel.objects.create(
+            store=self.store,
+            name="PasarGuard verify action",
+            family=Panel.Family.PASARGUARD,
+            url="https://pg-verify.example.com",
+            username="",
+            password="pg-api-key-secret",
+            is_active=True,
+            capability_profile=Panel.CapabilityProfile.PASARGUARD_GROUPS,
+        )
+        source = Inbound.objects.create(
+            panel=panel,
+            inbound_id=29,
+            remark="Seller",
+            protocol=Inbound.Protocol.VLESS,
+            server_ip="pasarguard-native",
+            port="0",
+            config_params="{}",
+            is_active=False,
+            available_for_new_orders=False,
+            xui_source=Inbound.XUISource.PASARGUARD_GROUP,
+            xui_remote_key="pasarguard_group:29",
+            metadata={
+                "remote_kind": "pasarguard_group",
+                "group_id": 29,
+                "remote_source": "groups_simple",
+                "disabled_known": False,
+                "inbound_tags_known": False,
+                "native_raw_delivery": True,
+            },
+        )
+        raw_link = "vless://aaaaaaaa-aaaa-4aaa-8aaa-000000000729@verify.example.com:443?security=reality&pbk=PUBLICKEYVALUE&type=tcp#Verify"
+        adapter = SimpleNamespace(
+            family="pasarguard",
+            supports_sellability_probe=True,
+            probe_source_sellability=Mock(
+                return_value={
+                    "ok": True,
+                    "observed_config_count": 1,
+                    "protocol_counts": {"vless": 1},
+                    "reality_count": 1,
+                    "pbk_validation_ok": True,
+                    "cleanup_succeeded": True,
+                    "safe_details": {
+                        "subscription_url": "https://pasarguard.example.com/s/privateVerifyToken123456",
+                        "raw_link": raw_link,
+                    },
+                }
+            ),
+        )
+        self.login_admin()
+
+        with patch("store.source_sellability.get_safe_panel_adapter", return_value=adapter):
+            response = self.client.post(
+                reverse("admin_store_panel_center_verify_source", args=[source.pk]),
+                follow=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        source.refresh_from_db()
+        self.assertEqual(source.verification_status, Inbound.VerificationStatus.VERIFIED_SELLABLE)
+        self.assertTrue(source.is_active)
+        self.assertTrue(source.available_for_new_orders)
+        body = response.content.decode("utf-8")
+        audit = json.dumps(BotEventLog.objects.latest("pk").raw_payload, ensure_ascii=False)
+        self.assertIn("VERIFIED FOR SALE", body)
+        self.assertNotIn("privateVerifyToken123456", body)
+        self.assertNotIn("privateVerifyToken123456", audit)
+        self.assertNotIn("vless://", body)
+        self.assertNotIn("vless://", audit)
 
     def test_pasarguard_sync_marks_removed_group_stale_instead_of_deleting(self):
         from .admin_panel_center.services import sync_panel_inbounds
@@ -20276,6 +21235,44 @@ class TelegramPurchaseFlowTests(TestCase):
             )
         )
         xui_mock.assert_called_once()
+
+    @patch(
+        "store.free_trial_services.create_trial_client_details",
+        return_value={
+            **fake_client_result("46464646-4646-4646-8646-464646464646"),
+            "sub_link": "https://pasarguard.example.com/sub/private-token",
+            "direct_link": "vless://pasarguard-direct.example.com",
+            "raw": {"family": "pasarguard", "native_raw_delivery": True, "subscription_url_saved": True},
+        },
+    )
+    @patch("store.bots.requests.post", return_value=DummyBotResponse())
+    def test_free_trial_confirm_hides_pasarguard_native_subscription_link(self, post_mock, trial_mock):
+        self.enable_free_trial()
+
+        response = self.post_update(self.callback("user:free_trial_confirm", callback_id="trial-confirm-pg"))
+
+        self.assertEqual(response.status_code, 200)
+        trial_request = FreeTrialRequest.objects.get()
+        self.assertEqual(trial_request.status, FreeTrialRequest.Status.DELIVERED)
+        payloads = [
+            call.kwargs["json"]
+            for call in post_mock.call_args_list
+            if call.kwargs.get("json", {}).get("chat_id") == "42"
+            and "text" in call.kwargs.get("json", {})
+        ]
+        config_payload = next(payload for payload in payloads if "vless://pasarguard-direct.example.com" in payload["text"])
+        rendered_payload = json.dumps(config_payload, ensure_ascii=False)
+        self.assertIn("⚡ لینک مستقیم", config_payload["text"])
+        self.assertNotIn("🔗 لینک اشتراک", config_payload["text"])
+        self.assertNotIn("https://pasarguard.example.com/sub/private-token", rendered_payload)
+        self.assertFalse(
+            any(
+                button.get("copy_text", {}).get("text") == "https://pasarguard.example.com/sub/private-token"
+                for row in config_payload["reply_markup"]["inline_keyboard"]
+                for button in row
+            )
+        )
+        trial_mock.assert_called_once()
 
     @patch("store.free_trial_services.create_trial_client_details")
     @patch("store.bots.requests.post")

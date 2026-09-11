@@ -4,6 +4,7 @@ from django.core.exceptions import ValidationError
 from django.db import models, transaction
 
 from .models import Inbound, Operator, Panel, Plan, PlanInboundRoute
+from .source_sellability import source_sellability_issues
 
 
 BULK_ROUTE_STRATEGY_SKIP_EXISTING = "skip_existing"
@@ -29,6 +30,22 @@ def get_valid_sales_inbounds(store=None):
     )
     if store:
         inbounds = inbounds.filter(models.Q(panel__store=store) | models.Q(panel__store__isnull=True))
+    unverified_pasarguard_source = (
+        models.Q(
+            panel__family=Panel.Family.PASARGUARD,
+            xui_source=Inbound.XUISource.PASARGUARD_GROUP,
+            verification_status__in=[
+                Inbound.VerificationStatus.UNVERIFIED,
+                Inbound.VerificationStatus.VERIFICATION_FAILED,
+            ],
+        )
+        & (
+            models.Q(metadata__remote_source="groups_simple")
+            | models.Q(metadata__disabled_known=False)
+            | models.Q(metadata__inbound_tags_known=False)
+        )
+    )
+    inbounds = inbounds.exclude(unverified_pasarguard_source)
     return inbounds.select_related("panel").order_by("panel__name", "inbound_id", "pk")
 
 
@@ -325,6 +342,9 @@ def sales_inbound_issues(inbound, *, store=None):
         errors.append("Inbound belongs to a different store.")
     elif str(getattr(panel, "family", "") or "").lower() == Panel.Family.PASARGUARD:
         warnings.append("PasarGuard route uses native raw subscription delivery; local direct link reconstruction is bypassed.")
+        verification_errors, verification_warnings = source_sellability_issues(inbound)
+        errors.extend(verification_errors)
+        warnings.extend(verification_warnings)
     elif getattr(panel, "capability_profile", "") == Panel.CapabilityProfile.UNKNOWN_SAFE:
         errors.append("X-UI compatibility is unknown; run compatibility audit before selling on this inbound.")
     elif getattr(panel, "capability_profile", "") in {

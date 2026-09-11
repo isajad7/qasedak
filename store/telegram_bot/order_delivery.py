@@ -1,29 +1,14 @@
 from django.db.models import Q
 
+from store.customer_delivery import (
+    customer_delivery_flat_links,
+    customer_delivery_link_groups,
+    customer_visible_config_count,
+)
 from store.jalali import persian_digits
 from store.models import BotEventLog, BotUser
-from store.subscription_cups import (
-    build_subscription_cup_base64_url,
-    build_subscription_cup_dashboard_url,
-    get_subscription_cup_for_order,
-    get_subscription_cup_for_vpn_client,
-)
 
 from .config_delivery import config_send_result_count, send_config_links_message
-
-
-def _metadata_direct_delivery_links(order):
-    metadata = order.metadata or {}
-    links = metadata.get("direct_delivery_links") or []
-    cleaned = []
-    seen = set()
-    for link in links:
-        link = str(link or "").strip()
-        if not link or link in seen:
-            continue
-        seen.add(link)
-        cleaned.append(link)
-    return cleaned
 
 
 def format_customer_order_event(order, *, event_type, format_order_message_func):
@@ -33,7 +18,7 @@ def format_customer_order_event(order, *, event_type, format_order_message_func)
             "",
             f"کد پیگیری: {order.order_tracking_code}",
             f"پلن: {order.plan.name if order.plan_id else '-'}",
-            f"تعداد کانفیگ: {persian_digits(order.quantity or 1)}",
+            f"تعداد کانفیگ: {persian_digits(customer_visible_config_count(order))}",
         ]
         if order.operator_id:
             lines.append(f"اپراتور: {order.operator.name}")
@@ -56,152 +41,18 @@ def format_customer_order_event(order, *, event_type, format_order_message_func)
 
 
 def order_config_links(order):
-    links = []
-    direct_delivery_links = _metadata_direct_delivery_links(order)
-    if direct_delivery_links:
-        for index, link in enumerate(direct_delivery_links, start=1):
-            prefix = f"کانفیگ {persian_digits(index)}" if len(direct_delivery_links) > 1 else "کانفیگ"
-            links.append((f"{prefix} - لینک مستقیم", link))
-        return links
-    clients = list(order.get_vpn_clients())
-    if clients:
-        groups = order_config_link_groups(order)
-        for index, group in enumerate(groups, start=1):
-            prefix = f"کانفیگ {persian_digits(index)}" if len(groups) > 1 else "کانفیگ"
-            for label, link in (
-                ("لینک اشتراک", group.get("subscription_link")),
-                ("لینک مستقیم", group.get("direct_link")),
-                ("لینک مدیریت و ورود به برنامه", group.get("project_subscription_link")),
-                ("لینک سازگار جایگزین", group.get("project_client_link")),
-            ):
-                if not link:
-                    continue
-                links.append((f"{prefix} - {label}", link))
-        return links
-    if order.sub_link:
-        links.append(("کانفیگ - لینک اشتراک", order.sub_link))
-    if order.direct_link:
-        links.append(("کانفیگ - لینک مستقیم", order.direct_link))
-    cup = get_subscription_cup_for_order(order)
-    if cup:
-        links.append(("کانفیگ - لینک مدیریت و ورود به برنامه", build_subscription_cup_dashboard_url(cup, store=order.store)))
-        links.append(("کانفیگ - لینک سازگار جایگزین", build_subscription_cup_base64_url(cup, store=order.store)))
-    return links
-
-
-def _project_subscription_urls(cup, store):
-    if not cup:
-        return "", ""
-    return (
-        build_subscription_cup_dashboard_url(cup, store=store),
-        build_subscription_cup_base64_url(cup, store=store),
-    )
+    return customer_delivery_flat_links(order)
 
 
 def order_config_link_groups(order):
-    direct_delivery_links = _metadata_direct_delivery_links(order)
-    if direct_delivery_links:
-        total = len(direct_delivery_links)
-        return [
-            {
-                "label": f"کانفیگ {persian_digits(index)}" if total > 1 else "",
-                "subscription_link": "",
-                "direct_link": link,
-                "project_subscription_link": "",
-                "project_client_link": "",
-            }
-            for index, link in enumerate(direct_delivery_links, start=1)
-        ]
-    clients = list(order.get_vpn_clients())
-    if clients:
-        expanded = []
-        for vpn_client in clients:
-            cup = get_subscription_cup_for_vpn_client(vpn_client)
-            project_subscription_link, project_client_link = _project_subscription_urls(cup, order.store)
-            bundle_results = (vpn_client.xui_raw or {}).get("bundle_inbound_results") or []
-            if bundle_results:
-                for index, result in enumerate(bundle_results, start=1):
-                    expanded.append(
-                        {
-                            "subscription_link": result.get("sub_link") or vpn_client.sub_link,
-                            "direct_link": result.get("direct_link") or "",
-                            "project_subscription_link": project_subscription_link if index == 1 else "",
-                            "project_client_link": project_client_link if index == 1 else "",
-                        }
-                    )
-            else:
-                expanded.append(
-                    {
-                        "subscription_link": vpn_client.sub_link,
-                        "direct_link": vpn_client.direct_link,
-                        "project_subscription_link": project_subscription_link,
-                        "project_client_link": project_client_link,
-                    }
-                )
-        total = len(expanded)
-        groups = []
-        seen_subscription_links = set()
-        seen_project_subscription_links = set()
-        seen_project_client_links = set()
-        for index, item in enumerate(expanded, start=1):
-            label = f"کانفیگ {persian_digits(index)}" if total > 1 else ""
-            subscription_link = item["subscription_link"]
-            if subscription_link and subscription_link in seen_subscription_links:
-                subscription_link = ""
-            elif subscription_link:
-                seen_subscription_links.add(subscription_link)
-            project_subscription_link = item.get("project_subscription_link") or ""
-            if project_subscription_link and project_subscription_link in seen_project_subscription_links:
-                project_subscription_link = ""
-            elif project_subscription_link:
-                seen_project_subscription_links.add(project_subscription_link)
-            project_client_link = item.get("project_client_link") or ""
-            if project_client_link and project_client_link in seen_project_client_links:
-                project_client_link = ""
-            elif project_client_link:
-                seen_project_client_links.add(project_client_link)
-            groups.append(
-                {
-                    "label": label,
-                    "subscription_link": subscription_link,
-                    "direct_link": item["direct_link"],
-                    "project_subscription_link": project_subscription_link,
-                    "project_client_link": project_client_link,
-                }
-            )
-        return groups
-    if order.sub_link or order.direct_link:
-        cup = get_subscription_cup_for_order(order)
-        project_subscription_link, project_client_link = _project_subscription_urls(cup, order.store)
-        return [
-            {
-                "label": "",
-                "subscription_link": order.sub_link,
-                "direct_link": order.direct_link,
-                "project_subscription_link": project_subscription_link,
-                "project_client_link": project_client_link,
-            }
-        ]
-    cup = get_subscription_cup_for_order(order)
-    if cup:
-        project_subscription_link, project_client_link = _project_subscription_urls(cup, order.store)
-        return [
-            {
-                "label": "",
-                "subscription_link": "",
-                "direct_link": "",
-                "project_subscription_link": project_subscription_link,
-                "project_client_link": project_client_link,
-            }
-        ]
-    return []
+    return customer_delivery_link_groups(order)
 
 
 def approved_order_detail_lines(order, *, config_label=""):
     lines = [
         f"کد پیگیری: {order.order_tracking_code}",
         f"پلن: {order.plan.name if order.plan_id else '-'}",
-        f"تعداد کانفیگ: {persian_digits(order.quantity or 1)}",
+        f"تعداد کانفیگ: {persian_digits(customer_visible_config_count(order))}",
     ]
     if order.operator_id:
         lines.append(f"اپراتور: {order.operator.name}")

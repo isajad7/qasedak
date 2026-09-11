@@ -98,6 +98,7 @@ from .models import (
     WebTelegramLinkToken,
     DailyAdminReportLog,
 )
+from .source_sellability import source_verification_ui_state
 from .orchestrator_v2.models import ServerNode, TenantInstance
 from .admin_setup import (
     active_sales_inbounds,
@@ -4591,6 +4592,7 @@ class InboundAdmin(ImportExportModelAdmin):
         "protocol",
         "is_active",
         "available_for_new_orders",
+        "sellability_verification_status",
         "health_monitor_enabled",
         "active_plan_route_count",
         "sales_readiness",
@@ -4600,6 +4602,7 @@ class InboundAdmin(ImportExportModelAdmin):
         "is_active",
         "available_for_new_orders",
         "health_monitor_enabled",
+        "verification_status",
         "panel",
         "xui_source",
         "xui_node_id",
@@ -4630,6 +4633,12 @@ class InboundAdmin(ImportExportModelAdmin):
         "active_plan_route_count",
         "plan_fulfillment_links",
         "active_route_warning",
+        "sellability_verification_status",
+        "verified_at",
+        "verification_method",
+        "last_verified_config_count",
+        "last_verification_error_code",
+        "verification_attempted_at",
         "xui_remote_scope",
         "created_at",
         "updated_at",
@@ -4658,6 +4667,19 @@ class InboundAdmin(ImportExportModelAdmin):
                     "max_clients",
                     "current_users",
                     "active_route_warning",
+                )
+            },
+        ),
+        (
+            _("Sellability verification"),
+            {
+                "fields": (
+                    "sellability_verification_status",
+                    "verified_at",
+                    "verification_method",
+                    "last_verified_config_count",
+                    "last_verification_error_code",
+                    "verification_attempted_at",
                 )
             },
         ),
@@ -4738,6 +4760,19 @@ class InboundAdmin(ImportExportModelAdmin):
                         "max_clients",
                         "current_users",
                         "active_route_warning",
+                    )
+                },
+            ),
+            (
+                _("Sellability verification"),
+                {
+                    "fields": (
+                        "sellability_verification_status",
+                        "verified_at",
+                        "verification_method",
+                        "last_verified_config_count",
+                        "last_verification_error_code",
+                        "verification_attempted_at",
                     )
                 },
             ),
@@ -4852,6 +4887,29 @@ class InboundAdmin(ImportExportModelAdmin):
             "info": "bg-info",
         }.get(readiness["tone"], "bg-secondary")
         return format_html('<span class="badge {}">{}</span>', css, readiness["label"])
+
+    @admin.display(description=_("Verification"), ordering="verification_status")
+    def sellability_verification_status(self, obj):
+        state = source_verification_ui_state(obj)
+        css = {
+            "emerald": "bg-success",
+            "amber": "bg-warning text-dark",
+            "rose": "bg-danger",
+            "slate": "bg-secondary",
+        }.get(state["tone"], "bg-secondary")
+        details = []
+        if obj.verified_at:
+            details.append(timezone.localtime(obj.verified_at).strftime("%Y-%m-%d %H:%M"))
+        if obj.last_verified_config_count:
+            details.append(_("configs=%(count)s") % {"count": obj.last_verified_config_count})
+        if obj.last_verification_error_code:
+            details.append(obj.last_verification_error_code)
+        return format_html(
+            '<span class="badge {}">{}</span>{}',
+            css,
+            state["label"],
+            format_html('<div class="small text-muted">{}</div>', " | ".join(details)) if details else "",
+        )
 
     @admin.display(description=_("Catalog"))
     def catalog_link(self, obj):

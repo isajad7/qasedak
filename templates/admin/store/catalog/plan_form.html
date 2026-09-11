@@ -164,10 +164,16 @@
                                 <label for="id_source_{{ row.index }}_inbound">Inbound پنل</label>
                                 <select id="id_source_{{ row.index }}_inbound" name="source-{{ row.index }}-inbound" class="plan-delivery-field">
 	                                    <option value="">انتخاب کنید</option>
-	                                    {% for option in form.source_inbound_options %}
-	                                        <option value="{{ option.value }}" data-dynamic-subscription="{% if option.dynamic_subscription %}1{% else %}0{% endif %}" {% if option.value == row.inbound_id %}selected{% endif %}>{{ option.label }}</option>
-	                                    {% endfor %}
+                                    {% for option in form.source_inbound_options %}
+                                        <option value="{{ option.value }}" data-dynamic-subscription="{% if option.dynamic_subscription %}1{% else %}0{% endif %}" data-verification-state="{{ option.verification_state }}" data-verification-blocking="{% if option.verification_blocking %}1{% else %}0{% endif %}" {% if option.value == row.inbound_id %}selected{% endif %}>{{ option.label }}</option>
+                                    {% endfor %}
 	                                </select>
+                                    {% if row.verification_state %}
+                                        <p class="help">Verification: {{ row.verification_state }}</p>
+                                    {% endif %}
+                                    {% if row.verification_blocking %}
+                                        <p class="errornote">Verify for Sale لازم است.</p>
+                                    {% endif %}
 	                            </div>
                             <div class="qadmin-form-field" data-inventory-source-field>
                                 <label for="id_source_{{ row.index }}_inventory_pool">مخزن کانفیگ</label>
@@ -296,9 +302,9 @@
                 <label>Inbound پنل</label>
                 <select name="source-__prefix__-inbound" class="plan-delivery-field">
 	                    <option value="">انتخاب کنید</option>
-	                    {% for option in form.source_inbound_options %}
-	                        <option value="{{ option.value }}" data-dynamic-subscription="{% if option.dynamic_subscription %}1{% else %}0{% endif %}">{{ option.label }}</option>
-	                    {% endfor %}
+                    {% for option in form.source_inbound_options %}
+                        <option value="{{ option.value }}" data-dynamic-subscription="{% if option.dynamic_subscription %}1{% else %}0{% endif %}" data-verification-state="{{ option.verification_state }}" data-verification-blocking="{% if option.verification_blocking %}1{% else %}0{% endif %}">{{ option.label }}</option>
+                    {% endfor %}
 	                </select>
 	            </div>
             <div class="qadmin-form-field" data-inventory-source-field>

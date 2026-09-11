@@ -79,6 +79,7 @@ class CapabilityFlag:
     NATIVE_RAW_CONFIGS = "native_raw_configs"
     USAGE_INFO = "usage_info"
     REALITY_NATIVE_DELIVERY = "reality_native_delivery"
+    SELLABILITY_PROBE = "sellability_probe"
     CSRF_LOGIN = "csrf_login"
     CSRF_WRITE = "csrf_write"
 

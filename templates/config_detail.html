@@ -41,7 +41,7 @@
             <h2 class="mt-1 text-lg font-black text-white">اتصال را از اینجا شروع کن</h2>
             <p class="mt-2 text-sm leading-7 text-emerald-50/75">کانفیگ مستقیم مهم‌تر است؛ لینک اشتراک هم کنار آن آماده کپی است.</p>
         </div>
-        {% include 'includes/config_links.html' with sub_link=client.sub_link direct_link=client.direct_link %}
+        {% include 'includes/config_links.html' with delivery=customer_delivery %}
     </div>
 
     <div class="rounded-3xl border border-emerald-300/20 bg-emerald-400/10 p-4 sm:p-5">
@@ -113,7 +113,7 @@
                 </div>
             </div>
 
-            {% include 'includes/config_links.html' with sub_link=client.sub_link direct_link=client.direct_link %}
+            {% include 'includes/config_links.html' with delivery=customer_delivery %}
 
             <div class="h-64 rounded-2xl border border-white/10 bg-slate-950/35 p-4">
                 <canvas

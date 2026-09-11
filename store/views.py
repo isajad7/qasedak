@@ -51,6 +51,12 @@ from .order_services import (
     store_custom_volume_price_per_gb,
     validate_order_quantity,
 )
+from .customer_delivery import (
+    customer_delivery_link_groups,
+    customer_delivery_link_groups_for_client,
+    resolve_customer_client_delivery,
+    resolve_customer_order_delivery,
+)
 from .jalali import TEHRAN_TZ, format_jalali_chart_label
 from .referrals import (
     assign_referrer,
@@ -879,10 +885,18 @@ def build_config_context(order, *, lookup_error="", tracking_code=""):
     if order:
         for client in order.get_vpn_clients():
             stats = sync_vpn_client_stats(client)
-            config_cards.append({"client": client, "stats": stats})
+            config_cards.append(
+                {
+                    "client": client,
+                    "stats": stats,
+                    "customer_delivery": resolve_customer_client_delivery(client, order=order),
+                }
+            )
 
     return {
         "order": order,
+        "customer_delivery": resolve_customer_order_delivery(order) if order else None,
+        "customer_delivery_groups": customer_delivery_link_groups(order) if order else [],
         "tracking_code": tracking_code or (order.order_tracking_code if order else ""),
         "config_cards": config_cards,
         "lookup_error": lookup_error,
@@ -1091,6 +1105,7 @@ def dashboard(request):
     for order in orders:
         if order.status == Order.Status.CANCELLED:
             continue
+        customer_delivery = resolve_customer_order_delivery(order)
         clients = list(order.get_vpn_clients())
         if not clients:
             total = order.plan.traffic_limit_bytes if order.plan_id else 0
@@ -1111,6 +1126,7 @@ def dashboard(request):
                     "is_pending": True,
                     "is_expired": False,
                     "panel_available": bool(order.inbound_id),
+                    "customer_delivery": customer_delivery,
                 }
             )
             continue
@@ -1139,6 +1155,7 @@ def dashboard(request):
                 "is_pending": not stats.get("is_enabled") and not stats.get("is_expired"),
                 "is_expired": stats.get("is_expired"),
                 "panel_available": stats.get("panel_available", True),
+                "customer_delivery": customer_delivery,
             }
             access_cards.append(card)
             dashboard_cards.append(card)
@@ -1217,6 +1234,8 @@ def order_detail(request, order_id):
         {
             "order": order,
             "access_clients": order.get_vpn_clients(),
+            "customer_delivery": resolve_customer_order_delivery(order),
+            "customer_delivery_groups": customer_delivery_link_groups(order),
             "show_checkout_notice": request.GET.get("created") == "1",
             "telegram_link_status": telegram_link_status,
             "telegram_link": telegram_link,
@@ -1385,6 +1404,8 @@ def config_detail(request, tracking_code, config_id):
             "order": order,
             "client": client,
             "stats": stats,
+            "customer_delivery": resolve_customer_client_delivery(client, order=order),
+            "customer_delivery_groups": customer_delivery_link_groups_for_client(client, order=order),
         },
     )
     set_tracking_cookie(response, order.order_tracking_code)

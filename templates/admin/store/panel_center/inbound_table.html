@@ -6,12 +6,15 @@
                 <th>{{ target_labels.remote_id|default:"Remote ID" }}</th>
                 <th>{{ target_labels.protocol|default:"پروتکل" }}</th>
                 <th>{{ target_labels.name|default:"نام" }}</th>
+                <th>Discovery</th>
+                <th>Details</th>
                 <th>{{ target_labels.host_port|default:"Host / Port" }}</th>
                 <th>{{ target_labels.node|default:"Node" }}</th>
                 <th>فروش</th>
+                <th>Verification</th>
                 <th>{{ target_labels.link|default:"لینک" }}</th>
                 <th>آخرین sync</th>
-                <th>هشدار</th>
+                <th>هشدار / اقدام</th>
             </tr>
         </thead>
         <tbody>
@@ -23,6 +26,8 @@
                     <td>
                         <strong>{{ row.inbound.remark|default:"-" }}</strong>
                     </td>
+                    <td>{{ row.discovery_label }}</td>
+                    <td>{{ row.details_label }}</td>
                     <td>
                         <code class="tw-safe-command">{{ row.host_port_label }}</code>
                     </td>
@@ -36,9 +41,25 @@
                             {% include "admin/store/panel_center/_badge.html" with tone="slate" label="غیرفعال/نامناسب" %}
                         {% endif %}
                     </td>
+                    <td>
+                        {% include "admin/store/panel_center/_badge.html" with tone=row.verification.tone label=row.verification.label %}
+                        {% if row.verified_at %}
+                            <small>{{ row.verified_at }}</small>
+                            <small>configs: {{ row.last_verified_config_count }}</small>
+                        {% endif %}
+                        {% if row.verification_error_code %}
+                            <small>{{ row.verification_error_code }}</small>
+                        {% endif %}
+                    </td>
                     <td>{{ row.link_support }}</td>
                     <td>{{ row.inbound.last_synced_at|default:"-" }}</td>
                     <td>
+                        {% if row.verify_source_url %}
+                            <form method="post" action="{{ row.verify_source_url }}" class="tw-m-0 tw-mb-2">
+                                {% csrf_token %}
+                                <button type="submit" class="tw-mini-button tw-mini-button-success">{{ row.verification.action_label }}</button>
+                            </form>
+                        {% endif %}
                         {% if row.warnings %}
                             <ul class="tw-detail-list">
                                 {% for warning in row.warnings %}<li>{{ warning }}</li>{% endfor %}
@@ -63,7 +84,7 @@
                 </tr>
             {% empty %}
                 <tr>
-                    <td colspan="10"><div class="tw-empty-state">{{ target_labels.local_empty|default:"اینباند local برای این پنل ثبت نشده است." }}</div></td>
+                    <td colspan="13"><div class="tw-empty-state">{{ target_labels.local_empty|default:"اینباند local برای این پنل ثبت نشده است." }}</div></td>
                 </tr>
             {% endfor %}
         </tbody>
