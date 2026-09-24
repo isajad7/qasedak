@@ -2,6 +2,7 @@ import json
 import base64
 import os
 import random
+import re
 import sqlite3
 import subprocess
 import sys
@@ -663,6 +664,30 @@ class SubscriptionCupMVPTests(TestCase):
             "expiry_at": getattr(client, "expires_at", None) or timezone.now() + timedelta(days=30),
         }
 
+    def assert_subscription_copy_cta_is_readable(self, response):
+        rendered = response.content.decode()
+        match = re.search(
+            r'<button\b(?=[^>]*data-copy-access-link)(?=[^>]*data-copy-success="لینک اشتراک کپی شد")[^>]*class="([^"]+)"',
+            rendered,
+            re.S,
+        )
+        self.assertIsNotNone(match)
+        classes = match.group(1).split()
+        for class_name in (
+            "cursor-pointer",
+            "border-sky-300/50",
+            "bg-sky-50",
+            "font-semibold",
+            "text-sky-700",
+            "hover:border-sky-400/60",
+            "hover:bg-white",
+            "hover:text-sky-800",
+            "focus:ring-sky-300/50",
+        ):
+            self.assertIn(class_name, classes)
+        self.assertNotIn("bg-slate-950/35", classes)
+        self.assertNotIn("text-sky-50", classes)
+
     def test_plan_delivery_v2_pasarguard_groups_create_one_user_and_preserve_raw_direct_links(self):
         from .provisioning_services import approve_and_provision_order
 
@@ -871,6 +896,11 @@ class SubscriptionCupMVPTests(TestCase):
         order_response = self.client.get(reverse("order_detail", kwargs={"order_id": order.public_id}))
         self.assertContains(order_response, qasedak_subscription_url)
         self.assertContains(order_response, "۲ کانفیگ")
+        self.assert_subscription_copy_cta_is_readable(order_response)
+        self.assertInHTML(
+            '<div class="rounded-2xl border border-white/10 bg-slate-950/35 px-4 py-3 text-sm font-bold text-emerald-50/70">لینک مستقیم جداگانه ندارد</div>',
+            order_response.content.decode(),
+        )
         self.assertNotContains(order_response, "pasarguard.example.com")
         self.assertNotContains(order_response, "private-token")
         self.assertNotContains(order_response, "vless://")
@@ -1008,6 +1038,7 @@ class SubscriptionCupMVPTests(TestCase):
 
         self.assertContains(response, self.vpn_client.sub_link)
         self.assertContains(response, "node-1.example.com")
+        self.assert_subscription_copy_cta_is_readable(response)
 
     def test_dynamic_subscription_refresh_keeps_customer_cup_url_and_updates_count(self):
         from .customer_delivery import resolve_customer_order_delivery
