@@ -18,6 +18,8 @@ media/
 static_root/
 logs/
 backups/
+# Admin backup pages are source templates, not runtime archives.
+!templates/admin/store/backups/
 gunicorn.sock
 *.sock
 

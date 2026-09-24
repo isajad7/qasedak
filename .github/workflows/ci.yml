@@ -16,7 +16,6 @@ jobs:
       DJANGO_SETTINGS_MODULE: core.settings.development
       DJANGO_SECRET_KEY: ci-test-secret
       DJANGO_DEBUG: "False"
-      SQLITE_DATABASE_PATH: /tmp/vpn-store-ci.sqlite3
       DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
       DJANGO_CSRF_TRUSTED_ORIGINS: http://localhost
       INSTALL_RUN_LIVE_BOT_CHECK: "false"

@@ -1,0 +1,103 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Backup &amp; Restore</p>
+            <h1>{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+        </div>
+    </section>
+
+    {% if can_create_backup %}
+    <section class="qadmin-toolbar">
+        <form method="post" action="{% url 'admin_store_backup_create' %}">
+            {% csrf_token %}
+            <h2>ساخت پشتیبان</h2>
+            {% for field in backup_form %}
+                <div class="form-row">
+                    {{ field.errors }}
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    {{ field }}
+                </div>
+            {% endfor %}
+            <p>فایل‌های حاوی تنظیمات محرمانه فقط در اختیار افراد مجاز قرار می‌گیرند.</p>
+            <button type="submit" class="qadmin-action">ساخت پشتیبان</button>
+        </form>
+    </section>
+    {% endif %}
+
+    {% if can_upload_restore %}
+    <section class="qadmin-toolbar">
+        <form method="post" enctype="multipart/form-data" action="{% url 'admin_store_restore_upload' %}">
+            {% csrf_token %}
+            <h2>بارگذاری فایل برای بررسی بازیابی</h2>
+            {{ restore_upload_form.as_p }}
+            <button type="submit" class="qadmin-action">بارگذاری</button>
+        </form>
+    </section>
+    {% endif %}
+
+    <section class="qadmin-toolbar">
+        <div>
+            <h2>پشتیبان‌های اخیر</h2>
+            {% for job in backup_jobs %}
+                <article>
+                    <strong>{{ job.file_name|default:'بدون فایل' }}</strong>
+                    <span>— {{ job.get_backup_type_display }} / {{ job.get_status_display }} / {{ job.created_at }}</span>
+                    {% if job.file_size %}<span>— {{ job.file_size|filesizeformat }}</span>{% endif %}
+                    {% if job.status == 'completed' and can_download_backup %}
+                        {% if not job.includes_env or user.is_superuser %}
+                        <a href="{% url 'admin_store_backup_download' job.pk %}">دانلود</a>
+                        {% endif %}
+                    {% endif %}
+                    {% if can_delete_backup and job.status != 'deleted' %}
+                    <form method="post" action="{% url 'admin_store_backup_delete' job.pk %}">
+                        {% csrf_token %}
+                        <label for="delete-backup-{{ job.pk }}">برای حذف، عبارت DELETE_QASEDAK_BACKUP_{{ job.pk }} را وارد کنید:</label>
+                        <input id="delete-backup-{{ job.pk }}" name="confirmation" type="text" required autocomplete="off">
+                        <button type="submit">حذف</button>
+                    </form>
+                    {% endif %}
+                </article>
+            {% empty %}
+                <p>هنوز پشتیبانی ساخته نشده است.</p>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="qadmin-toolbar">
+        <div>
+            <h2>فایل‌های بازیابی اخیر</h2>
+            {% for job in restore_jobs %}
+                <p>
+                    {% if can_validate_restore %}
+                    <a href="{% url 'admin_store_restore_detail' job.pk %}">{{ job.uploaded_file_name|default:'بدون نام' }}</a>
+                    {% else %}
+                    {{ job.uploaded_file_name|default:'بدون نام' }}
+                    {% endif %}
+                    — {{ job.get_status_display }} / {{ job.created_at }}
+                </p>
+            {% empty %}
+                <p>فایل بازیابی بارگذاری نشده است.</p>
+            {% endfor %}
+        </div>
+    </section>
+</div>
+{% endblock %}

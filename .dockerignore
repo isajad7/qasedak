@@ -7,6 +7,8 @@ venv/
 .venv/
 node_modules/
 backups/
+!templates/admin/store/backups/
+!templates/admin/store/backups/*.html
 logs/
 .git/
 *.sqlite3
