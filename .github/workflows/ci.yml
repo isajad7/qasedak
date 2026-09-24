@@ -2,7 +2,12 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   django:
@@ -20,6 +25,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -43,7 +50,30 @@ jobs:
         run: python manage.py makemigrations --check --dry-run
 
       - name: Shell syntax
-        run: bash -n scripts/install.sh scripts/doctor.sh scripts/backup.sh scripts/update.sh scripts/timers.sh scripts/release_check.sh
+        run: bash -n scripts/install.sh scripts/doctor.sh scripts/backup.sh scripts/update.sh scripts/timers.sh scripts/release_check.sh scripts/deploy/*.sh
 
       - name: Whitespace check
-        run: git diff --check
+        run: git diff --check HEAD^ HEAD
+
+  deploy_development:
+    # Enable only after the server inventory, one-time Compose setup, and backup hook are verified.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEV_AUTO_DEPLOY == 'true' }}
+    needs: django
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: development
+    concurrency:
+      group: qasedak-development-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Deploy tested commit to the configured development Compose service
+        env:
+          DEV_SSH_HOST: ${{ vars.DEV_SSH_HOST }}
+          DEV_SSH_USER: ${{ vars.DEV_SSH_USER }}
+          DEV_SSH_PORT: ${{ vars.DEV_SSH_PORT }}
+          DEV_SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+          DEV_SSH_KNOWN_HOSTS: ${{ secrets.DEV_SSH_KNOWN_HOSTS }}
+        run: bash scripts/deploy/github_dev_deploy.sh
