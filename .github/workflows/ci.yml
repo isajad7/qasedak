@@ -43,7 +43,7 @@ jobs:
         run: python manage.py check
 
       - name: Django tests
-        run: python manage.py test store.tests payments.tests
+        run: python manage.py test store.tests store.test_external_subscription_interval payments.tests
 
       - name: Migration drift check
         run: python manage.py makemigrations --check --dry-run

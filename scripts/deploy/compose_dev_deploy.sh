@@ -51,7 +51,10 @@ config = json.load(sys.stdin)
 service = config["services"].get(sys.argv[1], {})
 if service.get("image") != sys.argv[2] or service.get("build"):
     sys.exit("Reviewed service must reference QASEDAK_IMAGE_TAG with no Compose build block")
-' "$QASEDAK_DEV_SERVICE" "$image" || die 'Compose target did not match the selected service.'
+refresh = config["services"].get("subscription-refresh", {})
+if refresh.get("image") != sys.argv[2] or refresh.get("build"):
+    sys.exit("subscription-refresh must reference QASEDAK_IMAGE_TAG with no Compose build block")
+' "$QASEDAK_DEV_SERVICE" "$image" || die 'Compose app or subscription-refresh service did not match the reviewed image.'
 
 old_container="$("${compose[@]}" ps -q "$QASEDAK_DEV_SERVICE")"
 [[ "$old_container" =~ ^[0-9a-f]{12,64}$ ]] || die 'Expected exactly one existing target container; the first install must be reviewed manually.'
@@ -59,6 +62,12 @@ old_container="$("${compose[@]}" ps -q "$QASEDAK_DEV_SERVICE")"
 [[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$old_container")" == "$QASEDAK_DEV_SERVICE" ]] || die 'Container service mismatch.'
 old_image="$(docker inspect -f '{{.Config.Image}}' "$old_container")"
 [[ -n "$old_image" ]] || die 'Existing image is unknown.'
+old_refresh_container="$("${compose[@]}" ps -q subscription-refresh)"
+[[ "$old_refresh_container" =~ ^[0-9a-f]{12,64}$ ]] || die 'Expected exactly one running subscription-refresh container.'
+[[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$old_refresh_container")" == "$QASEDAK_DEV_PROJECT" ]] || die 'Subscription refresh container project mismatch.'
+[[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$old_refresh_container")" == 'subscription-refresh' ]] || die 'Subscription refresh container service mismatch.'
+old_refresh_image="$(docker inspect -f '{{.Config.Image}}' "$old_refresh_container")"
+[[ "$old_refresh_image" == "$old_image" ]] || die 'App and subscription-refresh containers are on different revisions.'
 docker inspect -f '{{json .NetworkSettings.Ports}}' "$old_container" | python3 -c '
 import json, sys
 from urllib.parse import urlsplit
@@ -93,6 +102,7 @@ PY
 
 if [[ "$old_image" == "$image" ]]; then
     health_ok || die 'Existing revision is not healthy.'
+    [[ "$(docker inspect -f '{{.State.Running}}' "$old_refresh_container")" == true ]] || die 'Subscription refresh container is not running.'
     printf 'Development revision %s already healthy.\n' "$revision"
     exit 0
 fi
@@ -136,16 +146,19 @@ fi
 
 docker build -t "$image" "$release" >/dev/null
 rollback() {
-    QASEDAK_IMAGE_TAG="$old_image" "${compose[@]}" up -d --no-deps --no-build "$QASEDAK_DEV_SERVICE" >/dev/null || true
+    QASEDAK_IMAGE_TAG="$old_image" "${compose[@]}" up -d --no-deps --no-build "$QASEDAK_DEV_SERVICE" subscription-refresh >/dev/null || true
 }
-if ! "${compose[@]}" up -d --no-deps --no-build "$QASEDAK_DEV_SERVICE" >/dev/null; then
+if ! "${compose[@]}" up -d --no-deps --no-build "$QASEDAK_DEV_SERVICE" subscription-refresh >/dev/null; then
     rollback
     die 'Compose update failed; attempted to restore the previous image. Inspect migrations before relying on rollback.'
 fi
 healthy=0
 for attempt in {1..24}; do
     current="$("${compose[@]}" ps -q "$QASEDAK_DEV_SERVICE")"
-    if [[ -n "$current" && "$(docker inspect -f '{{.Config.Image}}' "$current")" == "$image" ]] && health_ok; then
+    current_refresh="$("${compose[@]}" ps -q subscription-refresh)"
+    if [[ -n "$current" && "$(docker inspect -f '{{.Config.Image}}' "$current")" == "$image" \
+        && -n "$current_refresh" && "$(docker inspect -f '{{.Config.Image}}' "$current_refresh")" == "$image" \
+        && "$(docker inspect -f '{{.State.Running}}' "$current_refresh")" == true ]] && health_ok; then
         healthy=1
         break
     fi

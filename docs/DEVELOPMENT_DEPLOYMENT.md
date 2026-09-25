@@ -1,6 +1,6 @@
 # Development server deployment
 
-This repository has a Dockerfile and a multi-tenant container entrypoint, but no existing live server topology is assumed. The example Compose file is **not** installed by CI. The target server must be inventoried and one development service configured before enabling deployment. This workflow updates a single existing Compose service; it never creates a first tenant, edits Nginx, removes containers, or deletes an old customer.
+This repository has a Dockerfile and a multi-tenant container entrypoint, but no existing live server topology is assumed. The example Compose file is **not** installed by CI. The target server must be inventoried and the app plus `subscription-refresh` Compose services configured before enabling deployment. This workflow updates only these existing application services; it never creates a first tenant, edits Nginx, removes containers, or deletes an old customer.
 
 ## Branches and trigger
 
@@ -18,14 +18,14 @@ If the actual service is systemd or `docker run` without Compose, this deploymen
 
 ## One-time server setup for the Compose path
 
-1. Select one dedicated development tenant and existing Compose service. Keep its current env file, persistent media/static paths, database, bot policy and Nginx upstream. Adapt [the example Compose file](../docker/compose.development.example.yaml): its service must use `image: ${QASEDAK_IMAGE_TAG:?...}` with no `build:` block, and bind a loopback health port. The deployed Dockerfile's entrypoint may run migrations, collectstatic, bot and worker; explicitly preserve the current intended `QASEDAK_*` switches in the tenant env file.
+1. Select one dedicated development tenant and existing Compose app service. Keep its current env file, persistent media/static paths, database, bot policy and Nginx upstream. Adapt [the example Compose file](../docker/compose.development.example.yaml): both `app` and `subscription-refresh` must use `image: ${QASEDAK_IMAGE_TAG:?...}` with no `build:` block; `app` binds a loopback health port. The refresh service polls every five minutes and refreshes due external panel subscriptions into customer SubscriptionCups. The default per-feed interval is one hour. The app's Dockerfile entrypoint may run migrations, collectstatic, bot and worker; explicitly preserve the current intended `QASEDAK_*` switches in the tenant env file.
 2. Prepare a deployment user with access to Docker, the Compose file and a dedicated release root. Docker access is equivalent to host-level privilege: use a dedicated key and limit who can change the `main` branch and the `development` environment. Verify an initial image/container manually. The workflow refuses to create a first container.
 3. Create `/etc/qasedak/dev-deploy.conf` from [the config example](../scripts/deploy/dev-deploy.conf.example), using the audited path, project, service, tenant ID and health URL. Ensure it is root-owned and readable by the deployment user. Put the exact line `isajad7/qasedak:development` in `<QASEDAK_DEV_ROOT>/.qasedak-development-target`. Do not put application secrets in this config or marker.
 4. Create an executable `QASEDAK_DEV_BACKUP_HOOK` that takes one output pathname argument, creates a consistent database backup at that pathname, exits nonzero on failure, and writes nothing sensitive to stdout. Test a restore on disposable infrastructure. CI refuses deployment unless this hook produces a nonempty backup. Keep the database backup and media backup policies separate.
 5. In GitHub's `development` environment, set `DEV_SSH_HOST`, `DEV_SSH_USER`, `DEV_SSH_PORT` as variables; set `DEV_SSH_PRIVATE_KEY` and `DEV_SSH_KNOWN_HOSTS` as secrets. Verify the SSH host key fingerprint out of band on the server before storing the complete known-hosts entry. The target address and private key do not belong in this public repository. Permit inbound SSH from the GitHub runner as appropriate; if unavailable, choose a reviewed runner/network strategy before enabling deployment.
 6. Check disk capacity and define retention for old images, releases and backups. On a test revision, verify backup creation, Docker image tag, selected Compose project/service, loopback `/health/`, expected `tenant_id`, database reachability and public Nginx response. Then set repository variable `DEV_AUTO_DEPLOY=true`. Until this last step, pushes to `main` run CI without deployment.
 
-If the health check fails after an update, the script attempts to restart the previously running image for this one service. It keeps the backup and stops with an error. Inspect logs and migrations; image rollback alone does not roll back a schema migration.
+If the health check fails after an update, the script attempts to restart the previously running image for both application services. It keeps the backup and stops with an error. Inspect logs and migrations; image rollback alone does not roll back a schema migration.
 
 ## Retiring an older instance
 

@@ -4323,7 +4323,7 @@ class ExternalSubscriptionFeed(TimeStampedModel):
     remote_identity_ref = models.CharField(_("remote identity reference"), max_length=160, blank=True)
     protected_subscription_url = models.TextField(_("protected upstream subscription URL"), blank=True)
     resolved_filter_policy = models.JSONField(_("resolved filter policy"), default=dict, blank=True)
-    refresh_interval_hours = models.PositiveIntegerField(_("refresh interval hours"), default=12, validators=[MinValueValidator(1)])
+    refresh_interval_hours = models.PositiveIntegerField(_("refresh interval hours"), default=1, validators=[MinValueValidator(1)])
     next_refresh_at = models.DateTimeField(_("next refresh at"), null=True, blank=True, db_index=True)
     last_attempt_at = models.DateTimeField(_("last attempt at"), null=True, blank=True)
     last_success_at = models.DateTimeField(_("last success at"), null=True, blank=True)
