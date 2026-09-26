@@ -142,7 +142,11 @@ def _subscription_plain_response(body, *, status=200):
 
 
 def _normalized_subscription_format(request):
-    output_format = str(request.GET.get("format") or "raw").strip().lower()
+    requested_format = str(request.GET.get("format") or "").strip().lower()
+    if not requested_format:
+        user_agent = request.META.get("HTTP_USER_AGENT", "")
+        requested_format = "base64" if _is_client_user_agent(user_agent) else "raw"
+    output_format = requested_format
     if output_format not in SUBSCRIPTION_OUTPUT_FORMATS:
         return "base64"
     return output_format

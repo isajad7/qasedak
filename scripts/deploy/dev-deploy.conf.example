@@ -1,0 +1,9 @@
+# Example only. The deployment reads /etc/qasedak/dev-deploy.conf on the server.
+# Fill these in after confirming the exact tenant, Compose project, and Nginx upstream.
+QASEDAK_DEV_ROOT=/srv/qasedak-development
+QASEDAK_DEV_COMPOSE_FILE=/srv/qasedak-development/compose.yaml
+QASEDAK_DEV_PROJECT=qasedak-development
+QASEDAK_DEV_SERVICE=app
+QASEDAK_DEV_TENANT_ID=development
+QASEDAK_DEV_HEALTH_URL=http://127.0.0.1:18001/health/
+QASEDAK_DEV_BACKUP_HOOK=/usr/local/sbin/qasedak-dev-backup

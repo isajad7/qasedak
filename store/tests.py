@@ -2058,7 +2058,7 @@ class SubscriptionCupMVPTests(TestCase):
             HTTP_USER_AGENT="Hiddify/1.0",
         )
         self.assertTrue(client_response["Content-Type"].startswith("text/plain"))
-        self.assertEqual(client_response.content.decode("utf-8"), "\n".join(links))
+        self.assertEqual(base64.b64decode(client_response.content).decode("utf-8"), "\n".join(links) + "\n")
 
         curl_response = self.client.get(
             url,

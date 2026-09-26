@@ -1,0 +1,22 @@
+# Example only. Review existing databases, bot processes, tenant volumes, and Nginx
+# upstream before installing a development Compose project on any server.
+services:
+  app:
+    image: ${QASEDAK_IMAGE_TAG:?Set the exact revision image tag}
+    env_file: /srv/qasedak-development/tenant.env
+    ports:
+      - '127.0.0.1:18001:8000'
+    volumes:
+      - /srv/qasedak-development/media:/app/media
+      - /srv/qasedak-development/static_root:/app/static_root
+    restart: unless-stopped
+  subscription-refresh:
+    image: ${QASEDAK_IMAGE_TAG:?Set the exact revision image tag}
+    env_file: /srv/qasedak-development/tenant.env
+    entrypoint: ["/bin/sh", "-c"]
+    command: >-
+      while true; do
+        python manage.py refresh_external_subscription_feeds;
+        sleep 300;
+      done
+    restart: unless-stopped

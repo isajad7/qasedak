@@ -1,0 +1,71 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{{ center_url }}">{{ title }}</a>
+    &rsaquo; {{ job.uploaded_file_name }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="qadmin-setup" dir="rtl">
+    <section class="qadmin-hero">
+        <div>
+            <p class="qadmin-eyebrow">Restore validation</p>
+            <h1>{{ job.uploaded_file_name|default:'فایل بازیابی' }}</h1>
+            <p>{{ subtitle }}</p>
+            <p>وضعیت: {{ job.get_status_display }}</p>
+        </div>
+        <div class="qadmin-hero-actions">
+            <a class="qadmin-action qadmin-action-secondary" href="{{ center_url }}">بازگشت به پشتیبان‌ها</a>
+        </div>
+    </section>
+
+    <section class="qadmin-toolbar">
+        <div>
+            <p>SHA-256 فایل: <code dir="ltr">{{ job.uploaded_sha256 }}</code></p>
+            {% if job.validated_at %}<p>زمان اعتبارسنجی: {{ job.validated_at }}</p>{% endif %}
+            <p>One-click restore در P1 غیرفعال است. بازیابی فقط با دستور بررسی‌شده در SSH سرور انجام می‌شود.</p>
+        </div>
+    </section>
+
+    {% if can_validate_restore %}
+    <section class="qadmin-toolbar">
+        <form method="post" action="{% url 'admin_store_restore_validate' job.pk %}">
+            {% csrf_token %}
+            <h2>اعتبارسنجی فایل و طرح بازیابی</h2>
+            <button type="submit" class="qadmin-action">اعتبارسنجی</button>
+        </form>
+    </section>
+    {% endif %}
+
+    {% if can_generate_restore_command %}
+    <section class="qadmin-toolbar">
+        <form method="post" action="{% url 'admin_store_restore_command' job.pk %}">
+            {% csrf_token %}
+            <h2>ساخت دستور بازیابی</h2>
+            <p>برای تأیید، عبارت <code dir="ltr">{{ confirmation_phrase }}</code> را وارد کنید.</p>
+            {{ command_form.as_p }}
+            <button type="submit" class="qadmin-action">تولید دستور</button>
+        </form>
+    </section>
+    {% if job.restore_plan.restore_command %}
+    <section class="qadmin-toolbar">
+        <div>
+            <h2>دستور تولیدشده</h2>
+            <pre dir="ltr"><code>{{ job.restore_plan.restore_command }}</code></pre>
+        </div>
+    </section>
+    {% endif %}
+    {% endif %}
+</div>
+{% endblock %}
