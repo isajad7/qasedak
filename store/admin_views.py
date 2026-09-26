@@ -35,6 +35,8 @@ from .admin_reports_center import (
 )
 from .admin_catalog import (
     CatalogPlanForm,
+    PlanBulkPriceForm,
+    apply_price_per_gb_to_plans,
     catalog_plan_edit_url,
     catalog_plan_review_url,
     catalog_url,
@@ -2274,11 +2276,25 @@ def handle_catalog_post_action(request, *, selected_store=None, plan=None):
 @require_admin_capability("catalog.view")
 def product_catalog(request):
     stores, selected_store = selected_catalog_store_from_id(request.GET.get("store"))
+    bulk_price_form = PlanBulkPriceForm()
     if request.method == "POST":
-        target = handle_catalog_post_action(request, selected_store=selected_store)
-        if target and request.POST.get("action") == "duplicate":
-            return redirect(catalog_plan_review_url(target))
-        return redirect(catalog_url(selected_store))
+        if request.POST.get("action") == "apply_price_per_gb":
+            ensure_admin_capability(request.user, "catalog.manage")
+            bulk_price_form = PlanBulkPriceForm(request.POST)
+            if request.POST.get("confirm_action") != "1":
+                messages.error(request, "برای تغییر گروهی قیمت‌ها، دامنهٔ اثر را تایید کن.")
+            elif bulk_price_form.is_valid():
+                price_per_gb = bulk_price_form.cleaned_data["price_per_gb"]
+                updated_count, total_count = apply_price_per_gb_to_plans(price_per_gb)
+                messages.success(request, f"قیمت هر گیگ {price_per_gb} اعمال شد؛ {updated_count} پلن از {total_count} پلن به‌روزرسانی شد.")
+                return redirect(catalog_url(selected_store))
+            else:
+                messages.error(request, "قیمت هر گیگ را درست وارد کن.")
+        else:
+            target = handle_catalog_post_action(request, selected_store=selected_store)
+            if target and request.POST.get("action") == "duplicate":
+                return redirect(catalog_plan_review_url(target))
+            return redirect(catalog_url(selected_store))
 
     context = {
         **admin.site.each_context(request),
@@ -2286,6 +2302,9 @@ def product_catalog(request):
         "stores": stores,
         "selected_store": selected_store,
         "can_manage_catalog": user_has_capability(request.user, "catalog.manage"),
+        "bulk_price_per_gb_form": bulk_price_form,
+        "bulk_price_plan_count": Plan.objects.filter(is_custom_volume=False).count(),
+        "bulk_price_store_count": Store.objects.count(),
         "title": "محصولات / پلن‌ها",
         "subtitle": "مدیریت پلن‌های فروش، قیمت، نمایش و آمادگی route بدون اجرای live call.",
     }
