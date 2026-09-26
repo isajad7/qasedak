@@ -45,17 +45,61 @@ flock -n 9 || die 'Another development deployment is in progress.'
 image="qasedak-development:$revision"
 compose=(docker compose -p "$QASEDAK_DEV_PROJECT" -f "$QASEDAK_DEV_COMPOSE_FILE")
 export QASEDAK_IMAGE_TAG="$image"
+bootstrap_refresh=0
+if "${compose[@]}" config --format json | python3 -c '
+import json, sys
+config = json.load(sys.stdin)
+service = config["services"].get(sys.argv[1])
+if service is None or service.get("image") != sys.argv[2] or service.get("build"):
+    sys.exit("Reviewed app must use QASEDAK_IMAGE_TAG without a build block")
+sys.exit(10 if "subscription-refresh" not in config["services"] else 0)
+' "$QASEDAK_DEV_SERVICE" "$image"; then
+    :
+else
+    status=$?
+    [[ "$status" == 10 ]] || die 'Reviewed Compose app service did not match the image.'
+    [[ "$QASEDAK_DEV_COMPOSE_FILE" =~ ^/[a-zA-Z0-9_./-]+$ ]] || die 'Compose path cannot be used in the refresh override.'
+    override="$QASEDAK_DEV_ROOT/.subscription-refresh.compose.yaml"
+    tmp_override="$(mktemp "$QASEDAK_DEV_ROOT/.subscription-refresh.XXXXXXXX.yaml")"
+    cat > "$tmp_override" <<EOF
+services:
+  subscription-refresh:
+    extends:
+      file: "$QASEDAK_DEV_COMPOSE_FILE"
+      service: "$QASEDAK_DEV_SERVICE"
+    image: \${QASEDAK_IMAGE_TAG:?Set the exact revision image tag}
+    build: !reset null
+    ports: !reset []
+    container_name: !reset null
+    healthcheck: !reset null
+    entrypoint: ["/bin/sh", "-c"]
+    command: >-
+      while true; do
+        python manage.py refresh_external_subscription_feeds;
+        sleep 300;
+      done
+    restart: unless-stopped
+EOF
+    if [[ -e "$override" || -L "$override" ]]; then
+        [[ -f "$override" && ! -L "$override" ]] || die 'Subscription-refresh override is not a regular file.'
+        cmp -s "$tmp_override" "$override" || die 'Existing subscription-refresh override differs from the reviewed version.'
+        rm -f -- "$tmp_override"
+    else
+        mv -- "$tmp_override" "$override"
+    fi
+    bootstrap_refresh=1
+    compose+=( -f "$override" )
+fi
 "${compose[@]}" config --format json | python3 -c '
 import json, sys
 config = json.load(sys.stdin)
 for name in (sys.argv[1], "subscription-refresh"):
     service = config["services"].get(name)
-    if service is None:
-        sys.exit(f"Compose service {name!r} is missing")
-    if service.get("image") != sys.argv[2]:
-        sys.exit(f"Compose service {name!r} must use QASEDAK_IMAGE_TAG")
-    if service.get("build"):
-        sys.exit(f"Compose service {name!r} must not have a build block")
+    if service is None or service.get("image") != sys.argv[2] or service.get("build"):
+        sys.exit(f"Compose service {name!r} must use QASEDAK_IMAGE_TAG without a build block")
+refresh = config["services"]["subscription-refresh"]
+if refresh.get("ports"):
+    sys.exit("subscription-refresh must not publish host ports")
 ' "$QASEDAK_DEV_SERVICE" "$image" || die 'Compose services did not match the reviewed image.'
 
 old_container="$("${compose[@]}" ps -q "$QASEDAK_DEV_SERVICE")"
@@ -65,11 +109,15 @@ old_container="$("${compose[@]}" ps -q "$QASEDAK_DEV_SERVICE")"
 old_image="$(docker inspect -f '{{.Config.Image}}' "$old_container")"
 [[ -n "$old_image" ]] || die 'Existing image is unknown.'
 old_refresh_container="$("${compose[@]}" ps -q subscription-refresh)"
-[[ "$old_refresh_container" =~ ^[0-9a-f]{12,64}$ ]] || die 'Expected exactly one running subscription-refresh container.'
-[[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$old_refresh_container")" == "$QASEDAK_DEV_PROJECT" ]] || die 'Subscription refresh container project mismatch.'
-[[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$old_refresh_container")" == 'subscription-refresh' ]] || die 'Subscription refresh container service mismatch.'
-old_refresh_image="$(docker inspect -f '{{.Config.Image}}' "$old_refresh_container")"
-[[ "$old_refresh_image" == "$old_image" ]] || die 'App and subscription-refresh containers are on different revisions.'
+if [[ -n "$old_refresh_container" ]]; then
+    [[ "$old_refresh_container" =~ ^[0-9a-f]{12,64}$ ]] || die 'Invalid existing subscription-refresh container.'
+    [[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$old_refresh_container")" == "$QASEDAK_DEV_PROJECT" ]] || die 'Subscription refresh container project mismatch.'
+    [[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$old_refresh_container")" == 'subscription-refresh' ]] || die 'Subscription refresh container service mismatch.'
+    old_refresh_image="$(docker inspect -f '{{.Config.Image}}' "$old_refresh_container")"
+    [[ "$old_refresh_image" == "$old_image" ]] || die 'App and subscription-refresh containers are on different revisions.'
+else
+    (( bootstrap_refresh )) || die 'Expected an existing subscription-refresh container.'
+fi
 docker inspect -f '{{json .NetworkSettings.Ports}}' "$old_container" | python3 -c '
 import json, sys
 from urllib.parse import urlsplit
@@ -102,7 +150,7 @@ PY
     return "$result"
 }
 
-if [[ "$old_image" == "$image" ]]; then
+if [[ "$old_image" == "$image" && -n "$old_refresh_container" ]]; then
     health_ok || die 'Existing revision is not healthy.'
     [[ "$(docker inspect -f '{{.State.Running}}' "$old_refresh_container")" == true ]] || die 'Subscription refresh container is not running.'
     printf 'Development revision %s already healthy.\n' "$revision"
@@ -148,7 +196,12 @@ fi
 
 docker build -t "$image" "$release" >/dev/null
 rollback() {
-    QASEDAK_IMAGE_TAG="$old_image" "${compose[@]}" up -d --no-deps --no-build "$QASEDAK_DEV_SERVICE" subscription-refresh >/dev/null || true
+    if [[ -n "$old_refresh_container" ]]; then
+        QASEDAK_IMAGE_TAG="$old_image" "${compose[@]}" up -d --no-deps --no-build "$QASEDAK_DEV_SERVICE" subscription-refresh >/dev/null || true
+    else
+        QASEDAK_IMAGE_TAG="$old_image" "${compose[@]}" up -d --no-deps --no-build "$QASEDAK_DEV_SERVICE" >/dev/null || true
+        "${compose[@]}" rm -sf subscription-refresh >/dev/null || true
+    fi
 }
 if ! "${compose[@]}" up -d --no-deps --no-build "$QASEDAK_DEV_SERVICE" subscription-refresh >/dev/null; then
     rollback
