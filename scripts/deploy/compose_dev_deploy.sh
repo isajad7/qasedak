@@ -48,13 +48,15 @@ export QASEDAK_IMAGE_TAG="$image"
 "${compose[@]}" config --format json | python3 -c '
 import json, sys
 config = json.load(sys.stdin)
-service = config["services"].get(sys.argv[1], {})
-if service.get("image") != sys.argv[2] or service.get("build"):
-    sys.exit("Reviewed service must reference QASEDAK_IMAGE_TAG with no Compose build block")
-refresh = config["services"].get("subscription-refresh", {})
-if refresh.get("image") != sys.argv[2] or refresh.get("build"):
-    sys.exit("subscription-refresh must reference QASEDAK_IMAGE_TAG with no Compose build block")
-' "$QASEDAK_DEV_SERVICE" "$image" || die 'Compose app or subscription-refresh service did not match the reviewed image.'
+for name in (sys.argv[1], "subscription-refresh"):
+    service = config["services"].get(name)
+    if service is None:
+        sys.exit(f"Compose service {name!r} is missing")
+    if service.get("image") != sys.argv[2]:
+        sys.exit(f"Compose service {name!r} must use QASEDAK_IMAGE_TAG")
+    if service.get("build"):
+        sys.exit(f"Compose service {name!r} must not have a build block")
+' "$QASEDAK_DEV_SERVICE" "$image" || die 'Compose services did not match the reviewed image.'
 
 old_container="$("${compose[@]}" ps -q "$QASEDAK_DEV_SERVICE")"
 [[ "$old_container" =~ ^[0-9a-f]{12,64}$ ]] || die 'Expected exactly one existing target container; the first install must be reviewed manually.'
