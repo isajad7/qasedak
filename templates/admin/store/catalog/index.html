@@ -48,6 +48,36 @@
         </div>
     </section>
 
+    {% if can_manage_catalog %}
+    <section class="tw-section" aria-labelledby="bulk-price-heading">
+        <div class="tw-admin-card">
+            <div class="tw-section-heading tw-mb-4">
+                <h2 id="bulk-price-heading">تغییر گروهی قیمت بر اساس هر گیگ</h2>
+                <span class="tw-status-badge tw-tone-blue">{{ bulk_price_plan_count }} پلن · {{ bulk_price_store_count }} فروشگاه</span>
+            </div>
+            <p class="tw-text-sm tw-leading-7 tw-text-slate-600">
+                قیمت همهٔ پلن‌های حجم ثابت، حتی پلن‌های غیرفعال و پلن‌های فروشگاه‌های دیگر، برابر حجم × قیمت هر گیگ می‌شود.
+                پلن‌های حجم دلخواه تغییر قیمت مستقیم ندارند؛ نرخ هر گیگ حجم دلخواه همهٔ فروشگاه‌ها نیز با همین عدد تنظیم می‌شود.
+                واحد پول هر پلن همان واحد فعلی آن می‌ماند.
+            </p>
+            <form method="post" class="tw-flex tw-flex-col tw-gap-3 sm:tw-flex-row sm:tw-items-center sm:tw-flex-wrap">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="apply_price_per_gb">
+                <div class="tw-filter-field tw-flex-1">
+                    <label for="{{ bulk_price_per_gb_form.price_per_gb.id_for_label }}">قیمت هر گیگ</label>
+                    {{ bulk_price_per_gb_form.price_per_gb }}
+                    {{ bulk_price_per_gb_form.price_per_gb.errors }}
+                </div>
+                <label class="tw-inline-flex tw-items-center tw-gap-2 tw-text-sm tw-text-slate-600">
+                    <input type="checkbox" name="confirm_action" value="1" required>
+                    <span>تغییر قیمت تمام فروشگاه‌ها را تأیید می‌کنم.</span>
+                </label>
+                <button type="submit" class="tw-button tw-button-primary">اعمال قیمت جدید</button>
+            </form>
+        </div>
+    </section>
+    {% endif %}
+
     <section class="tw-section">
         <form method="get" class="tw-admin-card tw-catalog-filter-bar">
             {% if selected_store %}

@@ -11483,7 +11483,64 @@ class AdminCatalogTests(TestCase):
         self.assertContains(response, "محصولات / پلن‌ها")
         self.assertContains(response, "ساخت پلن جدید")
         self.assertContains(response, "مدیریت مسیرها")
+        self.assertContains(response, "تغییر گروهی قیمت بر اساس هر گیگ")
         self.assertContains(response, self.plan.name)
+
+    def test_catalog_bulk_price_updates_all_fixed_plans_and_custom_volume_rates(self):
+        second_store = Store.objects.create(
+            name="Second Store", english_name="Second Store",
+            card_number="0000000000000000", card_owner="Second Store",
+        )
+        half_gb_plan = Plan.objects.create(
+            store=second_store, name="Half GB", volume_gb=Decimal("0.500"),
+            duration_days=30, price=17, is_active=False,
+        )
+        custom_plan = Plan.objects.create(
+            store=self.store, name="Custom volume", volume_gb=Decimal("1.000"),
+            duration_days=30, price=345, is_custom_volume=True,
+        )
+        self.login_admin()
+
+        response = self.client.post(
+            reverse("admin_store_catalog") + f"?store={self.store.pk}",
+            {"action": "apply_price_per_gb", "price_per_gb": "99", "confirm_action": "1"},
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "2 پلن از 2 پلن به‌روزرسانی شد")
+        self.plan.refresh_from_db()
+        half_gb_plan.refresh_from_db()
+        custom_plan.refresh_from_db()
+        self.store.refresh_from_db()
+        second_store.refresh_from_db()
+        self.assertEqual(self.plan.price, 990)
+        self.assertEqual(half_gb_plan.price, 50)
+        self.assertEqual(custom_plan.price, 345)
+        self.assertEqual(self.store.custom_volume_price_per_gb, Decimal("99.000"))
+        self.assertEqual(second_store.custom_volume_price_per_gb, Decimal("99.000"))
+
+    def test_catalog_bulk_price_requires_confirmation_and_valid_amount(self):
+        self.login_admin()
+        url = reverse("admin_store_catalog")
+
+        no_confirmation = self.client.post(url, {"action": "apply_price_per_gb", "price_per_gb": "100"})
+        invalid_amount = self.client.post(
+            url, {"action": "apply_price_per_gb", "price_per_gb": "-1", "confirm_action": "1"},
+        )
+        too_large = self.client.post(
+            url, {"action": "apply_price_per_gb", "price_per_gb": "99999999999.999", "confirm_action": "1"},
+        )
+
+        self.assertEqual(no_confirmation.status_code, 200)
+        self.assertEqual(invalid_amount.status_code, 200)
+        self.assertEqual(too_large.status_code, 200)
+        self.assertIn("price_per_gb", invalid_amount.context["bulk_price_per_gb_form"].errors)
+        self.assertIn("price_per_gb", too_large.context["bulk_price_per_gb_form"].errors)
+        self.plan.refresh_from_db()
+        self.store.refresh_from_db()
+        self.assertEqual(self.plan.price, 250000)
+        self.assertEqual(self.store.custom_volume_price_per_gb, Decimal("0"))
 
     def test_catalog_center_focuses_on_plan_management(self):
         self.login_admin()
@@ -27448,6 +27505,10 @@ class AdminStaffAccessCenterP11Tests(TestCase):
         self.assertEqual(client.get(reverse("admin_store_order_workbench")).status_code, 200)
         self.assertEqual(
             client.post(reverse("admin_store_catalog"), {"action": "duplicate", "plan_id": self.plan.pk, "confirm_action": "1"}).status_code,
+            403,
+        )
+        self.assertEqual(
+            client.post(reverse("admin_store_catalog"), {"action": "apply_price_per_gb", "price_per_gb": "100", "confirm_action": "1"}).status_code,
             403,
         )
 

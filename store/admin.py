@@ -2,7 +2,7 @@ import csv
 import json
 import re
 from datetime import timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -32,6 +32,8 @@ from payments.models import IncomingPaymentSMS
 
 from .admin_access import get_user_product_roles, mask_staff_email, user_has_capability
 from .admin_catalog import (
+    PlanBulkPriceForm,
+    apply_price_per_gb_to_plans,
     ROUTE_STATUS_FALLBACK,
     ROUTE_STATUS_MISSING,
     catalog_plan_edit_url,
@@ -1857,29 +1859,6 @@ class BotEventLogAdmin(ImportExportModelAdmin):
     list_select_related = ("bot_config", "order")
 
 
-class PlanBulkPriceForm(forms.Form):
-    price_per_gb = forms.DecimalField(
-        label=_("قیمت هر گیگ"),
-        min_value=Decimal("0"),
-        max_digits=14,
-        decimal_places=3,
-        help_text=_("برای همه پلن‌ها اعمال می‌شود و واحد پول هر پلن همان مقدار فعلی خودش می‌ماند."),
-        widget=forms.NumberInput(
-            attrs={
-                "class": "vIntegerField",
-                "min": "0",
-                "step": "0.001",
-                "placeholder": "100000",
-            }
-        ),
-    )
-
-
-def calculate_plan_price_from_per_gb(volume_gb, price_per_gb):
-    raw_price = Decimal(volume_gb or 0) * Decimal(price_per_gb)
-    return int(raw_price.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-
-
 class SalesInboundChoiceField(forms.ModelChoiceField):
     def label_from_instance(self, obj):
         panel_name = getattr(getattr(obj, "panel", None), "name", None) or _("بدون پنل")
@@ -2751,25 +2730,7 @@ class PlanAdmin(ImportExportModelAdmin):
         return super().changelist_view(request, context)
 
     def apply_price_per_gb(self, price_per_gb):
-        now = timezone.now()
-        plans = list(self.model.objects.filter(is_custom_volume=False).only("id", "price", "volume_gb"))
-        plans_to_update = []
-
-        for plan in plans:
-            new_price = calculate_plan_price_from_per_gb(plan.volume_gb, price_per_gb)
-            if plan.price == new_price:
-                continue
-            plan.price = new_price
-            plan.updated_at = now
-            plans_to_update.append(plan)
-
-        if plans_to_update:
-            with transaction.atomic():
-                self.model.objects.bulk_update(plans_to_update, ["price", "updated_at"])
-
-        Store.objects.update(custom_volume_price_per_gb=price_per_gb, updated_at=now)
-
-        return len(plans_to_update), len(plans)
+        return apply_price_per_gb_to_plans(price_per_gb)
 
     @admin.action(description=_("Set sales inbound for selected plans"))
     def bulk_assign_inbound_routes(self, request, queryset):

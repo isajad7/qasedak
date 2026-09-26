@@ -1,5 +1,5 @@
 import re
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from django import forms
 from django.core.exceptions import ValidationError
@@ -144,6 +144,48 @@ def money_label(amount, currency):
         Plan.Currency.USD: "USD",
     }
     return f"{int(amount or 0):,} {labels.get(currency, currency)}"
+
+
+class PlanBulkPriceForm(forms.Form):
+    price_per_gb = forms.DecimalField(
+        label=_("قیمت هر گیگ"),
+        min_value=Decimal("0"),
+        max_digits=14,
+        decimal_places=3,
+        help_text=_("همه پلن‌های حجم ثابت به‌روزرسانی می‌شوند؛ واحد پول هر پلن تغییر نمی‌کند."),
+        widget=forms.NumberInput(attrs={"min": "0", "step": "0.001", "placeholder": "100000"}),
+    )
+
+    def clean_price_per_gb(self):
+        price_per_gb = self.cleaned_data["price_per_gb"]
+        max_volume = Plan.objects.filter(is_custom_volume=False).aggregate(models.Max("volume_gb"))["volume_gb__max"]
+        if max_volume is not None and calculate_plan_price_from_per_gb(max_volume, price_per_gb) > 2147483647:
+            raise forms.ValidationError("قیمت نهایی یکی از پلن‌ها از سقف مجاز بیشتر می‌شود.")
+        return price_per_gb
+
+
+def calculate_plan_price_from_per_gb(volume_gb, price_per_gb):
+    raw_price = Decimal(volume_gb or 0) * Decimal(price_per_gb)
+    return int(raw_price.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def apply_price_per_gb_to_plans(price_per_gb):
+    now = timezone.now()
+    with transaction.atomic():
+        plans = list(Plan.objects.filter(is_custom_volume=False).order_by("pk").only("id", "price", "volume_gb"))
+        plans_to_update = []
+        for plan in plans:
+            new_price = calculate_plan_price_from_per_gb(plan.volume_gb, price_per_gb)
+            if plan.price == new_price:
+                continue
+            plan.price = new_price
+            plan.updated_at = now
+            plans_to_update.append(plan)
+
+        if plans_to_update:
+            Plan.objects.bulk_update(plans_to_update, ["price", "updated_at"])
+        Store.objects.update(custom_volume_price_per_gb=price_per_gb, updated_at=now)
+    return len(plans_to_update), len(plans)
 
 
 def plan_volume_label(plan):
