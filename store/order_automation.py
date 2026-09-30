@@ -6,7 +6,7 @@ from html import escape
 from django import forms
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 from .db_locking import select_for_update_self
@@ -98,7 +98,9 @@ def send_receipt_reminders(store_id, *, now=None):
             return 0
         due = []
         failed_auto = Order.objects.filter(store=store, automation__review_status="pending", automation__last_error__gt="", payment_submitted_at__isnull=False).exclude(status__in=(Order.Status.COMPLETED, Order.Status.REJECTED, Order.Status.CANCELLED))
-        orders = select_for_update_self(pending_receipts(store) | failed_auto).order_by("automation__last_reminded_at", "payment_submitted_at", "pk")[:100]
+        orders = select_for_update_self(pending_receipts(store) | failed_auto).order_by(
+            F("automation__last_reminded_at").asc(nulls_first=True), "payment_submitted_at", "pk"
+        )[:100]
         for order in orders:
             if (order.metadata or {}).get("suppress_new_order_notification"):
                 continue
