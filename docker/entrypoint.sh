@@ -217,6 +217,10 @@ if is_true "$QASEDAK_WORKER_ENABLED"; then
     start_process "worker" /app/docker/start-worker.sh
 fi
 
+if is_true "${QASEDAK_ORDER_AUTOMATION_ENABLED:-true}"; then
+    start_process "order automation" bash /app/docker/start-order-automation.sh
+fi
+
 start_process "web" /app/docker/start-web.sh
 
 set +e

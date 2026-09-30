@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from .configuration_services import get_telegram_bot_username
 from .db_locking import select_for_update_self
-from .models import Customer, Order, Referral, ReferralRewardLedger, Store, VPNClient
+from .models import Customer, Order, OrderAutomation, Referral, ReferralRewardLedger, Store, VPNClient
 from .referrals import assign_referrer, build_referral_link, normalize_referral_code
 from .xui_api import add_client_traffic, bytes_from_gb
 
@@ -85,6 +85,8 @@ def create_referral_reward_for_order(order):
             or order.status != Order.Status.COMPLETED
             or order.verification_status != Order.VerificationStatus.VERIFIED
         ):
+            return None
+        if OrderAutomation.objects.filter(order=order, auto_approved_at__isnull=False).exclude(review_status=OrderAutomation.ReviewStatus.VERIFIED).exists():
             return None
 
         invited = order.customer

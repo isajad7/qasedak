@@ -290,6 +290,10 @@ class Store(TimeStampedModel):
         default=False,
         help_text=_("When enabled, checkout only asks for a receipt image for this card."),
     )
+    order_review_reminders_enabled = models.BooleanField("یادآوری سفارش‌های منتظر بررسی", default=True)
+    order_auto_approve_enabled = models.BooleanField("تأیید خودکار ۵ دقیقه پس از ثبت رسید", default=False)
+    order_auto_approve_enabled_at = models.DateTimeField(null=True, blank=True, editable=False)
+    order_automation_last_run_at = models.DateTimeField(null=True, blank=True, editable=False)
     smsforwarder_webhook_token_hash = models.CharField(
         _("SMSForwarder webhook token hash"),
         max_length=255,
@@ -680,6 +684,16 @@ class Store(TimeStampedModel):
     @property
     def referral_reward_traffic_gb(self):
         return self.referral_reward_gb
+
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get("update_fields")
+        if self.order_auto_approve_enabled and (update_fields is None or "order_auto_approve_enabled" in update_fields):
+            was_enabled = bool(self.pk and Store.objects.filter(pk=self.pk, order_auto_approve_enabled=True).exists())
+            if self.order_auto_approve_enabled and not was_enabled:
+                self.order_auto_approve_enabled_at = timezone.now()
+                if update_fields is not None:
+                    kwargs["update_fields"] = set(update_fields) | {"order_auto_approve_enabled_at"}
+        super().save(*args, **kwargs)
 
     def clean(self):
         super().clean()
@@ -3596,6 +3610,33 @@ class Order(TimeStampedModel):
         self.verified_at = timezone.now()
         self.rejection_reason = reason
         self.status = self.Status.REJECTED
+
+
+class OrderAutomation(TimeStampedModel):
+    class ReviewStatus(models.TextChoices):
+        PENDING = "pending", "منتظر تطبیق"
+        VERIFIED = "verified", "تطبیق‌شده"
+        CANCELLING = "cancelling", "در حال لغو"
+        CANCELLED = "cancelled", "لغوشده"
+        CANCEL_FAILED = "cancel_failed", "لغو ناقص؛ نیازمند پیگیری"
+
+    order = models.OneToOneField(Order, on_delete=models.CASCADE, related_name="automation")
+    reminder_stage = models.PositiveSmallIntegerField(default=0)
+    last_reminded_at = models.DateTimeField(null=True, blank=True)
+    auto_approved_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    review_status = models.CharField(max_length=20, choices=ReviewStatus.choices, blank=True, default="", db_index=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    review_note = models.TextField(blank=True)
+    last_error = models.TextField(blank=True)
+    revoked_client_ids = models.JSONField(default=list, blank=True)
+    cancellation_notified_at = models.DateTimeField(null=True, blank=True)
+    cancellation_notification_attempted_at = models.DateTimeField(null=True, blank=True)
+    cancellation_notification_status = models.CharField(max_length=20, blank=True)
+
+    class Meta:
+        verbose_name = "پیگیری و تأیید خودکار سفارش"
+        verbose_name_plural = "پیگیری و تأیید خودکار سفارش‌ها"
 
 
 class VPNClient(TimeStampedModel):

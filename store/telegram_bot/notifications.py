@@ -514,6 +514,7 @@ def notify_order_event(order, *, event_type):
     title_by_event = {
         "approved": "Order approved",
         "rejected": "Order rejected",
+        "cancelled": "Order cancelled after payment review",
     }
     log_type_by_event = {
         "approved": BotEventLog.EventType.ORDER_APPROVED,
@@ -527,7 +528,7 @@ def notify_order_event(order, *, event_type):
         )
 
     client_cls, delivery_error_cls, log_event_func = _default_delivery_deps()
-    notify_customer_order_event(
+    return notify_customer_order_event(
         order,
         event_type=event_type,
         client_cls=client_cls,

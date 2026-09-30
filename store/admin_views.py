@@ -127,6 +127,7 @@ from .models import (
     Customer,
     Panel,
     Order,
+    OrderAutomation,
     Plan,
     PlanInboundRoute,
     Store,
@@ -135,6 +136,7 @@ from .models import (
     normalize_payment_digits,
 )
 from .order_actions import activate_order, reject_order
+from .order_automation import OrderAutomationSettingsForm, cancel_auto_approved_order, confirm_auto_payment
 from .orchestrator_v2.models import TenantInstance
 from .vpn_client_management_services import (
     VPNClientManagementError,
@@ -491,6 +493,12 @@ def order_status_tone(status):
 def payment_status(order):
     if order.verification_status == Order.VerificationStatus.REJECTED or order.status == Order.Status.REJECTED:
         return "رد پرداخت", "danger"
+    automation = getattr(order, "automation", None)
+    if automation and automation.auto_approved_at:
+        if automation.review_status in ("cancel_failed", "cancelling"):
+            return automation.get_review_status_display(), "danger"
+        if automation.review_status == "pending":
+            return "تأیید خودکار؛ منتظر تطبیق", "warning"
     if order.verification_status == Order.VerificationStatus.VERIFIED:
         return "تایید شده", "success"
     if order.is_paid or order.payment_submitted_at or order.payment_receipt_image:
@@ -862,14 +870,16 @@ def order_row(order):
         "delivery_tone": delivery_tone,
         "has_receipt": bool(order.payment_receipt_image),
         "created_at": order.created_at,
+        "submitted_at": order.payment_submitted_at,
+        "waiting_minutes": max(0, int((timezone.now() - order.payment_submitted_at).total_seconds() // 60)) if order.payment_submitted_at and order.verification_status == Order.VerificationStatus.PENDING else None,
     }
 
 
-def order_list(queryset, limit=ORDER_WORKBENCH_LIMIT):
+def order_list(queryset, limit=ORDER_WORKBENCH_LIMIT, *, oldest=False):
     orders = (
-        queryset.select_related("store", "customer", "plan", "operator", "inbound", "inbound__panel")
+        queryset.select_related("store", "customer", "plan", "operator", "inbound", "inbound__panel", "automation")
         .prefetch_related("vpn_clients", "incoming_payment_sms", "customer__bot_users")
-        .order_by("-created_at", "-pk")[:limit]
+        .order_by(*(("payment_submitted_at", "pk") if oldest else ("-created_at", "-pk")))[:limit]
     )
     return [order_row(order) for order in orders]
 
@@ -925,7 +935,7 @@ def build_workbench_context(selected_store):
             "description": "رسید یا پرداختی که owner باید تایید یا رد کند.",
             "count": needs_review.count(),
             "tone": "warning",
-            "items": order_list(needs_review),
+            "items": order_list(needs_review, oldest=True),
             "link": admin_order_changelist(
                 {
                     "status__exact": Order.Status.PENDING_VERIFICATION,
@@ -993,12 +1003,38 @@ def build_workbench_context(selected_store):
 @require_admin_capability("orders.view")
 def order_workbench(request):
     stores, selected_store = selected_store_from_id(request.GET.get("store"))
+    settings_form = OrderAutomationSettingsForm(instance=selected_store) if selected_store else None
+    if request.method == "POST":
+        ensure_admin_capability(request.user, "setup.manage")
+        if not selected_store or request.POST.get("action") != "save_order_automation":
+            messages.error(request, "فروشگاه و عملیات معتبر را انتخاب کنید.")
+            return redirect(order_workbench_url(store=selected_store))
+        settings_form = OrderAutomationSettingsForm(request.POST, instance=selected_store)
+        if settings_form.is_valid():
+            updated_store = settings_form.save(commit=False)
+            updated_store.save(update_fields=[*settings_form.Meta.fields, "updated_at"])
+            messages.success(request, "تنظیمات پیگیری سفارش ذخیره شد.")
+            return redirect(order_workbench_url(store=selected_store))
     workbench_context = build_workbench_context(selected_store)
+    from django.core.paginator import Paginator
+
+    auto_orders = base_workbench_orders(selected_store).filter(automation__auto_approved_at__isnull=False)
+    auto_filter = request.GET.get("auto_review", "pending")
+    if auto_filter != "all":
+        auto_filter = "pending"
+        auto_orders = auto_orders.filter(automation__review_status__in=("pending", "cancelling", "cancel_failed"))
+    auto_orders = auto_orders.select_related("store", "customer", "plan", "operator", "inbound__panel", "automation").prefetch_related("vpn_clients", "customer__bot_users")
+    auto_page = Paginator(auto_orders.order_by("automation__auto_approved_at", "pk"), 30).get_page(request.GET.get("auto_page"))
     context = {
         **admin.site.each_context(request),
         **workbench_context,
         "stores": stores,
         "selected_store": selected_store,
+        "order_automation_form": settings_form,
+        "can_manage_order_automation": user_has_capability(request.user, "setup.manage"),
+        "auto_review_filter": auto_filter,
+        "auto_review_page": auto_page,
+        "auto_review_rows": [order_row(order) for order in auto_page],
         "title": "میز کار سفارش‌ها",
         "subtitle": "رسید، تایید پرداخت، ساخت/تحویل کانفیگ و خطاهای روزانه owner.",
     }
@@ -2045,13 +2081,16 @@ def campaign_export(request, campaign_id):
 
 def get_review_order(order_id):
     return get_object_or_404(
-        Order.objects.select_related("store", "customer", "plan", "operator", "inbound", "inbound__panel", "verified_by")
+        Order.objects.select_related("store", "customer", "plan", "operator", "inbound", "inbound__panel", "verified_by", "automation")
         .prefetch_related("vpn_clients", "vpn_clients__inbound__panel", "incoming_payment_sms", "customer__bot_users"),
         pk=order_id,
     )
 
 
 def can_approve_order(order):
+    automation = getattr(order, "automation", None)
+    if automation and automation.review_status in ("cancelling", "cancel_failed", "cancelled"):
+        return False
     return order.status not in {Order.Status.REJECTED, Order.Status.CANCELLED}
 
 
@@ -2060,6 +2099,8 @@ def can_reject_order(order):
 
 
 def can_retry_delivery(order):
+    if not can_approve_order(order):
+        return False
     if order.status in {Order.Status.COMPLETED, Order.Status.REJECTED, Order.Status.CANCELLED}:
         return False
     return bool(prefetched_clients(order))
@@ -2069,10 +2110,10 @@ def handle_order_review_action(request, order):
     action = request.POST.get("action", "")
     review_url = order_review_url(order)
 
-    if action not in {"approve", "reject", "retry_delivery"}:
+    if action not in {"approve", "reject", "retry_delivery", "confirm_auto_payment", "cancel_auto_approval"}:
         messages.error(request, "Action معتبر نیست.")
         return redirect(review_url)
-    if action == "reject":
+    if action in {"reject", "cancel_auto_approval"}:
         ensure_admin_capability(request.user, "orders.reject")
     else:
         ensure_admin_capability(request.user, "orders.approve")
@@ -2082,6 +2123,17 @@ def handle_order_review_action(request, order):
         return redirect(review_url)
 
     try:
+        if action == "confirm_auto_payment":
+            confirm_auto_payment(order.pk, user=request.user, note=request.POST.get("reason", ""))
+            messages.success(request, "تطبیق پرداخت ثبت شد؛ سرویس دوباره ساخته یا تمدید نشد.")
+            return redirect(review_url)
+        if action == "cancel_auto_approval":
+            complete = cancel_auto_approved_order(order.pk, user=request.user, reason=request.POST.get("reason", ""))
+            if complete:
+                messages.success(request, "سفارش لغو شد. وضعیت اطلاع‌رسانی به مشتری در همین صفحه نمایش داده می‌شود.")
+            else:
+                messages.error(request, "لغو کامل نشد؛ خطای توقف سرویس را بررسی و دوباره اقدام کنید.")
+            return redirect(review_url)
         if action == "approve":
             if not can_approve_order(order):
                 messages.error(request, "این سفارش در وضعیت قابل تایید نیست.")
@@ -2119,6 +2171,9 @@ def handle_order_review_action(request, order):
             messages.success(request, safe_action_message(result.message))
         else:
             messages.error(request, safe_action_message(result.message))
+        return redirect(review_url)
+    except (ValidationError, OrderAutomation.DoesNotExist) as exc:
+        messages.error(request, "؛ ".join(exc.messages) if isinstance(exc, ValidationError) else "این سفارش تأیید خودکار ندارد.")
         return redirect(review_url)
     except Exception:
         logger.exception("Admin order review action failed action=%s order_id=%s", action, order.pk)
@@ -2209,6 +2264,14 @@ def order_review(request, order_id):
         return handle_order_review_action(request, order)
 
     review_context = build_review_context(order)
+    automation = getattr(order, "automation", None)
+    has_auto_approval = bool(automation and automation.auto_approved_at)
+    review_context["automation"] = automation if has_auto_approval else None
+    review_context["is_renewal"] = bool((order.metadata or {}).get("renewal_client_pk"))
+    review_context["can_confirm_auto"] = bool(has_auto_approval and automation.review_status == "pending" and user_has_capability(request.user, "orders.approve"))
+    review_context["can_cancel_auto"] = bool(has_auto_approval and automation.review_status != "cancelled" and user_has_capability(request.user, "orders.reject"))
+    if has_auto_approval:
+        review_context["can_reject"] = False
     review_context["can_approve"] = review_context["can_approve"] and user_has_capability(request.user, "orders.approve")
     review_context["can_reject"] = review_context["can_reject"] and user_has_capability(request.user, "orders.reject")
     review_context["can_retry_delivery"] = review_context["can_retry_delivery"] and user_has_capability(request.user, "orders.approve")

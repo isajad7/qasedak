@@ -17452,8 +17452,9 @@ class AdminNotificationTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         order = Order.objects.get()
-        self.assertIsNotNone(order.admin_notified_at)
-        self.assertEqual(len([call for call in post_calls if call["url"].endswith("/sendPhoto")]), 1)
+        self.assertIsNone(order.admin_notified_at)
+        self.assertIsNone(order.admin_receipt_notified_at)
+        self.assertEqual(len([call for call in post_calls if call["url"].endswith("/sendPhoto")]), 2)
         self.assertEqual(len([call for call in post_calls if call["url"].endswith("/sendMessage")]), 0)
         self.bot_config.refresh_from_db()
         self.assertIn("delivery failed", self.bot_config.last_error)

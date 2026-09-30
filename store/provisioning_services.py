@@ -1009,6 +1009,10 @@ def approve_and_provision_order(order, actor=None, source=None, notify=True):
             select_for_update_self(Order.objects.select_related("plan", "store", "inbound", "inbound__panel"))
             .get(pk=order.pk)
         )
+        from .models import OrderAutomation
+
+        if OrderAutomation.objects.filter(order=order, review_status__in=("cancelling", "cancel_failed", "cancelled")).exists():
+            return ProvisioningResult(False, "لغو این سفارش ثبت شده است؛ فعال‌سازی دوباره مجاز نیست.")
         if order.status == Order.Status.COMPLETED and order.verification_status == Order.VerificationStatus.VERIFIED:
             return ProvisioningResult(
                 True,
