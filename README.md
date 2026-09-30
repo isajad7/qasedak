@@ -74,6 +74,8 @@ For daily order/payment work, open:
 
 Owner flow: pending receipt -> review -> approve/reject -> delivery status. Actions are explicit POST confirmations and reuse the existing order services.
 
+The workbench also configures receipt reminders and optional five-minute automatic approval, with a separate reconciliation queue and cancellation action. Timed approval defaults off and is not bank verification. See [Order Automation](docs/ORDER_AUTOMATION.md).
+
 For customer and VPN service work, open:
 
 ```text

@@ -127,6 +127,38 @@
 
         <aside class="qadmin-action-box">
             <h2>Action</h2>
+            {% if automation %}
+                <h3>بازبینی تأیید خودکار</h3>
+                <p>{{ automation.auto_approved_at|date:"Y-m-d H:i" }} · {{ automation.get_review_status_display }}</p>
+                {% if automation.reviewed_at %}<p>بررسی‌کننده: {{ automation.reviewed_by }} · {{ automation.reviewed_at|date:"Y-m-d H:i" }}</p>{% endif %}
+                {% if automation.review_note %}<p>{{ automation.review_note }}</p>{% endif %}
+                {% if automation.last_error %}<p class="qadmin-warning-text">{{ automation.last_error }}</p>{% endif %}
+                {% if automation.review_status == "cancelled" %}
+                    <p>پیام لغو:
+                        {% if automation.cancellation_notification_status == "sent" %}ارسال شد
+                        {% elif automation.cancellation_notification_status == "no_target" %}مشتری مقصد تلگرام فعال ندارد
+                        {% else %}در انتظار ارسال / تلاش مجدد خودکار{% endif %}
+                    </p>
+                {% endif %}
+            {% endif %}
+            {% if can_confirm_auto %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <input type="hidden" name="confirm_external" value="1">
+                    <label>یادداشت تطبیق (اختیاری)<textarea name="reason" rows="2"></textarea></label>
+                    <button type="submit" name="action" value="confirm_auto_payment" class="qadmin-button">پرداخت تطبیق شد</button>
+                </form>
+            {% endif %}
+            {% if can_cancel_auto %}
+                <form method="post" class="qadmin-action-form qadmin-danger-form">
+                    {% csrf_token %}
+                    <label>دلیل لغو (برای مشتری ارسال می‌شود)<textarea name="reason" required rows="3"></textarea></label>
+                    <p>ساب این سفارش و سرویس‌های اختصاصی آن متوقف می‌شوند. کانفیگ‌های مشترک یا منابع خارجیِ قبلاً دریافت‌شده برای قطع دسترسی نیاز به رسیدگی در منبع دارند.</p>
+                    {% if is_renewal %}<p>لغو این تمدید، همان سرویس فعلی مشتری را متوقف می‌کند؛ حجم و مدت پیش از تمدید بازگردانی نمی‌شوند.</p>{% endif %}
+                    <label class="qadmin-confirm-row"><input type="checkbox" name="confirm_external" value="1" required>لغو سفارش و توقف سرویس مربوط را تأیید می‌کنم.</label>
+                    <button type="submit" name="action" value="cancel_auto_approval" class="qadmin-button qadmin-button-danger">لغو سفارش و اطلاع به مشتری</button>
+                </form>
+            {% endif %}
             {% if can_approve %}
                 <form method="post" class="qadmin-action-form">
                     {% csrf_token %}

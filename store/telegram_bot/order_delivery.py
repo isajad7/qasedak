@@ -6,12 +6,21 @@ from store.customer_delivery import (
     customer_visible_config_count,
 )
 from store.jalali import persian_digits
-from store.models import BotEventLog, BotUser
+from store.models import BotConfiguration, BotEventLog, BotUser
 
 from .config_delivery import config_send_result_count, send_config_links_message
 
 
 def format_customer_order_event(order, *, event_type, format_order_message_func):
+    if event_type == "cancelled":
+        from html import escape
+
+        return "\n".join([
+            "❌ سفارش شما پس از بررسی پرداخت لغو شد",
+            f"کد پیگیری: {escape(order.order_tracking_code)}",
+            f"دلیل: {escape(order.rejection_reason)}",
+            "برای پیگیری پرداخت با پشتیبانی در ارتباط باشید.",
+        ])
     if event_type == "approved":
         lines = [
             "✅ سرویس شما آماده شد",
@@ -118,7 +127,7 @@ def notify_customer_order_event(
     log_event_func,
     send_customer_order_event_message_func,
 ):
-    if not order.customer_id or (order.metadata or {}).get("suppress_customer_notification"):
+    if not order.customer_id or (event_type != "cancelled" and (order.metadata or {}).get("suppress_customer_notification")):
         return 0
 
     base_bot_users = (
@@ -131,10 +140,16 @@ def notify_customer_order_event(
         .exclude(chat_id="")
     )
     bot_users = base_bot_users
+    if event_type == "cancelled":
+        base_bot_users = base_bot_users.filter(bot_config__provider=BotConfiguration.Provider.TELEGRAM)
+        bot_users = base_bot_users
     order_bot = (order.metadata or {}).get("bot") or {}
     bot_user_id = order_bot.get("bot_user_id")
     bot_config_id = order_bot.get("bot_config_id")
-    if bot_user_id:
+    if event_type == "cancelled":
+        if order.store_id:
+            bot_users = base_bot_users.filter(Q(bot_config__store=order.store) | Q(bot_config__store__isnull=True))
+    elif bot_user_id:
         targeted_bot_user = base_bot_users.filter(pk=bot_user_id).first()
         if targeted_bot_user:
             bot_users = [targeted_bot_user]

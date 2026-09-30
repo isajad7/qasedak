@@ -138,6 +138,9 @@ def format_order_message(order, *, title="سفارش جدید VPN"):
         f"<b>کانفیگ:</b> <code>{order.username}</code>",
         f"<b>منبع:</b> <code>{escape(str(source))}</code>",
     ]
+    automation = getattr(order, "automation", None)
+    if automation and automation.auto_approved_at:
+        lines.extend(["", f"<b>تأیید زمان‌دار:</b> {automation.get_review_status_display()}"])
     if order.bank_tracking_code:
         lines.append(f"<b>کد پیگیری بانکی:</b> <code>{escape(order.bank_tracking_code)}</code>")
     if duplicate_warning.get("detected"):

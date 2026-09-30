@@ -54,6 +54,44 @@
         {% endif %}
     </section>
 
+    {% if selected_store and can_manage_order_automation %}
+    <section class="qadmin-review-panel">
+        <h2>پیگیری و تأیید خودکار سفارش</h2>
+        <form method="post" class="qadmin-action-form">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="save_order_automation">
+            {{ order_automation_form.as_p }}
+            <p>تأیید خودکار بر اساس گذشت زمان است و پرداخت بانکی را تطبیق نمی‌دهد. فقط سفارش دارای رسید ثبت‌شده بررسی می‌شود؛ پس از فعال‌کردن این گزینه، رسیدهای قبلی نیز حداقل ۵ دقیقه فرصت بررسی دارند.</p>
+            <p>یادآوری مدیر در دقیقه‌های ۵، ۱۵ و ۳۰ و سپس ساعتی، تا تعیین تکلیف سفارش ارسال می‌شود.</p>
+            <button type="submit" class="qadmin-button">ذخیره تنظیمات</button>
+        </form>
+        <p>آخرین اجرای پیگیری: {{ selected_store.order_automation_last_run_at|date:"Y-m-d H:i:s"|default:"هنوز ثبت نشده" }}</p>
+    </section>
+    {% endif %}
+
+    <section id="auto-review" class="qadmin-review-panel">
+        <h2>بازبینی تأییدهای خودکار</h2>
+        <p>تا ثبت «پرداخت تطبیق شد»، این سفارش‌ها نیازمند بررسی بانکی شما هستند.</p>
+        <p>
+            <a href="?{% if selected_store %}store={{ selected_store.pk }}&amp;{% endif %}auto_review=pending#auto-review">منتظر تطبیق / لغو ناقص</a>
+            · <a href="?{% if selected_store %}store={{ selected_store.pk }}&amp;{% endif %}auto_review=all#auto-review">تمام تأییدهای خودکار</a>
+            · {{ auto_review_page.paginator.count }} سفارش
+        </p>
+        <div class="qadmin-order-table-wrap"><table class="qadmin-order-table">
+            <thead><tr><th>سفارش / مشتری</th><th>مبلغ</th><th>تأیید خودکار</th><th>نتیجه بازبینی</th><th>اقدام</th></tr></thead>
+            <tbody>{% for item in auto_review_rows %}
+                <tr><td>{{ item.tracking_code }}<br>{{ item.customer_name }}</td><td>{{ item.amount }}</td>
+                    <td>{{ item.order.automation.auto_approved_at|date:"Y-m-d H:i" }}</td>
+                    <td>{{ item.order.automation.get_review_status_display }}{% if item.order.automation.last_error %}<br>{{ item.order.automation.last_error }}{% endif %}</td>
+                    <td><a href="{{ item.review_url }}" class="qadmin-action qadmin-action-info">تطبیق / لغو</a></td></tr>
+            {% empty %}<tr><td colspan="5">سفارشی در این فهرست نیست.</td></tr>{% endfor %}</tbody>
+        </table></div>
+        <p>صفحه {{ auto_review_page.number }} از {{ auto_review_page.paginator.num_pages }}
+            {% if auto_review_page.has_previous %}<a href="?{% if selected_store %}store={{ selected_store.pk }}&amp;{% endif %}auto_review={{ auto_review_filter }}&amp;auto_page={{ auto_review_page.previous_page_number }}#auto-review">قبلی</a>{% endif %}
+            {% if auto_review_page.has_next %}<a href="?{% if selected_store %}store={{ selected_store.pk }}&amp;{% endif %}auto_review={{ auto_review_filter }}&amp;auto_page={{ auto_review_page.next_page_number }}#auto-review">بعدی</a>{% endif %}
+        </p>
+    </section>
+
     <nav class="qadmin-order-tabs" aria-label="Order queues">
         {% for section in sections %}
             <a href="#{{ section.key }}" class="qadmin-order-tab qadmin-status-{{ section.tone }}">
@@ -105,6 +143,7 @@
                             <tr>
                                 <td>
                                     <a href="{{ item.review_url }}" class="qadmin-order-code">{{ item.tracking_code }}</a>
+                                    {% if item.waiting_minutes != None %}<small>{{ item.waiting_minutes }} دقیقه از ثبت رسید</small>{% endif %}
                                     <span class="qadmin-badge qadmin-badge-{{ item.status_tone }}">{{ item.status_label }}</span>
                                 </td>
                                 <td>

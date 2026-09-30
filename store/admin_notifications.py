@@ -180,7 +180,7 @@ def notify_admins_new_order(order_or_id):
     )
     if not claimed_order:
         return 0
-    return _send_order_notification(claimed_order, title="سفارش جدید VPN")
+    return _send_claimed_notification(claimed_order, field_name="admin_notified_at", title="سفارش جدید VPN", also_receipt=True)
 
 
 def notify_admins_payment_receipt(order_or_id):
@@ -196,7 +196,7 @@ def notify_admins_payment_receipt(order_or_id):
     )
     if not claimed_order:
         return 0
-    return _send_order_notification(claimed_order, title="رسید پرداخت برای سفارش ثبت شد")
+    return _send_claimed_notification(claimed_order, field_name="admin_receipt_notified_at", title="رسید پرداخت برای سفارش ثبت شد")
 
 
 def notify_admins_order_needs_review(order_or_id):
@@ -208,7 +208,20 @@ def notify_admins_order_needs_review(order_or_id):
     claimed_order = _claim_notification(order_id, "admin_receipt_notified_at")
     if not claimed_order:
         return 0
-    return _send_order_notification(claimed_order, title="سفارش نیازمند بررسی پرداخت")
+    return _send_claimed_notification(claimed_order, field_name="admin_receipt_notified_at", title="سفارش نیازمند بررسی پرداخت")
+
+
+def _send_claimed_notification(order, *, field_name, title, also_receipt=False):
+    sent = 0
+    try:
+        sent = _send_order_notification(order, title=title)
+        return sent
+    finally:
+        if not sent:
+            claimed_at = getattr(order, field_name)
+            Order.objects.filter(pk=order.pk, **{field_name: claimed_at}).update(**{field_name: None})
+            if also_receipt:
+                Order.objects.filter(pk=order.pk, admin_receipt_notified_at=claimed_at).update(admin_receipt_notified_at=None)
 
 
 def schedule_notify_admins_new_order(order_or_id):

@@ -43,13 +43,13 @@ jobs:
         run: python manage.py check
 
       - name: Django tests
-        run: python manage.py test store.tests store.test_external_subscription_interval payments.tests
+        run: python manage.py test store.tests store.test_external_subscription_interval store.test_order_automation payments.tests
 
       - name: Migration drift check
         run: python manage.py makemigrations --check --dry-run
 
       - name: Shell syntax
-        run: bash -n scripts/install.sh scripts/doctor.sh scripts/backup.sh scripts/update.sh scripts/timers.sh scripts/release_check.sh scripts/deploy/*.sh
+        run: bash -n scripts/install.sh scripts/doctor.sh scripts/backup.sh scripts/update.sh scripts/timers.sh scripts/release_check.sh scripts/deploy/*.sh docker/*.sh
 
       - name: Whitespace check
         run: git diff --check HEAD^ HEAD
