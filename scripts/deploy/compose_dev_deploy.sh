@@ -154,6 +154,7 @@ if [[ "$old_image" == "$image" && -n "$old_refresh_container" ]]; then
     health_ok || die 'Existing revision is not healthy.'
     [[ "$(docker inspect -f '{{.State.Running}}' "$old_refresh_container")" == true ]] || die 'Subscription refresh container is not running.'
     docker exec "$old_container" python manage.py process_order_automation --check-running >/dev/null 2>&1 || die 'Order automation heartbeat is missing or stale.'
+    docker exec "$old_container" python manage.py collect_customer_activity --check-running >/dev/null 2>&1 || die 'Customer activity heartbeat is missing or stale.'
     printf 'Development revision %s already healthy.\n' "$revision"
     exit 0
 fi
@@ -215,7 +216,8 @@ for attempt in {1..24}; do
     if [[ -n "$current" && "$(docker inspect -f '{{.Config.Image}}' "$current")" == "$image" \
         && -n "$current_refresh" && "$(docker inspect -f '{{.Config.Image}}' "$current_refresh")" == "$image" \
         && "$(docker inspect -f '{{.State.Running}}' "$current_refresh")" == true ]] && health_ok \
-        && docker exec "$current" python manage.py process_order_automation --check-running >/dev/null 2>&1; then
+        && docker exec "$current" python manage.py process_order_automation --check-running >/dev/null 2>&1 \
+        && docker exec "$current" python manage.py collect_customer_activity --check-running >/dev/null 2>&1; then
         healthy=1
         break
     fi
@@ -223,7 +225,8 @@ for attempt in {1..24}; do
 done
 if (( ! healthy )); then
     rollback
-    die 'New image did not pass tenant/database health or order scheduler heartbeat checks; previous image restart attempted. Database migrations require manual review.'
+    die 'New image did not pass tenant/database health or scheduler heartbeat checks; previous image restart attempted. Database migrations require manual review.'
 fi
-printf 'Order automation scheduler heartbeat verified.\n'
+printf 'Order automation and customer activity scheduler heartbeats verified.\n'
+docker exec "$current" python manage.py collect_customer_activity --status
 printf 'Development deployed revision %s to the reviewed Compose service.\n' "$revision"

@@ -33,6 +33,7 @@
             </div>
         </div>
         <div class="qadmin-hero-actions">
+            <a href="{% url 'admin_store_customer_activity' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-info">فعالیت واقعی مشتری‌ها</a>
             <a href="{% url 'admin_store_owner_dashboard' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-secondary">داشبورد</a>
             <a href="{% url 'admin_store_reports_center' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}#revenue" class="qadmin-action qadmin-action-info">گزارش Revenue</a>
             <a href="{{ logs_url }}" class="qadmin-action qadmin-action-info">RevenueOfferLog</a>

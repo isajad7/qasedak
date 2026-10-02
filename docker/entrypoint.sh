@@ -221,6 +221,10 @@ if is_true "${QASEDAK_ORDER_AUTOMATION_ENABLED:-true}"; then
     start_process "order automation" bash /app/docker/start-order-automation.sh
 fi
 
+if is_true "${QASEDAK_CUSTOMER_ACTIVITY_ENABLED:-true}"; then
+    start_process "customer activity" bash /app/docker/start-customer-activity.sh
+fi
+
 start_process "web" /app/docker/start-web.sh
 
 set +e
