@@ -52,10 +52,11 @@ def entitlement(mapping, rows, now):
     for row in rows.values():
         expiry = row.get("expiry_time")
         total = row.get("total_bytes")
-        if expiry and expiry <= now:
+        if row.get("remote_status") == "expired" or (expiry and expiry <= now):
             states.append("expired")
-            ends.append(expiry)
-        elif total and total > 0 and row["used_bytes"] >= total:
+            if expiry:
+                ends.append(expiry)
+        elif row.get("remote_status") == "limited" or (total and total > 0 and row["used_bytes"] >= total):
             states.append("exhausted")
         elif row.get("enabled") is False:
             states.append("disabled")
@@ -202,10 +203,12 @@ def collect_activity():
     try:
         maps, orphans = load_purchase_maps()
         panel_ids = {source.panel_id for mapping in maps for source in mapping.sources if source.panel_id}
-        rows, panels = [], {}
+        rows, panels, diagnostics = [], {}, []
         for panel in Panel.objects.filter(pk__in=panel_ids).select_related("store").order_by("pk"):
             _heartbeat(token)
-            samples, status = read_panel(panel)
+            detail = {"panel_id": panel.pk, "family": panel.family}
+            samples, status = read_panel(panel, diagnostics=detail)
+            diagnostics.append(detail)
             rows.extend(samples)
             panels[panel.pk] = status
         _heartbeat(token)
@@ -224,7 +227,7 @@ def collect_activity():
                 activity = record_purchase(mapping, matched, reason, now=now)
                 counts[activity.reason] += 1
             _heartbeat(token)
-        summary = {"purchases": len(maps), "panels": len(panels), "panel_statuses": dict(Counter(panels.values())), "quality": dict(counts)}
+        summary = {"purchases": len(maps), "panels": len(panels), "panel_statuses": dict(Counter(panels.values())), "quality": dict(counts), "panel_diagnostics": diagnostics}
         ActivityCollector.objects.filter(pk=1, token=token).update(completed_at=timezone.now(), summary=summary)
         return summary
     except Exception as exc:
