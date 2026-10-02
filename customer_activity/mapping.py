@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 
 from store.config_lookup import ConfigLookupError, extract_client_identifier_from_config
-from store.models import Order, SubscriptionCup, VPNClient
+from store.models import Order, Panel, SubscriptionCup, VPNClient
 from store.xui_api import hash_xui_identifier
 
 
@@ -17,6 +17,7 @@ class Source:
     inbound_id: int | None
     node: str
     hashes: tuple
+    required_hash: str = ""
 
 
 @dataclass
@@ -30,6 +31,12 @@ class PurchaseMap:
 
 def source_for_client(client):
     inbound = client.inbound
+    if inbound and inbound.panel.family == Panel.Family.PASARGUARD:
+        # PasarGuard's local UUID is synthetic. Its username is the remote account identity.
+        raw = client.xui_raw if isinstance(client.xui_raw, dict) else {}
+        username = str(raw.get("username") or client.xui_email or client.username or "").strip()
+        return Source(inbound.panel_id, client.inbound_id, "pasarguard",
+                      (hash_xui_identifier(username),) if username else ())
     hashes = tuple(sorted({hash_xui_identifier(value) for value in (
         client.uuid, client.xui_email, client.username, client.sub_id,
     ) if value}))
@@ -45,6 +52,10 @@ def source_for_link(link):
     if link.vpn_client_id:
         source = source_for_client(link.vpn_client)
         digest = hash_xui_identifier(identifier)
+        if source.node == "pasarguard":
+            # Both the delivered credential and its declared owner must match the remote account.
+            return Source(source.panel_id, source.inbound_id, source.node,
+                          (digest,) if digest else (), source.hashes[0] if source.hashes else "")
         if digest and digest in source.hashes:
             return source
         # A stale FK must not attribute the delivered link to an unrelated client.
@@ -53,6 +64,9 @@ def source_for_link(link):
     panel_id = link.source_panel_id or (inbound.panel_id if inbound else None)
     if inbound and inbound.panel_id != panel_id:
         return Source(None, None, "", ())
+    panel = link.source_panel or (inbound.panel if inbound else None)
+    if panel and panel.family == Panel.Family.PASARGUARD:
+        return Source(panel_id, link.source_inbound_id, "pasarguard", (hash_xui_identifier(identifier),) if identifier else ())
     return Source(panel_id, link.source_inbound_id, str(inbound.xui_node_id or "") if inbound else "",
                   (hash_xui_identifier(identifier),) if identifier else ())
 
@@ -60,7 +74,7 @@ def source_for_link(link):
 def load_purchase_maps():
     orders = list(Order.objects.select_related("customer", "plan", "store").order_by("created_at", "pk"))
     maps = {order.pk: PurchaseMap(order) for order in orders}
-    clients = list(VPNClient.objects.select_related("inbound", "order"))
+    clients = list(VPNClient.objects.select_related("inbound__panel", "order"))
     client_by_id = {client.pk: client for client in clients}
     # A successful explicit renewal transfers this same physical service to a new purchase cycle.
     owner = {client.pk: client.order_id for client in clients}
@@ -86,8 +100,8 @@ def load_purchase_maps():
             transferred.add(client.order_id)
 
     orphan_sources = [source_for_client(client) for client in clients if owner.get(client.pk) not in maps]
-    cups = SubscriptionCup.objects.select_related("vpn_client__inbound").prefetch_related(
-        "items__config_link__vpn_client__inbound", "items__config_link__source_inbound",
+    cups = SubscriptionCup.objects.select_related("vpn_client__inbound__panel").prefetch_related(
+        "items__config_link__vpn_client__inbound__panel", "items__config_link__source_inbound__panel", "items__config_link__source_panel",
     )
     for cup in cups:
         mapping = maps.get(cup.order_id)
@@ -129,11 +143,12 @@ def row_key(row):
 
 def resolve_maps(maps, orphan_sources, rows):
     def resolve(source):
-        if not source.panel_id or not source.inbound_id or not source.hashes:
+        if not source.panel_id or (not source.inbound_id and source.node != "pasarguard") or not source.hashes:
             return None
         matches = [row for row in rows if row["panel_id"] == source.panel_id
-                   and row["inbound_id"] == source.inbound_id
+                   and (source.node == "pasarguard" or row["inbound_id"] == source.inbound_id)
                    and str(row.get("node_id") or "") == source.node
+                   and (not source.required_hash or source.required_hash in row["aliases"])
                    and set(source.hashes).intersection(row["aliases"])]
         return matches[0] if len(matches) == 1 else None
 

@@ -317,9 +317,96 @@ class ActivityTests(TestCase):
 
     @patch("customer_activity.panels.XUIService")
     def test_unsupported_panel_is_not_queried(self, service):
-        self.panel.family = Panel.Family.PASARGUARD
+        self.panel.family = Panel.Family.MARZBAN
         self.assertEqual(read_panel(self.panel), ([], "unsupported_panel"))
         service.assert_not_called()
+
+    def pasar_user(self, username="buyer", **overrides):
+        data = {"id": 1, "username": username, "status": "active", "used_traffic": 100,
+                "data_limit": 10000, "expire": (self.now + timedelta(days=30)).isoformat(),
+                "proxy_settings": {"vless": {"id": "real-remote-uuid"}, "trojan": {"password": "remote-password"}}}
+        data.update(overrides)
+        return data
+
+    @patch("customer_activity.panels.PasarGuardClient")
+    def test_pasarguard_uses_batched_pagination_and_hashed_account_identity(self, client_cls):
+        self.panel.family = Panel.Family.PASARGUARD
+        client_cls.return_value.request.side_effect = [
+            {"total": 2, "users": [self.pasar_user()]},
+            {"total": 2, "users": [self.pasar_user("other", id=2)]},
+        ]
+        diagnostic = {}
+        rows, status = read_panel(self.panel, diagnostics=diagnostic)
+        self.assertEqual(status, "ok")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(diagnostic["pages"], 2)
+        self.assertIn("offset=1", client_cls.return_value.request.call_args.args[1])
+        self.assertIn(hash_xui_identifier("real-remote-uuid"), rows[0]["aliases"])
+        self.assertEqual(rows[0]["used_bytes"], 100)
+        self.assertEqual(rows[0]["node_id"], "pasarguard")
+
+    @patch("customer_activity.panels.PasarGuardClient")
+    def test_pasarguard_native_links_and_synthetic_uuid_deduplicate_one_account(self, client_cls):
+        self.panel.family = Panel.Family.PASARGUARD
+        self.panel.save(update_fields=["family"])
+        order = self.purchase()
+        vpn = self.vpn(order, uuid="synthetic-local-uuid", username="local-label", xui_email="buyer", xui_node_id="",
+                       xui_raw={"family": "pasarguard", "username": "buyer", "remote_user_id": 1})
+        cup = SubscriptionCup.objects.create(order=order, customer=self.customer, vpn_client=vpn)
+        for i, raw in enumerate(["vless://real-remote-uuid@a.example:443", "trojan://remote-password@b.example:443"]):
+            link = ConfigLink.objects.create(raw_link=raw, normalized_hash=f"native-{i}", vpn_client=vpn,
+                                             source_panel=self.panel, source_inbound=self.inbound)
+            CupItem.objects.create(cup=cup, config_link=link)
+        client_cls.return_value.request.return_value = {"total": 1, "users": [self.pasar_user()]}
+        rows, _ = read_panel(self.panel)
+        maps, orphans = load_purchase_maps()
+        matched, reason = resolve_maps(maps, orphans, rows)[order.pk]
+        self.assertEqual(reason, "")
+        self.assertEqual(len(matched), 1)
+        state = record_purchase(maps[0], matched, reason, now=timezone.now())
+        self.assertEqual(state.reason, "baseline")
+        self.assertEqual(state.source_count, 1)
+
+    @patch("customer_activity.panels.PasarGuardClient")
+    def test_pasarguard_does_not_accept_a_different_users_credential(self, client_cls):
+        self.panel.family = Panel.Family.PASARGUARD
+        self.panel.save(update_fields=["family"])
+        order = self.purchase()
+        vpn = self.vpn(order, xui_email="buyer", xui_raw={"username": "buyer"})
+        cup = SubscriptionCup.objects.create(order=order, customer=self.customer)
+        link = ConfigLink.objects.create(raw_link="vless://foreign-id@example.com:443", normalized_hash="foreign", vpn_client=vpn)
+        CupItem.objects.create(cup=cup, config_link=link)
+        client_cls.return_value.request.return_value = {"total": 2, "users": [self.pasar_user(), self.pasar_user("foreign", id=2, proxy_settings={"vless": {"id": "foreign-id"}})]}
+        rows, _ = read_panel(self.panel)
+        maps, orphans = load_purchase_maps()
+        self.assertEqual(resolve_maps(maps, orphans, rows)[order.pk][1], "unmapped_source")
+
+    @patch("customer_activity.panels.PasarGuardClient")
+    def test_pasarguard_partial_pagination_and_repeated_users_fail_closed(self, client_cls):
+        self.panel.family = Panel.Family.PASARGUARD
+        first = {"total": 2, "users": [self.pasar_user()]}
+        for second in (ValueError("bad payload"), first):
+            client_cls.return_value.request.side_effect = [first, second]
+            rows, status = read_panel(self.panel)
+            self.assertFalse(rows)
+            self.assertEqual(status, "partial")
+
+    @patch("customer_activity.panels.PasarGuardClient")
+    def test_pasarguard_missing_usage_and_ended_states_are_not_active(self, client_cls):
+        self.panel.family = Panel.Family.PASARGUARD
+        client_cls.return_value.request.return_value = {"total": 1, "users": [self.pasar_user(used_traffic=None, status="limited")]}
+        rows, _ = read_panel(self.panel)
+        self.assertFalse(rows[0]["stats_available"])
+        self.assertFalse(rows[0]["enabled"])
+
+    @patch("customer_activity.panels.XUIService")
+    def test_read_errors_are_counted_without_exposing_sensitive_messages(self, service_cls):
+        service_cls.return_value.get_inbound.side_effect = ValueError("HTTP 404 token=secret-token")
+        details = {}
+        rows, status = read_panel(self.panel, diagnostics=details)
+        self.assertEqual(status, "partial")
+        self.assertEqual(details["errors"], {"http_404": 1})
+        self.assertNotIn("secret-token", str(details))
 
     @patch("customer_activity.panels.XUIService")
     def test_adapter_rejects_malformed_or_partial_traffic(self, service_cls):
