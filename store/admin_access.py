@@ -468,6 +468,7 @@ def get_visible_admin_sections(user):
         ("catalog", "محصولات و مسیر فروش", "admin_store_catalog", "catalog.view"),
         ("reports", "گزارش ها", "admin_store_reports_center", "reports.view"),
         ("campaigns", "کمپین ها", "admin_store_campaign_workbench", "campaigns.view"),
+        ("customer_activity", "فعالیت واقعی مشتری‌ها", "admin_store_customer_activity", "revenue.view"),
         ("revenue", "کنترل درآمد", "admin_store_revenue_control", "revenue.view"),
         ("backups", "پشتیبان‌گیری و انتقال سرور", "admin_store_backup_center", "backup.view"),
         ("staff", "کارکنان و دسترسی ها", "admin_store_staff_access", "staff.manage"),

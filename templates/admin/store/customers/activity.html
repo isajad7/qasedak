@@ -1,0 +1,55 @@
+{% extends "admin/base_site.html" %}
+{% load static tz %}
+{% block extrastyle %}{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">
+<style>
+.activity-page {max-width:1400px;margin:auto}.activity-page section {margin-bottom:24px}
+.activity-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px}
+.activity-card {padding:16px;border:1px solid #d9e2ec;border-radius:12px;background:var(--body-bg,#fff)}
+.activity-card strong {font-size:26px;display:block}.activity-filters {display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.activity-table {width:100%;border-collapse:collapse}.activity-table th,.activity-table td {padding:12px;text-align:right;border-bottom:1px solid #d9e2ec;vertical-align:top}
+.activity-scroll {overflow-x:auto}.activity-bar {height:10px;border-radius:5px;background:#168779;min-width:1px}
+.activity-note {color:var(--body-quiet-color,#566476);font-size:13px;line-height:1.9}.activity-warning {border-right:4px solid #d99416;padding:12px;background:var(--darkened-bg,#fff6df)}
+.activity-chip {display:inline-block;padding:3px 8px;border:1px solid #d9e2ec;border-radius:12px;margin:3px}
+.activity-state-active {color:#087e58}.activity-state-inactive,.activity-state-conflict {color:#a34809}
+.activity-page details {margin:10px 0}.activity-page summary {cursor:pointer}
+</style>{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">مدیریت</a> › {{ title }}</div>{% endblock %}
+{% block content %}
+{% timezone "Asia/Tehran" %}
+<div class="qadmin-setup activity-page" dir="rtl">
+<section class="qadmin-hero"><div><p class="qadmin-eyebrow">Revenue Engine · پایش مصرف</p><h1>{{ title }}</h1>
+<p>هر خرید جداگانه بررسی می‌شود؛ هر مشتری در آمار روزانه فقط یک بار شمرده می‌شود.</p></div>
+<div class="qadmin-hero-actions"><a class="qadmin-action" href="{% url 'admin_store_revenue_control' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}">کنترل درآمد</a></div></section>
+<section class="activity-warning">
+این بخش فقط مصرف را پایش می‌کند و پیام جدیدی برای مشتری نمی‌فرستد.
+{% if collector_healthy %}پایشگر فعال است.{% else %}<strong>پایشگر هنوز اجرا نشده یا دادهٔ تازه ندارد.</strong>{% endif %}
+{% if collector.completed_at %} آخرین دور کامل: {{ collector.completed_at|date:"Y/m/d H:i" }}{% endif %}
+<div class="activity-note">برای تشخیص ۴۸ ساعت عدم مصرف، ۴۸ ساعت مشاهدهٔ پیوسته لازم است. نبود داده یا کانفیگ مشترک، «عدم مصرف» محسوب نمی‌شود.</div>
+</section>
+<section class="activity-grid">
+<article class="activity-card"><strong>{{ active_today }}</strong>مشتری با مصرف امروز <div class="activity-note">از {{ measured_today }} مشتری با نمونهٔ معتبر امروز</div></article>
+<article class="activity-card"><strong>{{ total }}</strong>مشتری دارای سابقهٔ سفارش</article>
+{% for key,label,count in segments %}<a class="activity-card" href="?store={{ selected_store.pk }}&amp;segment={{ key }}"><strong>{{ count }}</strong>{{ label }}</a>{% endfor %}
+</section>
+<section class="activity-card"><h2>مشتری فعال روزانه · ۱۴ روز اخیر</h2>
+<p class="activity-note">روزها به وقت تهران هستند. بازه‌ای که از نیمه‌شب عبور کند در شمارش مصرف روزانه وارد نمی‌شود؛ اعداد، حداقلِ مشاهده‌شده‌اند. خط تیره یعنی داده نداریم. مصرف مثبت از {{ min_bytes }} بایت در هر بازه محاسبه می‌شود.</p>
+<table class="activity-table"><thead><tr><th>روز</th><th>فعال / دارای نمونهٔ معتبر</th><th>فعالیت</th></tr></thead><tbody>
+{% for day in days %}<tr><td>{{ day.day|date:"m/d" }}</td><td>{% if day.measured %}{{ day.active }} / {{ day.measured }}{% else %}—{% endif %}</td><td style="width:45%">{% if day.active %}<div class="activity-bar" style="width:{{ day.width }}%" aria-hidden="true"></div>{% endif %}</td></tr>{% endfor %}
+</tbody></table></section>
+<section class="activity-card"><h2>مشتری‌ها و خریدهایشان</h2>
+<form method="get" class="activity-filters">
+<label>فروشگاه <select name="store">{% for store in stores %}<option value="{{ store.pk }}" {% if store == selected_store %}selected{% endif %}>{{ store.name }}</option>{% endfor %}</select></label>
+<label>گروه <select name="segment"><option value="">همه</option>{% for key,label,count in segments %}<option value="{{ key }}" {% if selected_segment == key %}selected{% endif %}>{{ label }} ({{ count }})</option>{% endfor %}</select></label>
+<label>نام، نام کاربری یا شماره مشتری <input name="q" value="{{ search }}" maxlength="100"></label><button type="submit">نمایش</button>
+</form>
+<p class="activity-note">جدید: اولین خرید تأییدشده در ۳۰ روز اخیر. وفادار: حداقل ۲ خرید تأییدشده. ازدست‌رفته: همهٔ سرویس‌ها حداقل ۷ روز است پایان یافته‌اند و سرویس قابل استفاده یا دادهٔ نامشخص ندارد. این برچسب‌ها مستقل از فعالیت مصرف هستند.</p>
+{% for row in rows %}<article class="activity-card" style="margin-top:16px">
+<strong style="font-size:18px">{% if can_review_customer %}<a href="{% url 'admin_store_customer_review' row.customer.pk %}">{% endif %}{{ row.customer.display_name|default:row.customer.username|default:"مشتری" }} · #{{ row.customer.pk }}{% if can_review_customer %}</a>{% endif %}</strong>
+<span class="activity-chip activity-state-{{ row.state }}">{{ row.label }}</span>{% for label in row.tag_labels %}<span class="activity-chip">{{ label }}</span>{% endfor %}
+<details><summary>{{ row.purchases|length }} خرید · مشاهدهٔ وضعیت جداگانه</summary><div class="activity-scroll"><table class="activity-table"><thead><tr><th>خرید / پلن</th><th>سرویس</th><th>فعالیت</th><th>دلیل و زمان مشاهده</th></tr></thead><tbody>
+{% for purchase in row.purchases %}<tr><td>#{{ purchase.order.pk }} · {{ purchase.order.plan.name }}<br><small>حجم پلن: {{ purchase.order.plan.volume_gb }} گیگ · {{ purchase.order.created_at|date:"Y/m/d" }}</small></td><td>{{ purchase.entitlement_label }}</td><td class="activity-state-{{ purchase.state }}">{{ purchase.label }}{% if purchase.activity.last_activity_at %}<br><small>آخرین مصرف مشاهده‌شده: {{ purchase.activity.last_activity_at|date:"m/d H:i" }}</small>{% endif %}</td><td>{{ purchase.reason }}<br><small>{{ purchase.activity.observed_at|date:"m/d H:i"|default:"—" }} · {{ purchase.activity.source_count|default:0 }} منبع</small></td></tr>{% empty %}<tr><td colspan="4">خرید تأییدشده‌ای برای پایش وجود ندارد.</td></tr>{% endfor %}
+</tbody></table></div></details></article>{% empty %}<p>مشتری مطابق این فیلتر پیدا نشد.</p>{% endfor %}
+<nav style="margin-top:16px">{% if rows.has_previous %}<a href="?store={{ selected_store.pk }}&amp;segment={{ selected_segment|urlencode }}&amp;q={{ search|urlencode }}&amp;page={{ rows.previous_page_number }}">قبلی</a>{% endif %} صفحهٔ {{ rows.number }} از {{ rows.paginator.num_pages }} {% if rows.has_next %}<a href="?store={{ selected_store.pk }}&amp;segment={{ selected_segment|urlencode }}&amp;q={{ search|urlencode }}&amp;page={{ rows.next_page_number }}">بعدی</a>{% endif %}</nav>
+</section></div>{% endtimezone %}
+{% endblock %}

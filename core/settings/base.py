@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from django.core.exceptions import ImproperlyConfigured
+from django.core.management.utils import get_random_secret_key
 from django.utils.translation import gettext_lazy as _
 
 
@@ -117,10 +118,9 @@ def database_settings():
     )
 
 
-SECRET_KEY = os.environ.get(
-    "DJANGO_SECRET_KEY",
-    "django-insecure-hrf$n9ubs9qr&u!+%gva^ku%fg@f=ds98u*47i=(b7vjp=rdm+",
-)
+# Production requires an explicit environment key in production.py.
+# Unconfigured development sessions get an ephemeral key, never a committed credential.
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or get_random_secret_key()
 
 DEBUG = env_bool("DJANGO_DEBUG", False)
 
@@ -138,6 +138,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "payments.apps.PaymentsConfig",
     "store.apps.StoreConfig",
+    "customer_activity",
 ]
 
 MIDDLEWARE = [
@@ -314,6 +315,7 @@ JAZZMIN_SETTINGS = {
             {"name": _("قوانین پرکننده Cup"), "url": "admin:store_cupfillerrule_changelist", "icon": "fas fa-list-ol", "permissions": ["store.view_cupfillerrule"]},
         ],
         "Customers": [
+            {"name": _("فعالیت واقعی مشتری‌ها"), "url": "admin_store_customer_activity", "icon": "fas fa-heartbeat", "permissions": ["store.view_revenueofferlog"]},
             {"model": "store.Customer"},
             {"model": "store.BotUser"},
             {"model": "store.SupportConversation"},
@@ -460,3 +462,6 @@ JAZZMIN_UI_TWEAKS = {
         "success": "btn-success",
     },
 }
+
+# Minimum observed counter increase per sample; 1 means any measured traffic.
+CUSTOMER_ACTIVITY_MIN_BYTES = max(1, env_int("QASEDAK_ACTIVITY_MIN_BYTES", 1))
