@@ -66,6 +66,18 @@ and never prepares or sends events. POST needs CSRF and capabilities:
 `revenue.view`, `revenue.manage_safe`, and `revenue.enable_real_send` for live or
 retry. Settings record the modifying user and first activation time.
 
+For the reviewed initial deployment only, `--store STORE_PK --activate-initial`
+can advance an untouched preview to live. It requires recent completed collector
+and outreach runs plus a fully observed verified purchase with a same-store
+private Telegram recipient. It does not send immediately. A previous activation,
+an owner-panel edit or a non-preview mode is preserved on later deployments.
+The reviewed single-store deployment uses `--activate-initial --only-active-store`
+after the health checks, then runs one normal pass and prints aggregate status.
+This refuses zero or multiple active stores rather than picking a tenant. Other
+deployments should use an explicit reviewed store ID. Neither mode enables old
+engines. At night, activation succeeds but the regular quiet-hours rule blocks
+delivery until the next permitted collection pass.
+
 Transport state is reserved/committed before HTTP. Acknowledged messages become
 `sent`. Explicit Telegram rejection becomes `failed`, with an owner-only retry
 action that still rechecks current eligibility. Timeout, missing acknowledgement

@@ -14,7 +14,7 @@ from store.telegram_bot.support_flow import create_support_ticket_from_bot
 from store import bots
 from . import tests as activity_tests
 from .bot_flow import handle_callback
-from .models import OutreachEvent, OutreachPreference, OutreachSettings, PurchaseActivity
+from .models import ActivityCollector, OutreachEvent, OutreachPreference, OutreachSettings, PurchaseActivity
 from .outreach import candidate_kind, dispatch, keyboard, prepare_store, reserve, run_outreach
 
 
@@ -354,3 +354,36 @@ class OutreachTests(TestCase):
         OutreachSettings.objects.update(last_run_at=self.now - timedelta(hours=1))
         with self.assertRaises(CommandError):
             call_command("run_customer_outreach", check_running=True, stdout=StringIO())
+
+    def test_initial_activation_requires_completed_preview_and_scoped_recipient(self):
+        def activate():
+            call_command("run_customer_outreach", store=self.store.pk, activate_initial=True, stdout=StringIO())
+        with self.assertRaises(CommandError):
+            activate()
+        ActivityCollector.objects.create(heartbeat_at=self.now, completed_at=self.now)
+        run_outreach(now=self.now)
+        with self.assertRaises(CommandError):
+            activate()
+        self.eligible()
+        with patch("customer_activity.outreach.dispatch") as sender:
+            activate()
+            sender.assert_not_called()
+        self.config.refresh_from_db()
+        self.assertEqual((self.config.mode, self.config.activated_at), ("live", self.now))
+
+    def test_initial_activation_preserves_operator_settings_and_previous_activation(self):
+        for values in ({"mode": "off"}, {"mode": "preview", "changed_by": self.admin},
+                       {"mode": "preview", "changed_by": None, "activated_at": self.now}):
+            OutreachSettings.objects.filter(pk=self.config.pk).update(**values)
+            call_command("run_customer_outreach", store=self.store.pk, activate_initial=True, stdout=StringIO())
+            self.config.refresh_from_db()
+            self.assertEqual(self.config.mode, values["mode"])
+
+    def test_single_store_activation_rejects_ambiguous_tenant(self):
+        call_command("run_customer_outreach", store=self.store.pk, set_mode="off", stdout=StringIO())
+        call_command("run_customer_outreach", only_active_store=True, activate_initial=True, stdout=StringIO())
+        activity_tests.Store.objects.create(name="Another active store", is_active=True)
+        with self.assertRaises(CommandError):
+            call_command("run_customer_outreach", only_active_store=True, activate_initial=True, stdout=StringIO())
+        with self.assertRaises(CommandError):
+            call_command("run_customer_outreach", only_active_store=True, store=self.store.pk, activate_initial=True, stdout=StringIO())
