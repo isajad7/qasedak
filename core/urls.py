@@ -5,6 +5,7 @@ from django.conf import settings
 from django.conf.urls.static import static
 from core.health import health
 from customer_activity.views import activity_dashboard
+from customer_activity.outreach_views import outreach_dashboard
 from store.admin_backup_restore import (
     backup_center,
     backup_create,
@@ -398,6 +399,7 @@ urlpatterns = [
         name='admin_store_catalog_plan_edit',
     ),
     path('admin/store/customers/activity/', admin.site.admin_view(activity_dashboard), name='admin_store_customer_activity'),
+    path('admin/store/customers/outreach/', admin.site.admin_view(outreach_dashboard), name='admin_store_customer_outreach'),
     path(
         'admin/store/revenue/control/',
         admin.site.admin_view(revenue_control_center),

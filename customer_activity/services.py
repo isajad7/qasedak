@@ -159,6 +159,8 @@ def record_purchase(mapping, rows, reason, *, now):
         activity.continuous_since = None
         if quality not in {"stale", "missing_counters"}:
             quality = f"partial_{quality}"
+    if quality.removeprefix("partial_") in {"counter_reset", "mapping_changed", "cycle_changed"}:
+        activity.cycle += 1
     activity.observed_at = now
     activity.entitlement = state
     activity.reason = quality

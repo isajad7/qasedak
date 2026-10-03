@@ -11,7 +11,9 @@ from store.telegram_bot.transport import telegram_api_request
 
 
 class BotDeliveryError(Exception):
-    pass
+    def __init__(self, message="", *, error_code=None):
+        super().__init__(message)
+        self.error_code = error_code
 
 
 def runtime_bot_token(config):
@@ -86,10 +88,11 @@ class BotClient:
                 data.get("description")
                 or data.get("message")
                 or getattr(response, "reason", "")
-                or "Bot API request failed."
+                or "Bot API request failed.",
+                error_code=data.get("error_code") or getattr(response, "status_code", None),
             )
         if data.get("ok") is False:
-            raise BotDeliveryError(data.get("description") or data.get("message") or "Bot API rejected request.")
+            raise BotDeliveryError(data.get("description") or data.get("message") or "Bot API rejected request.", error_code=data.get("error_code"))
         return data
 
     def call_multipart(self, method, *, data, files):

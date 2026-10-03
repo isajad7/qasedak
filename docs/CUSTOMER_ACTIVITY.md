@@ -28,7 +28,7 @@ The collector cannot distinguish several people using one purchased credential o
 
 ## Runtime and rollout
 
-Docker starts `docker/start-customer-activity.sh` after migrations. It runs every 900 seconds **after the previous pass completes**. X-UI uses one panel login and one uncached read per configured active inbound; PasarGuard reads paginated users once per panel. These batches serve all mapped purchases; no per-customer network calls. A database lease with token fencing prevents overlapping containers from updating baselines. No panel client writes, Telegram sends, deletion, bootstrap, marketing-worker enablement, or dry-run changes occur.
+Docker starts `docker/start-customer-activity.sh` after migrations. It runs every 900 seconds **after the previous pass completes**. X-UI uses one panel login and one uncached read per configured active inbound; PasarGuard reads paginated users once per panel. These batches serve all mapped purchases; no per-customer network calls. A database lease with token fencing prevents overlapping containers from updating baselines. The collector performs no panel writes or messages. After successful collection the loop runs the independently configured [purchase outreach stage](CUSTOMER_OUTREACH.md); it does not enable older marketing workers or change their dry-run flags.
 
 ```
 python manage.py collect_customer_activity
@@ -53,6 +53,6 @@ Migration `customer_activity/0001_initial` is additive. Existing orders, panel s
 - `customer_activity/views.py`, `templates/admin/store/customers/activity.html`: customer groups and daily distinct counts; GET-only, no panel calls.
 - `customer_activity/tests.py`: evidence boundaries, outages, reset, renewal, sharing, multi-purchase/dedup, midnight, permissions and scheduler.
 
-Stage 2 should consume this evidence for per-purchase support follow-up and time/volume renewal journeys. Add purchase-bound support callbacks, one message per stage/cycle, cooldowns, suppression after renewal and competing support/sales journeys, and observable delivery/retry state. Stage 3 adds bounded win-back offers and purchase conversion tracking. Existing generic retention scans still use old engagement heuristics; this stage deliberately does not activate or rewire them.
+Stage 2 is implemented in [CUSTOMER_OUTREACH.md](CUSTOMER_OUTREACH.md): per-purchase support follow-up, volume/expiry reminders, renewal suppression and observable delivery state. Stage 3 still needs bounded win-back offers and broader conversion reporting. Existing generic retention scans use old engagement heuristics and remain independent.
 
 Run `python manage.py test customer_activity.tests`; CI includes the full existing project suite, migration drift and shell syntax checks.
