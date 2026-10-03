@@ -22,6 +22,8 @@ X-UI/Sanaei and PasarGuard panels are supported. Other families are explicitly u
 
 Unsupported credential formats and unresolved ownership stay unknown. The collector does not infer traffic from aggregate inbound totals. Missing/malformed counters never become zero usage. Rotating/mixed shared subscription Cups can remain unmeasurable until dedicated identities and stable mappings exist. Editing an imported link or its ownership must preserve those guarantees.
 
+Native Shadowsocks links are supported in addition to VLESS/VMess/Trojan. The activity-only parser accepts [SIP002](https://shadowsocks.org/doc/sip002.html) Base64URL or percent-encoded method/password userinfo, plus the legacy encoded URI body. It hashes the decoded password and requires the same remote-account ownership checks as other native links. Malformed credentials and credentials from another account remain unresolved; multiple protocols still count the panel user's traffic once. This does not change the separate customer config-lookup feature.
+
 The collector cannot distinguish several people using one purchased credential or detect an upstream reset that happens between polls and surpasses the old counter before the next sample. The page shows current plan volume; the app's existing mutable Plan is not an immutable historical purchase-volume ledger. These limitations must be considered before generating personalized messages in stage 2.
 
 ## Runtime and rollout

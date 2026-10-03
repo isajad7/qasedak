@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime, timedelta
 from io import StringIO
 from unittest.mock import patch
@@ -12,7 +13,7 @@ from django.utils import timezone
 
 from store.models import ConfigLink, CupItem, Customer, Inbound, Order, Panel, Plan, Store, SubscriptionCup, VPNClient
 from store.xui_api import hash_xui_identifier
-from .mapping import load_purchase_maps, resolve_maps
+from .mapping import credential_from_link, load_purchase_maps, resolve_maps
 from .models import ActivityCollector, ActivityObservation, PurchaseActivity
 from .panels import read_panel
 from .services import LEASE, _claim, _heartbeat, activity_status, collect_activity, record_purchase
@@ -451,6 +452,62 @@ class ActivityTests(TestCase):
             rows, status = read_panel(self.panel)
             self.assertFalse(rows)
             self.assertEqual(status, "partial")
+
+    def test_shadowsocks_native_credentials_preserve_encoded_password(self):
+        def encoded(text):
+            return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
+        password = "native:p@ss/%25+word"
+        links = [
+            f"ss://{encoded('chacha20-ietf-poly1305:' + password)}@example.com:443/?plugin=obfs#native",
+            "ss://2022-blake3-aes-128-gcm:native%3Ap%40ss%2F%2525%2Bword@[::1]:443#native",
+            f"ss://{encoded('chacha20-ietf-poly1305:' + password + '@example.com:443')}#legacy",
+        ]
+        for link in links:
+            self.assertEqual(credential_from_link(link), password)
+        for link in ("ss://not-base64!@example.com:443", "ss://YWJj@example.com:443", "ss://method:@example.com:443", "ss://method:password@example.com"):
+            with self.assertRaises(ValueError):
+                credential_from_link(link)
+
+    @patch("customer_activity.panels.PasarGuardClient")
+    def test_pasarguard_shadowsocks_native_link_completes_coverage_without_double_count(self, client_cls):
+        self.panel.family = Panel.Family.PASARGUARD
+        self.panel.save(update_fields=["family"])
+        order = self.purchase()
+        vpn = self.vpn(order, uuid="synthetic-local", xui_email="buyer", xui_raw={"username": "buyer"})
+        cup = SubscriptionCup.objects.create(order=order, customer=self.customer, vpn_client=vpn)
+        for index, raw in enumerate(("vless://real-remote-uuid@example.com:443", "ss://YWVzLTEyOC1nY206c3MtcGFzcw@example.com:443")):
+            link = ConfigLink.objects.create(raw_link=raw, normalized_hash=f"native-ss-{index}", vpn_client=vpn,
+                                             source_panel=self.panel, source_inbound=self.inbound)
+            CupItem.objects.create(cup=cup, config_link=link)
+        user = self.pasar_user()
+        user["proxy_settings"]["shadowsocks"] = {"password": "ss-pass"}
+        client_cls.return_value.request.return_value = {"total": 1, "users": [user]}
+        rows, _ = read_panel(self.panel)
+        maps, orphans = load_purchase_maps()
+        matched, reason = resolve_maps(maps, orphans, rows)[order.pk]
+        self.assertEqual(reason, "")
+        self.assertEqual(len(matched), 1)
+        state = record_purchase(maps[0], matched, reason, now=timezone.now())
+        self.assertEqual(state.reason, "baseline")
+        self.assertEqual(state.entitlement, "valid")
+
+    @patch("customer_activity.panels.PasarGuardClient")
+    def test_shadowsocks_wrong_owner_remains_incomplete(self, client_cls):
+        self.panel.family = Panel.Family.PASARGUARD
+        self.panel.save(update_fields=["family"])
+        order = self.purchase()
+        vpn = self.vpn(order, xui_email="buyer", xui_raw={"username": "buyer"})
+        cup = SubscriptionCup.objects.create(order=order, customer=self.customer)
+        link = ConfigLink.objects.create(raw_link="ss://aes-128-gcm:other-secret@example.com:443", normalized_hash="foreign-ss", vpn_client=vpn)
+        CupItem.objects.create(cup=cup, config_link=link)
+        other = self.pasar_user("other", id=2, proxy_settings={"shadowsocks": {"password": "other-secret"}})
+        client_cls.return_value.request.return_value = {"total": 2, "users": [self.pasar_user(), other]}
+        rows, _ = read_panel(self.panel)
+        maps, orphans = load_purchase_maps()
+        matched, reason = resolve_maps(maps, orphans, rows)[order.pk]
+        self.assertEqual(reason, "partial_coverage")
+        self.assertEqual(len(matched), 1)
+        self.assertNotIn(hash_xui_identifier("other-secret"), next(iter(matched.values()))["aliases"])
 
     @patch("customer_activity.panels.PasarGuardClient")
     def test_pasarguard_missing_usage_and_ended_states_are_not_active(self, client_cls):
