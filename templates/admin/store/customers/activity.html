@@ -26,6 +26,7 @@
 {% if collector_healthy %}پایشگر فعال است.{% else %}<strong>پایشگر هنوز اجرا نشده یا دادهٔ تازه ندارد.</strong>{% endif %}
 {% if collector.completed_at %} آخرین دور کامل: {{ collector.completed_at|date:"Y/m/d H:i" }}{% endif %}
 <div class="activity-note">برای تشخیص ۴۸ ساعت عدم مصرف، ۴۸ ساعت مشاهدهٔ پیوسته لازم است. نبود داده یا کانفیگ مشترک، «عدم مصرف» محسوب نمی‌شود.</div>
+<div class="activity-note">در ساب با پوشش ناقص، افزایش مصرفِ کانفیگ اختصاصی می‌تواند فعالیت را ثابت کند؛ ثابت‌ماندن آن برای تشخیص عدم مصرف یا پایان کل خرید کافی نیست.</div>
 </section>
 <section class="activity-grid">
 <article class="activity-card"><strong>{{ active_today }}</strong>مشتری با مصرف امروز <div class="activity-note">از {{ measured_today }} مشتری با نمونهٔ معتبر امروز</div></article>

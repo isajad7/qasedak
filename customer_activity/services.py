@@ -42,6 +42,8 @@ REASONS = {
     "unverified_service": "سرویس دارد ولی سفارش تأییدشده نیست",
     "superseded": "این سرویس با خرید بعدی تمدید شده",
 }
+for _reason in ("ok", "baseline", "gap", "counter_reset", "mapping_changed", "cycle_changed"):
+    REASONS[f"partial_{_reason}"] = f"پوشش بخشی از خرید؛ {REASONS[_reason]}؛ عدم مصرف قابل تشخیص نیست"
 
 
 def entitlement(mapping, rows, now):
@@ -94,9 +96,12 @@ def record_purchase(mapping, rows, reason, *, now):
         return activity
     state, state_reason, ended = entitlement(mapping, rows, now)
     reason = state_reason or reason
+    partial = reason == "partial_coverage"
     if reason and reason != "superseded":
         if state not in {"closed", "conflict"}:
             state = "unknown"
+    if partial:
+        reason = ""
     current = {}
     if not reason:
         for key, row in rows.items():
@@ -116,7 +121,7 @@ def record_purchase(mapping, rows, reason, *, now):
         times = [parse_datetime(value["at"]) for value in current.values()]
         if not times or any(value > now or now - value > MAX_GAP for value in times):
             quality = "stale"
-        elif not previous:
+        elif not previous or (not partial and activity.reason.startswith("partial_")):
             quality = "baseline"
         elif previous.keys() != current.keys():
             quality = "mapping_changed"
@@ -149,6 +154,11 @@ def record_purchase(mapping, rows, reason, *, now):
         activity.continuous_since = None
         if state not in {"closed", "conflict", "superseded"}:
             state = "unknown"
+    if partial:
+        # A quiet subset never proves that the remaining delivered configs were unused.
+        activity.continuous_since = None
+        if quality not in {"stale", "missing_counters"}:
+            quality = f"partial_{quality}"
     activity.observed_at = now
     activity.entitlement = state
     activity.reason = quality
@@ -168,11 +178,15 @@ def activity_status(activity, *, now=None):
         return "unknown", "stale"
     if activity.entitlement in {"conflict", "superseded", "closed"}:
         return activity.entitlement, activity.reason
-    if activity.reason not in {"ok", "baseline", "gap", "counter_reset", "mapping_changed", "cycle_changed"}:
+    partial = activity.reason.startswith("partial_")
+    quality = activity.reason.removeprefix("partial_")
+    if quality not in {"ok", "baseline", "gap", "counter_reset", "mapping_changed", "cycle_changed"}:
         return "unknown", activity.reason
     cutoff = now - WINDOW
     if activity.last_activity_start and activity.last_activity_start >= cutoff:
         return "active", activity.reason
+    if partial:
+        return "unknown", activity.reason
     if (activity.continuous_since and activity.continuous_since <= cutoff
             and (not activity.last_activity_at or activity.last_activity_at <= cutoff)):
         return "inactive", activity.reason
@@ -212,7 +226,8 @@ def collect_activity():
             rows.extend(samples)
             panels[panel.pk] = status
         _heartbeat(token)
-        resolved = resolve_maps(maps, orphans, rows)
+        attribution = {}
+        resolved = resolve_maps(maps, orphans, rows, diagnostics=attribution)
         counts = Counter()
         for mapping in maps:
             matched, reason = resolved[mapping.order.pk]
@@ -227,7 +242,7 @@ def collect_activity():
                 activity = record_purchase(mapping, matched, reason, now=now)
                 counts[activity.reason] += 1
             _heartbeat(token)
-        summary = {"purchases": len(maps), "panels": len(panels), "panel_statuses": dict(Counter(panels.values())), "quality": dict(counts), "panel_diagnostics": diagnostics}
+        summary = {"purchases": len(maps), "panels": len(panels), "panel_statuses": dict(Counter(panels.values())), "quality": dict(counts), "panel_diagnostics": diagnostics, "attribution": attribution}
         ActivityCollector.objects.filter(pk=1, token=token).update(completed_at=timezone.now(), summary=summary)
         return summary
     except Exception as exc:

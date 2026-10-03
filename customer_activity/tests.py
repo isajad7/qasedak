@@ -157,7 +157,9 @@ class ActivityTests(TestCase):
         cup = SubscriptionCup.objects.create(order=order, customer=self.customer)
         link = ConfigLink.objects.create(raw_link="vless://unrelated@example.com:443", normalized_hash="wrong", vpn_client=vpn)
         CupItem.objects.create(cup=cup, config_link=link)
-        self.assertEqual(self.record(order, vpn).reason, "unmapped_source")
+        state = self.record(order, vpn)
+        self.assertEqual(state.reason, "partial_baseline")
+        self.assertEqual(state.entitlement, "unknown")
 
     def test_closed_cup_with_working_credentials_is_not_lost(self):
         order = self.purchase()
@@ -379,7 +381,66 @@ class ActivityTests(TestCase):
         client_cls.return_value.request.return_value = {"total": 2, "users": [self.pasar_user(), self.pasar_user("foreign", id=2, proxy_settings={"vless": {"id": "foreign-id"}})]}
         rows, _ = read_panel(self.panel)
         maps, orphans = load_purchase_maps()
-        self.assertEqual(resolve_maps(maps, orphans, rows)[order.pk][1], "unmapped_source")
+        matched, reason = resolve_maps(maps, orphans, rows)[order.pk]
+        self.assertEqual(reason, "partial_coverage")
+        self.assertEqual(len(matched), 1)
+        self.assertIn(hash_xui_identifier("buyer"), next(iter(matched.values()))["aliases"])
+
+    def test_partial_purchase_can_prove_activity_but_never_inactivity(self):
+        order = self.purchase()
+        vpn = self.vpn(order)
+        cup = SubscriptionCup.objects.create(order=order, customer=self.customer)
+        link = ConfigLink.objects.create(raw_link="vless://unmapped@example.com:443", normalized_hash="unmapped")
+        CupItem.objects.create(cup=cup, config_link=link)
+        for minute in range(0, 49 * 60, 30):
+            state = self.record(order, vpn, at=self.now + timedelta(minutes=minute))
+            self.assertEqual(activity_status(state, now=state.observed_at)[0], "unknown")
+            self.assertIsNone(state.continuous_since)
+            self.assertEqual(state.entitlement, "unknown")
+        later = state.observed_at + timedelta(minutes=15)
+        state = self.record(order, vpn, used=25, at=later)
+        self.assertEqual((activity_status(state, now=later)[0], state.reason), ("active", "partial_ok"))
+        self.assertNotIn("at_risk", customer_rows(self.store, now=later)[0]["tags"])
+        self.assertEqual(daily_counts(self.store, now=later)[-1]["active"], 1)
+        link.is_active = False
+        link.save(update_fields=["is_active"])
+        state = self.record(order, vpn, used=25, at=later + timedelta(minutes=15))
+        self.assertEqual(state.reason, "baseline")
+        self.assertEqual(activity_status(state, now=state.observed_at)[0], "collecting")
+
+    def test_partial_attribution_excludes_shared_bytes_and_reports_only_counts(self):
+        first, second = self.purchase(), self.purchase(customer=Customer.objects.create(display_name="Other"))
+        dedicated, shared = self.vpn(first), self.vpn(first, uuid="shared-secret", xui_email="shared-user", username="shared-user")
+        cup = SubscriptionCup.objects.create(order=second, customer=second.customer)
+        link = ConfigLink.objects.create(raw_link="vless://shared-secret@example.com:443", normalized_hash="shared",
+                                         source_panel=self.panel, source_inbound=self.inbound)
+        CupItem.objects.create(cup=cup, config_link=link)
+        maps, orphans = load_purchase_maps()
+        diagnostics = {}
+        resolved = resolve_maps(maps, orphans, [self.sample(dedicated, used=10), self.sample(shared, used=10000)], diagnostics=diagnostics)
+        matched, reason = resolved[first.pk]
+        self.assertEqual(reason, "partial_coverage")
+        self.assertEqual(sum(row["used_bytes"] for row in matched.values()), 10)
+        self.assertEqual(resolved[second.pk][1], "shared_identity")
+        self.assertEqual(diagnostics["partial_purchases"], 1)
+        self.assertEqual(diagnostics["source_outcomes"], {"matched": 3})
+        self.assertNotIn("shared-secret", str(diagnostics))
+        self.assertEqual(set(diagnostics), {"source_outcomes", "purchases_with_matches", "partial_purchases"})
+
+    def test_partial_to_unknown_or_changed_sources_cannot_retain_usage(self):
+        order = self.purchase()
+        vpn = self.vpn(order)
+        self.vpn(order, uuid="absent", username="absent", xui_email="absent")
+        self.record(order, vpn)
+        state = self.record(order, vpn, used=10, at=self.now + timedelta(minutes=15))
+        self.assertEqual(activity_status(state, now=state.observed_at)[0], "active")
+        state = self.record(order, vpn, used=0, at=self.now + timedelta(minutes=30))
+        self.assertEqual(state.reason, "partial_counter_reset")
+        self.assertEqual(activity_status(state, now=state.observed_at)[0], "unknown")
+        state = self.record(order, vpn, at=self.now + timedelta(minutes=45), stats_available=False)
+        self.assertEqual(activity_status(state, now=state.observed_at)[0], "unknown")
+        self.assertFalse(state.counters)
+        self.assertIsNone(state.last_activity_at)
 
     @patch("customer_activity.panels.PasarGuardClient")
     def test_pasarguard_partial_pagination_and_repeated_users_fail_closed(self, client_cls):

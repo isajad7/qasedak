@@ -1,5 +1,5 @@
 """Order → Cup/items → exact panel/inbound/client. Fail closed on shared identity."""
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from hashlib import sha256
 
@@ -141,15 +141,20 @@ def row_key(row):
     return sha256(repr(scoped).encode()).hexdigest()
 
 
-def resolve_maps(maps, orphan_sources, rows):
+def resolve_maps(maps, orphan_sources, rows, *, diagnostics=None):
+    outcomes = Counter()
+
     def resolve(source):
         if not source.panel_id or (not source.inbound_id and source.node != "pasarguard") or not source.hashes:
+            outcomes["no_panel" if not source.panel_id else "no_identity" if not source.hashes else "no_inbound"] += 1
             return None
-        matches = [row for row in rows if row["panel_id"] == source.panel_id
-                   and (source.node == "pasarguard" or row["inbound_id"] == source.inbound_id)
-                   and str(row.get("node_id") or "") == source.node
-                   and (not source.required_hash or source.required_hash in row["aliases"])
-                   and set(source.hashes).intersection(row["aliases"])]
+        candidates = [row for row in rows if row["panel_id"] == source.panel_id
+                      and (not source.required_hash or source.required_hash in row["aliases"])
+                      and set(source.hashes).intersection(row["aliases"])]
+        matches = [row for row in candidates
+                   if (source.node == "pasarguard" or row["inbound_id"] == source.inbound_id)
+                   and str(row.get("node_id") or "") == source.node]
+        outcomes["matched" if len(matches) == 1 else "ambiguous_remote" if matches else "scope_mismatch" if candidates else "identity_not_found"] += 1
         return matches[0] if len(matches) == 1 else None
 
     claims, unresolved = defaultdict(set), []
@@ -180,5 +185,16 @@ def resolve_maps(maps, orphan_sources, rows):
             reason = "unmapped_source"
         elif any(not row.get("stats_available") for row in known.values()):
             reason = "missing_counters"
+        if reason and not mapping.issues:
+            # Incomplete coverage cannot prove inactivity. A dedicated, measurable
+            # subset can still prove positive traffic without attributing shared bytes.
+            exclusive = {key: row for key, row in known.items()
+                         if len(claims[key]) == 1 and row.get("stats_available")}
+            if exclusive:
+                known, reason = exclusive, "partial_coverage"
         result[mapping.order.pk] = (known, reason)
+    if diagnostics is not None:
+        diagnostics.update(source_outcomes=dict(outcomes),
+                           purchases_with_matches=sum(bool(value[0]) for value in result.values()),
+                           partial_purchases=sum(value[1] == "partial_coverage" for value in result.values()))
     return result
