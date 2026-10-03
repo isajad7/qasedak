@@ -14,7 +14,7 @@ from django.utils import timezone
 
 
 def _error_code(exc):
-    code = str(getattr(exc, "error_code", "") or type(exc).__name__)
+    code = str(getattr(exc, "error_code", "") or getattr(exc, "category", "") or type(exc).__name__)
     match = re.search(r"\b(?:HTTP\s*|status[=: ]+)([45]\d\d)\b", str(exc), re.I)
     return f"http_{match.group(1)}" if match else code[:80]
 

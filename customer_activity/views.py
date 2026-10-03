@@ -32,7 +32,7 @@ def daily_counts(store, *, now):
     since = today - timedelta(days=13)
     query = ActivityObservation.objects.filter(
         purchase__order__store=store, purchase__order__customer__isnull=False,
-        observed_at__gte=datetime.combine(since, time.min, tzinfo=TEHRAN), delta_bytes__isnull=False, quality="ok",
+        observed_at__gte=datetime.combine(since, time.min, tzinfo=TEHRAN), delta_bytes__isnull=False, quality__in=("ok", "partial_ok"),
     ).annotate(day=TruncDate("observed_at", tzinfo=TEHRAN), start_day=TruncDate("interval_start", tzinfo=TEHRAN))
     # Crossing midnight cannot prove on which day bytes flowed; omit that interval.
     query = query.filter(day=F("start_day"))
