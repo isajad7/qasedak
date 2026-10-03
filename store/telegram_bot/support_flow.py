@@ -104,6 +104,14 @@ def create_support_ticket_from_bot(
         return {"ok": True, "success": False}
 
     data = bot_user.state_data or {}
+    journey_event = None
+    if data.get("journey_event_id"):
+        from customer_activity.bot_flow import owned_event
+        journey_event = owned_event(data["journey_event_id"], config, bot_user, chat_id)
+        if not journey_event:
+            bot_user.reset_state()
+            client.send_message("مشخصات این خرید دیگر معتبر نیست. دوباره بخش پشتیبانی را باز کن.", chat_id=chat_id)
+            return {"ok": True, "success": False}
     subject = data.get("support_subject") or BOT_SUPPORT_CATEGORIES["other"]
     store = config.store or get_current_store_func()
     conversation = SupportConversation.objects.create(
@@ -126,8 +134,12 @@ def create_support_ticket_from_bot(
             "chat_id": chat_id,
             "message_id": get_message_id_func(message),
             "category": data.get("support_category") or "other",
+            **({"purchase_id": journey_event.order_id, "journey_event_id": journey_event.pk} if journey_event else {}),
         },
     )
+    if journey_event:
+        journey_event.support_conversation = conversation
+        journey_event.save(update_fields=["support_conversation", "updated_at"])
     notify_support_message_func(conversation, support_message)
     bot_user.reset_state()
     client.send_message(

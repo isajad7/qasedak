@@ -288,7 +288,7 @@ def dispatch_bot_update(
     deps,
 ):
     if callback_query and (
-        callback_data.startswith("user:") or callback_data == deps["CHECK_MEMBERSHIP_CALLBACK"]
+        callback_data.startswith(("user:", "journey:")) or callback_data == deps["CHECK_MEMBERSHIP_CALLBACK"]
     ):
         return deps["handle_user_update"](config, update, chat_id=chat_id, user_id=user_id)
 
@@ -342,7 +342,7 @@ def dispatch_user_callback(config, bot_user, callback_query, *, chat_id, deps):
     callback_id = deps["get_callback_id"](callback_query)
     data = deps["get_callback_data"](callback_query)
     client.answer_callback(callback_id, "دریافت شد")
-    if not data.startswith(deps["CONFIG_COPY_CALLBACK_PREFIX"]):
+    if not data.startswith((deps["CONFIG_COPY_CALLBACK_PREFIX"], "journey:")):
         deps["delete_callback_message"](client, callback_query, fallback_chat_id=chat_id)
 
     if data == deps["CHECK_MEMBERSHIP_CALLBACK"]:
@@ -357,7 +357,7 @@ def dispatch_user_callback(config, bot_user, callback_query, *, chat_id, deps):
             return membership_response
         return deps["send_main_menu"](client, bot_user, chat_id=chat_id)
 
-    if data.startswith("user:"):
+    if data.startswith(("user:", "journey:renew:")):
         membership_response = deps["telegram_membership_required_response"](config, bot_user, client, chat_id=chat_id)
         if membership_response:
             return membership_response
@@ -422,6 +422,9 @@ def dispatch_user_callback(config, bot_user, callback_query, *, chat_id, deps):
         return deps["handle_config_lookup_update_callback"](config, bot_user, data, client=client, chat_id=chat_id)
     if data == "user:config_lookup":
         return deps["start_config_lookup_flow"](client, bot_user, chat_id=chat_id)
+    if data.startswith("journey:"):
+        from customer_activity.bot_flow import handle_callback
+        return handle_callback(client, config, bot_user, data, chat_id=chat_id, start_renewal=deps["start_renewal_flow"])
     if deps["_is_support_user_callback_data"](data):
         if data == "user:support":
             return deps["start_support_flow"](client, config, bot_user, chat_id=chat_id)

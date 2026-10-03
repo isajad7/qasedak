@@ -20,9 +20,9 @@
 <div class="qadmin-setup activity-page" dir="rtl">
 <section class="qadmin-hero"><div><p class="qadmin-eyebrow">Revenue Engine · پایش مصرف</p><h1>{{ title }}</h1>
 <p>هر خرید جداگانه بررسی می‌شود؛ هر مشتری در آمار روزانه فقط یک بار شمرده می‌شود.</p></div>
-<div class="qadmin-hero-actions"><a class="qadmin-action" href="{% url 'admin_store_revenue_control' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}">کنترل درآمد</a></div></section>
+<div class="qadmin-hero-actions"><a class="qadmin-action" href="{% url 'admin_store_customer_outreach' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}">پیام‌های هر خرید</a> <a class="qadmin-action" href="{% url 'admin_store_revenue_control' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}">کنترل درآمد</a></div></section>
 <section class="activity-warning">
-این بخش فقط مصرف را پایش می‌کند و پیام جدیدی برای مشتری نمی‌فرستد.
+حالت ارسال پیام‌ها و پیش‌نمایش آن‌ها در صفحهٔ «پیام‌های هر خرید» مدیریت می‌شود.
 {% if collector_healthy %}پایشگر فعال است.{% else %}<strong>پایشگر هنوز اجرا نشده یا دادهٔ تازه ندارد.</strong>{% endif %}
 {% if collector.completed_at %} آخرین دور کامل: {{ collector.completed_at|date:"Y/m/d H:i" }}{% endif %}
 <div class="activity-note">برای تشخیص ۴۸ ساعت عدم مصرف، ۴۸ ساعت مشاهدهٔ پیوسته لازم است. نبود داده یا کانفیگ مشترک، «عدم مصرف» محسوب نمی‌شود.</div>
