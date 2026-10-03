@@ -156,6 +156,9 @@ if [[ "$old_image" == "$image" && -n "$old_refresh_container" ]]; then
     docker exec "$old_container" python manage.py process_order_automation --check-running >/dev/null 2>&1 || die 'Order automation heartbeat is missing or stale.'
     docker exec "$old_container" python manage.py collect_customer_activity --check-running >/dev/null 2>&1 || die 'Customer activity heartbeat is missing or stale.'
     docker exec "$old_container" python manage.py run_customer_outreach --check-running >/dev/null 2>&1 || die 'Purchase outreach heartbeat is missing or stale.'
+    docker exec "$old_container" python manage.py run_customer_outreach --activate-initial --only-active-store
+    docker exec "$old_container" python manage.py run_customer_outreach
+    docker exec "$old_container" python manage.py run_customer_outreach --status
     printf 'Development revision %s already healthy.\n' "$revision"
     exit 0
 fi
@@ -231,5 +234,9 @@ if (( ! healthy )); then
 fi
 printf 'Order automation and customer activity scheduler heartbeats verified.\n'
 docker exec "$current" python manage.py collect_customer_activity --status
+docker exec "$current" python manage.py run_customer_outreach --status
+# Reviewed initial rollout on this single-store deployment; later owner choices are preserved.
+docker exec "$current" python manage.py run_customer_outreach --activate-initial --only-active-store
+docker exec "$current" python manage.py run_customer_outreach
 docker exec "$current" python manage.py run_customer_outreach --status
 printf 'Development deployed revision %s to the reviewed Compose service.\n' "$revision"
