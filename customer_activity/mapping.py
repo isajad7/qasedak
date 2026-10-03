@@ -1,7 +1,9 @@
 """Order → Cup/items → exact panel/inbound/client. Fail closed on shared identity."""
 from collections import Counter, defaultdict
+import base64
 from dataclasses import dataclass, field
 from hashlib import sha256
+from urllib.parse import unquote, urlsplit
 
 from store.config_lookup import ConfigLookupError, extract_client_identifier_from_config
 from store.models import Order, Panel, SubscriptionCup, VPNClient
@@ -44,9 +46,40 @@ def source_for_client(client):
                   str(client.xui_node_id or (inbound.xui_node_id if inbound else "") or ""), hashes)
 
 
+def credential_from_link(raw_link):
+    """Extract only the credential; never use a server address as an identity.
+
+    PasarGuard native subscriptions also contain Shadowsocks links, which the
+    existing customer lookup parser does not support. SIP002 permits Base64URL
+    or percent-encoded method:password userinfo; legacy links encode the URI body.
+    """
+    raw = str(raw_link or "").strip()
+    if not raw.lower().startswith("ss://"):
+        return extract_client_identifier_from_config(raw)
+
+    def decode(value):
+        return base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True).decode("utf-8")
+
+    body = raw[5:].split("#", 1)[0].split("?", 1)[0]
+    if "@" in body:
+        userinfo, server = body.rsplit("@", 1)
+        userinfo = unquote(userinfo)
+        if ":" in userinfo:
+            method, password = userinfo.split(":", 1)
+        else:
+            method, password = decode(userinfo).split(":", 1)
+    else:
+        userinfo, server = decode(body).rsplit("@", 1)
+        method, password = userinfo.split(":", 1)
+    address = urlsplit("ss://" + server)
+    if not method or not password or not address.hostname or not address.port:
+        raise ConfigLookupError("Invalid Shadowsocks credential")
+    return password
+
+
 def source_for_link(link):
     try:
-        identifier = extract_client_identifier_from_config(link.raw_link)
+        identifier = credential_from_link(link.raw_link)
     except (ConfigLookupError, ValueError, TypeError):
         identifier = ""
     if link.vpn_client_id:
