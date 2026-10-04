@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 source /etc/qasedak/dev-deploy.conf
 [[ "$(cat "$QASEDAK_DEV_ROOT/.qasedak-development-target")" == 'isajad7/qasedak:development' ]]
-app="$(docker compose -p "$QASEDAK_DEV_PROJECT" -f "$QASEDAK_DEV_COMPOSE_FILE" ps -q "$QASEDAK_DEV_SERVICE")"
+app="$(docker ps --filter "label=com.docker.compose.project=$QASEDAK_DEV_PROJECT" --filter "label=com.docker.compose.service=$QASEDAK_DEV_SERVICE" --format '{{.ID}}')"
 [[ "$app" =~ ^[0-9a-f]{12,64}$ ]]
 [[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$app")" == "$QASEDAK_DEV_SERVICE" ]]
 docker exec -i "$app" python manage.py shell <<'PY'
