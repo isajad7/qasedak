@@ -6,7 +6,7 @@ app="$(docker ps --filter "label=com.docker.compose.project=$QASEDAK_DEV_PROJECT
 [[ "$app" =~ ^[0-9a-f]{12,64}$ ]]
 [[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$app")" == "$QASEDAK_DEV_SERVICE" ]]
 docker exec -i "$app" python manage.py shell <<'PY'
-import json, socket, ssl, time
+import copy, json, socket, ssl, time
 from urllib.parse import urlsplit
 import requests
 from store.models import Panel, ExternalSubscriptionFeed
@@ -57,17 +57,29 @@ for panel in Panel.objects.filter(family='pasarguard', is_active=True).order_by(
     urls = {'api': panel.url}
     if feed: urls['subscription'] = feed.protected_subscription_url
     print(json.dumps({'panel_id': panel.pk, 'configured_proxy': bool(panel.proxy_url), 'environment_proxy': bool(requests.utils.get_environ_proxies(panel.url)), 'source_host_matches_panel': bool(feed and urlsplit(feed.protected_subscription_url).hostname == urlsplit(panel.url).hostname), 'transport': {name: transport(url) for name, url in urls.items()}}), flush=True)
-    modes = ['environment', 'direct'] + (['configured_proxy'] if panel.proxy_url else [])
+    modes = ['direct'] + (['environment'] if requests.utils.get_environ_proxies(panel.url) else []) + (['configured_proxy'] if panel.proxy_url else [])
+    if urlsplit(panel.url).scheme == 'https' and urlsplit(panel.url).port == 8443:
+        modes += ['https443']
     for mode in modes:
         with requests.Session() as session:
             session.trust_env = mode == 'environment'
             if mode == 'configured_proxy': session.proxies = {'http': panel.proxy_url, 'https': panel.proxy_url}
-            client = PasarGuardClient(panel, session=session, timeout=(3, 12))
+            target = copy.copy(panel)
+            source = feed.protected_subscription_url if feed else ''
+            if mode == 'https443':
+                def on443(url):
+                    parts = urlsplit(url)
+                    host = parts.hostname
+                    return parts._replace(netloc=f'[{host}]' if ':' in host else host).geturl()
+                target.url = on443(panel.url)
+                if feed and urlsplit(source).hostname == urlsplit(panel.url).hostname:
+                    source = on443(source)
+            client = PasarGuardClient(target, session=session, timeout=(3, 12))
             for action in ['api', 'subscription'] if feed else ['api']:
                 started = time.monotonic()
                 result = {'panel_id': panel.pk, 'mode': mode, 'action': action}
                 try:
-                    payload = client.get_system() if action == 'api' else client.fetch_native_links(feed.protected_subscription_url)
+                    payload = client.get_system() if action == 'api' else client.fetch_native_links(source)
                     result['ok'] = True
                     if action == 'subscription': result['configs'] = len(payload)
                 except Exception as exc:
