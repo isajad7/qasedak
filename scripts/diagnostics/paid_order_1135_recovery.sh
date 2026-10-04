@@ -58,7 +58,7 @@ def traced(self,method,url,**kwargs):
         print(json.dumps({'request_method':method,'request_route':path,'error_type':type(exc).__name__,'seconds':round(time.monotonic()-started,2)}),flush=True)
         raise
 requests.Session.request=traced
-order=Order.objects.select_related('plan','store').get(pk=1135,order_tracking_code='c6754fe6c5e641f4a7ad9f0ffd6097f4',store_id=1)
+order=Order.objects.select_related('plan','store').get(pk=1136,order_tracking_code='0d0fbe5401a549e2a76a735a4388def1',store_id=1)
 if not order.is_paid or order.verification_status!='verified': raise RuntimeError('Order is not a verified paid purchase')
 if order.status==Order.Status.COMPLETED:
     print(json.dumps({'order_id':order.pk,'already_completed':True}),flush=True)
