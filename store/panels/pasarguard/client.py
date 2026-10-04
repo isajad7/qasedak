@@ -5,6 +5,8 @@ from urllib.parse import urljoin
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPSConnection
+from urllib3.connectionpool import HTTPSConnectionPool
 
 from ..errors import sanitize_error_value
 from .errors import (
@@ -21,6 +23,38 @@ def _content_type(response):
     return str(getattr(response, "headers", {}).get("content-type", "")).split(";", 1)[0]
 
 
+class PasarGuardHTTPSConnection(HTTPSConnection):
+    """Send small JSON writes together on the production network path."""
+
+    def request(self, method, url, body=None, headers=None, **kwargs):
+        combine = (
+            method.upper() in {"POST", "PUT", "PATCH"}
+            and isinstance(body, (bytes, bytearray))
+            and len(body) <= 65536
+            and not kwargs.get("chunked", False)
+        )
+        if not combine:
+            return super().request(method, url, body=body, headers=headers, **kwargs)
+        self._request_parts = []
+        try:
+            super().request(method, url, body=body, headers=headers, **kwargs)
+            message = b"".join(self._request_parts)
+        finally:
+            del self._request_parts
+        self.send(message)
+
+    def send(self, data):
+        parts = getattr(self, "_request_parts", None)
+        if parts is not None:
+            parts.append(data)
+        else:
+            super().send(data)
+
+
+class PasarGuardHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = PasarGuardHTTPSConnection
+
+
 class PasarGuardHTTPSAdapter(HTTPAdapter):
     """Use verified TLS 1.2 on the production path that stalls with TLS 1.3."""
 
@@ -33,11 +67,22 @@ class PasarGuardHTTPSAdapter(HTTPAdapter):
 
     def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
         pool_kwargs["ssl_context"] = self._tls_context()
-        return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+        self._configure_pool(self.poolmanager)
+
+    @staticmethod
+    def _configure_pool(manager):
+        # Keep other requests sessions' connection classes unchanged.
+        manager.pool_classes_by_scheme = {
+            **manager.pool_classes_by_scheme,
+            "https": PasarGuardHTTPSConnectionPool,
+        }
 
     def proxy_manager_for(self, proxy, **proxy_kwargs):
         proxy_kwargs["ssl_context"] = self._tls_context()
-        return super().proxy_manager_for(proxy, **proxy_kwargs)
+        manager = super().proxy_manager_for(proxy, **proxy_kwargs)
+        self._configure_pool(manager)
+        return manager
 
 
 class PasarGuardClient:

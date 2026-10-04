@@ -7,9 +7,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import requests
 from django.test import SimpleTestCase
+from urllib3.connection import HTTPSConnection
 
 from .panels.pasarguard.client import PasarGuardClient
 from .panels.pasarguard.errors import PasarGuardIntegrationError
@@ -41,6 +43,17 @@ class PasarGuardTransportTests(SimpleTestCase):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+
+            def do_POST(self):
+                payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                body = json.dumps({"tls": self.connection.version(), "payload": payload}).encode()
+                self.send_response(201 if self.command == "POST" else 200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_PUT = do_POST
 
             def log_message(self, *_args):
                 pass
@@ -83,3 +96,46 @@ class PasarGuardTransportTests(SimpleTestCase):
         self.assertEqual(first["tls"], "TLSv1.2")
         self.assertEqual(second["tls"], "TLSv1.2")
         self.assertNotEqual(first["peer_port"], second["peer_port"])
+
+    def test_json_create_uses_one_tls_write_and_preserves_body(self):
+        client = self.make_client()
+        client.session.verify = self.cert
+        sends = []
+        original_send = HTTPSConnection.send
+
+        def capture_send(connection, data):
+            sends.append(data)
+            return original_send(connection, data)
+
+        payload = {"username": "local-test", "group_ids": [29], "note": "تست"}
+        for method in ("POST", "PUT"):
+            with self.subTest(method=method):
+                sends.clear()
+                with patch.object(HTTPSConnection, "send", capture_send):
+                    result = client.request(method, "/api/user", json=payload, expected_statuses=(200, 201))
+                self.assertEqual(result["tls"], "TLSv1.2")
+                self.assertEqual(result["payload"], payload)
+                self.assertEqual(len(sends), 1)
+                headers, body = sends[0].split(b"\r\n\r\n", 1)
+                self.assertIn(f"{method} /api/user HTTP/1.1".encode(), headers)
+                self.assertIn(f"Content-Length: {len(body)}".encode(), headers)
+                self.assertEqual(json.loads(body), payload)
+
+    def test_large_json_body_is_not_buffered_and_other_sessions_are_unchanged(self):
+        client = self.make_client()
+        client.session.verify = self.cert
+        sends = []
+        original_send = HTTPSConnection.send
+
+        def capture_send(connection, data):
+            sends.append(data)
+            return original_send(connection, data)
+
+        payload = {"note": "x" * 70000}
+        with patch.object(HTTPSConnection, "send", capture_send):
+            result = client.create_user(payload)
+        self.assertEqual(result["payload"], payload)
+        self.assertEqual(len(sends), 2)
+        with requests.Session() as other_session:
+            other_pool = other_session.adapters["https://"].poolmanager.pool_classes_by_scheme["https"]
+            self.assertIs(other_pool.ConnectionCls, HTTPSConnection)
