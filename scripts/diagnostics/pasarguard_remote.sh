@@ -81,3 +81,27 @@ for p in Panel.objects.filter(family='pasarguard',is_active=True).order_by('pk')
             except Exception as exc:result.update(ok=False,error_type=type(exc).__name__,code=getattr(exc,'error_code',''),http_status=(getattr(exc,'safe_context',{}) or {}).get('status_code'))
             print(json.dumps(result),flush=True)
 PY
+
+# Read the renewal target without changing quota, expiry, or remote accounts.
+docker exec -i "$app" python manage.py shell --no-imports <<'RENEWAL'
+import json
+from store.models import Order, VPNClient
+from store.xui_api import XUIService, sanitize_xui_operational_text
+order=Order.objects.filter(pk=1134,order_tracking_code='73cc7eb4e7e94adfb69d4bdac7beb1c8').first()
+if order:
+    vc=VPNClient.objects.select_related('inbound__panel').filter(pk=(order.metadata or {}).get('renewal_client_pk')).first()
+    result={'order_id':order.pk,'renewal_target_present':bool(vc),'provisioning_status':order.provisioning_status,'renewed_at_recorded':bool((order.metadata or {}).get('renewed_at'))}
+    if vc and vc.inbound_id and vc.inbound.panel_id:
+        panel=vc.inbound.panel
+        result.update(client_id=vc.pk,panel_id=panel.pk,inbound_id=vc.inbound_id,store_matches=vc.store_id==order.store_id)
+        try:
+            data=XUIService(panel).get_inbound_clients(vc.inbound,use_cache=False)
+            exact=[c for c in data if c.get('id')==str(vc.uuid)]
+            email=[c for c in data if c.get('email')==(vc.xui_email or vc.username)]
+            result.update(ok=True,remote_exact_uuid_matches=len(exact),remote_email_matches=len(email),remote_client_count=len(data))
+            target=(exact or email or [None])[0]
+            if target:result.update(remote_enabled=target.get('enable'),remote_expiry_ms=target.get('expiryTime'),remote_quota_bytes=target.get('totalGB'))
+        except Exception as exc:
+            result.update(ok=False,error_type=type(exc).__name__,error_code=getattr(exc,'error_code',''),safe_error=sanitize_xui_operational_text(exc,panel=panel,max_length=300))
+    print(json.dumps(result),flush=True)
+RENEWAL
