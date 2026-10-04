@@ -84,3 +84,51 @@ for panel in Panel.objects.filter(family='pasarguard',is_active=True).order_by('
         result['elapsed_ms']=round((time.monotonic()-start)*1000)
         print(json.dumps(result),flush=True)
 CONTAINER
+
+# Read-only authenticated validation using the proposed HTTPS adapter.
+docker exec -i "$app" python manage.py shell --no-imports <<'AUTHENTICATED'
+import json, ssl, time
+import requests
+from requests.adapters import HTTPAdapter
+from store.models import Panel, ExternalSubscriptionFeed
+from store.panels.pasarguard.client import PasarGuardClient
+class PasarGuardHTTPSAdapter(HTTPAdapter):
+    """Use verified TLS 1.2 on the production path that stalls with TLS 1.3."""
+
+    @staticmethod
+    def _tls_context():
+        context = ssl.create_default_context(cafile=requests.certs.where())
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.maximum_version = ssl.TLSVersion.TLSv1_2
+        return context
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        pool_kwargs["ssl_context"] = self._tls_context()
+        return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        proxy_kwargs["ssl_context"] = self._tls_context()
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+
+
+for panel in Panel.objects.filter(family='pasarguard',is_active=True).order_by('pk'):
+    with requests.Session() as session:
+        session.trust_env=False
+        session.mount('https://',PasarGuardHTTPSAdapter())
+        client=PasarGuardClient(panel,session=session,timeout=(3,10))
+        feed=ExternalSubscriptionFeed.objects.filter(panel=panel,active=True,provider='pasarguard').exclude(status='disabled').first()
+        for action in ['api','groups'] + (['subscription'] if feed else []):
+            start=time.monotonic()
+            result={'panel_id':panel.pk,'mode':'verified_tls12','action':action}
+            try:
+                if action=='api':payload=client.get_system()
+                elif action=='groups':payload=client.list_groups()
+                else:payload=client.fetch_native_links(feed.protected_subscription_url)
+                result['ok']=True
+                if action!='api':result['count']=len(payload)
+            except Exception as exc:
+                result.update(ok=False,error_type=type(exc).__name__,error_code=getattr(exc,'error_code',''),http_status=(getattr(exc,'safe_context',{}) or {}).get('status_code'))
+            result['elapsed_ms']=round((time.monotonic()-start)*1000)
+            print(json.dumps(result),flush=True)
+AUTHENTICATED
