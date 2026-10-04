@@ -49,6 +49,9 @@ class PasarGuardClient:
         self.session = session or requests.Session()
         if session is None:
             self.session.mount("https://", PasarGuardHTTPSAdapter())
+            # On this network path a reused HTTPS connection stalls on the
+            # next request. Close each response without retrying remote writes.
+            self.session.headers["Connection"] = "close"
 
     def _url(self, path):
         if not self.base_url:

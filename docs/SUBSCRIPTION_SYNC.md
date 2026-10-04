@@ -33,10 +33,14 @@ PasarGuard's HTTPS adapter uses TLS 1.2 with certificate and hostname validation
 On 2026-10-04 the production server and its app container completed TLS 1.3
 handshakes but received no HTTP response; the same unauthenticated endpoint
 returned HTTP 401 in about 0.5 seconds with verified TLS 1.2 on both surfaces.
+Reusing the TLS 1.2 connection also stalled subsequent requests, while
+`Connection: close` restored authenticated system and group reads in under
+0.5 seconds. PasarGuard sessions therefore close each response connection.
 The external runner responded normally. This is a transport compatibility fix
 for API and native subscription reads; it does not retry remote writes or
 disable certificate checks. Real local HTTPS regression tests cover both the
-negotiated version and rejection of an untrusted certificate.
+negotiated version, separate connections for repeated requests, and rejection
+of an untrusted certificate.
 
 ```
 python manage.py sync_pasarguard_subscriptions

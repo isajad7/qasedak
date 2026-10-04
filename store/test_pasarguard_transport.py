@@ -32,8 +32,10 @@ class PasarGuardTransportTests(SimpleTestCase):
         cls.cert = str(cert)
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
             def do_GET(self):
-                body = json.dumps({"tls": self.connection.version()}).encode()
+                body = json.dumps({"tls": self.connection.version(), "peer_port": self.client_address[1]}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -72,3 +74,12 @@ class PasarGuardTransportTests(SimpleTestCase):
             self.make_client().get_system()
         self.assertEqual(caught.exception.error_code, "pasarguard_network_error")
         self.assertIsInstance(caught.exception.__cause__, requests.exceptions.SSLError)
+
+    def test_repeated_api_reads_use_separate_verified_connections(self):
+        client = self.make_client()
+        client.session.verify = self.cert
+        first = client.get_system()
+        second = client.get_system()
+        self.assertEqual(first["tls"], "TLSv1.2")
+        self.assertEqual(second["tls"], "TLSv1.2")
+        self.assertNotEqual(first["peer_port"], second["peer_port"])
