@@ -12,6 +12,38 @@ from urllib.parse import urlsplit
 import requests
 from store.models import Order
 from store.provisioning_services import approve_and_provision_order
+from urllib3.connection import HTTPSConnection
+from urllib3.connectionpool import HTTPSConnectionPool
+
+class CombinedHTTPSConnection(HTTPSConnection):
+    def request(self, method, url, body=None, headers=None, **kwargs):
+        combine = (method.upper() in {"POST", "PUT", "PATCH"} and isinstance(body, (bytes, bytearray)) and len(body) <= 65536 and not kwargs.get("chunked", False))
+        if not combine:
+            return super().request(method, url, body=body, headers=headers, **kwargs)
+        self._request_parts = []
+        try:
+            super().request(method, url, body=body, headers=headers, **kwargs)
+            message = b"".join(self._request_parts)
+        finally:
+            del self._request_parts
+        self.send(message)
+
+    def send(self, data):
+        parts = getattr(self, "_request_parts", None)
+        if parts is not None:
+            parts.append(data)
+        else:
+            super().send(data)
+
+class CombinedHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = CombinedHTTPSConnection
+
+from store.panels.pasarguard.client import PasarGuardHTTPSAdapter
+original_init=PasarGuardHTTPSAdapter.init_poolmanager
+def combined_init(self,*args,**kwargs):
+    original_init(self,*args,**kwargs)
+    self.poolmanager.pool_classes_by_scheme={**self.poolmanager.pool_classes_by_scheme,'https':CombinedHTTPSConnectionPool}
+PasarGuardHTTPSAdapter.init_poolmanager=combined_init
 original=requests.Session.request
 def traced(self,method,url,**kwargs):
     path=urlsplit(str(url)).path
