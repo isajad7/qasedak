@@ -44,6 +44,7 @@ from .admin_catalog import (
     set_plan_active_state,
     duplicate_plan_for_admin,
 )
+from .admin_cup_center.services import exclude_free_trial_cups, filter_free_trial_cups
 from .models import (
     BotConfiguration,
     BotAdminOrderMessage,
@@ -6392,11 +6393,10 @@ class SubscriptionCupKindFilter(admin.SimpleListFilter):
         )
 
     def queryset(self, request, queryset):
-        free_trial_query = Q(metadata__is_free_trial=True) | Q(metadata__source="free_trial")
         if self.value() == "main":
-            return queryset.exclude(free_trial_query)
+            return exclude_free_trial_cups(queryset)
         if self.value() == "free_trials":
-            return queryset.filter(free_trial_query)
+            return filter_free_trial_cups(queryset)
         return queryset
 
 

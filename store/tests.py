@@ -2273,6 +2273,65 @@ class SubscriptionCupMVPTests(TestCase):
         response = self.client.get(reverse("admin_store_cup_center"))
         self.assertNotEqual(response.status_code, 200)
 
+    def test_cup_filters_keep_missing_metadata_keys_in_main_lists(self):
+        from .admin_cup_center.services import cup_queryset
+
+        def make_cup(title, metadata):
+            return SubscriptionCup.objects.create(
+                title=title,
+                customer=self.customer,
+                order=self.order,
+                plan=self.plan,
+                vpn_client=self.vpn_client,
+                metadata=metadata,
+            )
+
+        main_cups = [
+            make_cup("metadata empty", {}),
+            make_cup("metadata normal source", {"source": "manual"}),
+            make_cup("metadata trial false", {"is_free_trial": False}),
+        ]
+        trial_cups = [
+            make_cup("metadata trial flag", {"is_free_trial": True}),
+            make_cup("metadata trial source", {"source": "free_trial"}),
+            make_cup("metadata trial both", {"is_free_trial": True, "source": "free_trial"}),
+        ]
+        main_ids = {cup.pk for cup in main_cups}
+        trial_ids = {cup.pk for cup in trial_cups}
+        all_ids = main_ids | trial_ids
+
+        def ids_for(queryset):
+            return set(queryset.filter(pk__in=all_ids).values_list("pk", flat=True))
+
+        self.assertEqual(ids_for(cup_queryset(kind="main")), main_ids)
+        self.assertEqual(ids_for(cup_queryset(kind="free_trials")), trial_ids)
+        self.assertEqual(ids_for(cup_queryset(kind="all")), all_ids)
+
+        self.client.force_login(self.admin_user)
+
+        def cup_center_ids(kind=None):
+            url = reverse("admin_store_cup_center")
+            if kind:
+                url = f"{url}?kind={kind}"
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200)
+            return {item["cup"].pk for item in response.context["items"] if item["cup"].pk in all_ids}
+
+        self.assertEqual(cup_center_ids(), main_ids)
+        self.assertEqual(cup_center_ids("main"), main_ids)
+        self.assertEqual(cup_center_ids("free_trials"), trial_ids)
+        self.assertEqual(cup_center_ids("all"), all_ids)
+
+        def django_admin_ids(cup_kind=None):
+            params = {"cup_kind": cup_kind} if cup_kind else {}
+            response = self.client.get(reverse("admin:store_subscriptioncup_changelist"), params)
+            self.assertEqual(response.status_code, 200)
+            return ids_for(response.context["cl"].queryset)
+
+        self.assertEqual(django_admin_ids("main"), main_ids)
+        self.assertEqual(django_admin_ids("free_trials"), trial_ids)
+        self.assertEqual(django_admin_ids(), all_ids)
+
     def test_cup_center_manual_cup_creation_and_empty_detail(self):
         self.client.force_login(self.admin_user)
 
