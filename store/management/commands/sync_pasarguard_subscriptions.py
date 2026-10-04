@@ -18,7 +18,10 @@ class Command(BaseCommand):
             parsed = urlsplit(base)
             if not options["refresh"] or parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.query or parsed.fragment:
                 raise CommandError("Public verification requires --refresh and an HTTPS base URL.")
-        result = repair_and_refresh_pasarguard_subscriptions(refresh=options["refresh"], limit=options["limit"], public_base_url=base)
+        def progress(counts):
+            self.stdout.write(json.dumps(counts))
+            self.stdout.flush()
+        result = repair_and_refresh_pasarguard_subscriptions(refresh=options["refresh"], limit=options["limit"], public_base_url=base, progress=progress)
         self.stdout.write(json.dumps(result))
         if result.get("public_errors"):
             raise CommandError("Public subscription verification failed; inspect the safe error counts above.")
