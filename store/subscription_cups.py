@@ -365,7 +365,11 @@ def _rebuild_cup(order=None, vpn_client=None, *, entries, force_active=False, ad
             if not force_active:
                 cup.status = SubscriptionCup.Status.ACTIVE
         cup = _update_cup(cup, order=order, vpn_client=vpn_client, force_active=force_active)
-        reusable_items = list(cup.items.select_related("config_link").order_by("position", "pk"))
+        # A local rebuild cannot replace an up-to-date remote list with VPNClient.direct_link's initial snapshot.
+        managed = list(cup.external_feeds.values_list("panel_id", "vpn_client_id"))
+        if managed:
+            entries = [entry for entry in entries if (getattr(entry.get("source_panel"), "pk", None), getattr(vpn_client, "pk", None)) not in managed]
+        reusable_items = list(cup.items.filter(config_link__external_feed__isnull=True).select_related("config_link").order_by("position", "pk"))
         active_item_ids = []
         for position, entry in enumerate(entries, start=1):
             item = _create_or_update_item(
@@ -377,8 +381,11 @@ def _rebuild_cup(order=None, vpn_client=None, *, entries, force_active=False, ad
                 added_reason=added_reason,
             )
             active_item_ids.append(item.pk)
-        stale_items = cup.items.exclude(pk__in=active_item_ids) if active_item_ids else cup.items.all()
+        unmanaged_items = cup.items.filter(config_link__external_feed__isnull=True)
+        stale_items = unmanaged_items.exclude(pk__in=active_item_ids) if active_item_ids else unmanaged_items
         stale_items.update(is_active=False, updated_at=timezone.now())
+        from .subscription_sync import ensure_pasarguard_feeds_for_cup
+        ensure_pasarguard_feeds_for_cup(cup)
     return cup
 
 
