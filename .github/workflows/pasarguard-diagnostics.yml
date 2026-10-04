@@ -1,0 +1,37 @@
+name: PasarGuard read-only diagnostics
+on:
+  push:
+    branches: [ci]
+    paths:
+      - .github/workflows/pasarguard-diagnostics.yml
+      - scripts/diagnostics/pasarguard_remote.sh
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: development
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read-only DNS TCP TLS and panel probes
+        env:
+          DEV_SSH_HOST: ${{ vars.DEV_SSH_HOST }}
+          DEV_SSH_USER: ${{ vars.DEV_SSH_USER }}
+          DEV_SSH_PORT: ${{ vars.DEV_SSH_PORT }}
+          DEV_SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+          DEV_SSH_KNOWN_HOSTS: ${{ secrets.DEV_SSH_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          ssh_dir="$(mktemp -d "$RUNNER_TEMP/qasedak-diagnostics.XXXXXXXX")"
+          trap 'rm -rf -- "$ssh_dir"' EXIT
+          printf '%s\n' "$DEV_SSH_PRIVATE_KEY" > "$ssh_dir/key"
+          printf '%s\n' "$DEV_SSH_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          ssh -i "$ssh_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$ssh_dir/known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=20 -o ServerAliveCountMax=6 -p "${DEV_SSH_PORT:-22}" \
+            "$DEV_SSH_USER@$DEV_SSH_HOST" 'bash -s' < scripts/diagnostics/pasarguard_remote.sh

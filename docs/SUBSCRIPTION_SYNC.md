@@ -61,3 +61,10 @@ Run `python manage.py test store.test_subscription_sync store.test_external_subs
 CI runs the full project regression suite too. Unresolved ownership and missing
 original upstream URLs require reviewed data repair; do not attach arbitrary
 customers to a shared subscription merely to remove a diagnostic count.
+
+For connection outages, `scripts/diagnostics/pasarguard_remote.sh` performs only
+reads against the configured deployment and panel. Its dedicated GitHub workflow
+runs on changes to that diagnostic script on `ci`, without deploying a revision.
+It compares environment, direct and explicitly configured panel proxy connections,
+checks DNS/TCP/TLS, and prints IDs, counts, exception classes and numeric errno.
+Never print panel URLs, credentials, upstream tokens or response bodies.
