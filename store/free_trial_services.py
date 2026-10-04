@@ -13,10 +13,19 @@ from django.db.models import F, Q
 from django.utils import timezone
 
 from .jalali import format_jalali_datetime, persian_digits
-from .models import Customer, FreeTrialRequest, Inbound, Panel, VPNClient
+from .models import ConfigLink, CupItem, Customer, FreeTrialRequest, Inbound, Panel, SubscriptionCup, VPNClient
 from .naming import build_trial_client_name
 from .order_services import get_current_store
 from .panels import PanelIntegrationError, get_safe_panel_adapter
+from .external_subscription_sources import (
+    ExternalSubscriptionRefreshError,
+    filter_native_configs,
+    register_external_subscription_feed_snapshot,
+)
+from .subscription_cups import (
+    build_subscription_cup_url,
+    create_config_link_from_raw,
+)
 from .xui_api import (
     bytes_from_gb,
     create_trial_client_details as create_xui_trial_client_details,
@@ -41,6 +50,7 @@ class FreeTrialResult:
     message: str
     request: FreeTrialRequest | None = None
     vpn_client: VPNClient | None = None
+    subscription_cup: SubscriptionCup | None = None
     next_available_at: object = None
 
 
@@ -176,6 +186,16 @@ def _trial_duration_days(duration_hours):
     return max((hours + 23) // 24, 1)
 
 
+def _trial_expires_at_from_hours(duration_hours, *, now=None):
+    try:
+        hours = int(duration_hours or 0)
+    except (TypeError, ValueError):
+        hours = 0
+    if hours <= 0:
+        return None
+    return (now or timezone.now()) + timedelta(hours=hours)
+
+
 def create_trial_client_details(email_prefix, total_gb, duration_hours, panel, inbound, limit_ip=1):
     if not _is_pasarguard_panel(panel):
         return create_xui_trial_client_details(
@@ -191,6 +211,7 @@ def create_trial_client_details(email_prefix, total_gb, duration_hours, panel, i
             email_prefix=email_prefix,
             total_gb=total_gb,
             duration_days=_trial_duration_days(duration_hours),
+            expires_at=_trial_expires_at_from_hours(duration_hours),
             inbound=inbound,
             inbounds=[inbound] if inbound else [],
             limit_ip=limit_ip,
@@ -267,6 +288,123 @@ def cleanup_panel_trial_client(client_result, inbound, *, trial_request=None):
     return False
 
 
+def _client_result_raw_links(client_result):
+    raw_links = [
+        str(link).strip()
+        for link in (client_result or {}).get("raw_links") or []
+        if str(link or "").strip()
+    ]
+    direct_link = str((client_result or {}).get("direct_link") or "").strip()
+    if direct_link and direct_link not in raw_links:
+        raw_links.insert(0, direct_link)
+    return raw_links
+
+
+def _create_free_trial_subscription_cup(*, trial_request, vpn_client, client_result, settings, customer, telegram_user_id):
+    raw_links = _client_result_raw_links(client_result)
+    if not raw_links:
+        raise ValidationError("هیچ لینک معتبری برای کاپ تست رایگان ساخته نشد.")
+
+    now = timezone.now()
+    is_pasarguard = _is_pasarguard_panel(settings["panel"])
+    selected_links = raw_links
+    filter_result = None
+    if is_pasarguard:
+        filter_result = filter_native_configs(raw_links)
+        if filter_result.selected_count <= 0:
+            raise ValidationError("خروجی PasarGuard پس از فیلتر پروتکل‌ها خالی بود.")
+        selected_links = [item.raw_link for item in filter_result.selected_configs]
+
+    metadata = {
+        "source": "free_trial",
+        "is_free_trial": True,
+        "free_trial_request_id": trial_request.pk,
+        "telegram_user_id": telegram_user_id,
+        "panel_id": settings["panel"].pk,
+        "inbound_id": settings["inbound"].pk,
+        "raw_link_count": len(raw_links),
+        "selected_link_count": len(selected_links),
+        "created_from": "free_trial_request",
+        "last_fulfilled_at": now.isoformat(),
+    }
+    cup = SubscriptionCup.objects.create(
+        customer=customer,
+        order=None,
+        plan=None,
+        vpn_client=vpn_client,
+        status=SubscriptionCup.Status.ACTIVE,
+        expires_at=trial_request.expires_at,
+        traffic_limit_bytes=bytes_from_gb(settings["traffic_gb"]),
+        device_limit=vpn_client.device_limit,
+        title=f"تست رایگان {vpn_client.username}".strip(),
+        metadata=metadata,
+    )
+
+    config_links = []
+    for position, raw_link in enumerate(selected_links, start=1):
+        link_metadata = {
+            "source": "free_trial",
+            "free_trial_request_id": trial_request.pk,
+            "cup_id": cup.pk,
+            "position": position,
+            "native_raw_delivery": is_pasarguard,
+        }
+        config_link = create_config_link_from_raw(
+            raw_link,
+            source_type=ConfigLink.SourceType.PANEL_GENERATED,
+            source_panel=settings["panel"],
+            source_inbound=settings["inbound"],
+            vpn_client=vpn_client,
+            metadata=link_metadata,
+        )
+        CupItem.objects.create(
+            cup=cup,
+            config_link=config_link,
+            position=position,
+            is_active=True,
+            added_reason="free_trial",
+            metadata=link_metadata,
+        )
+        config_links.append(config_link)
+
+    upstream_subscription_url = str((client_result or {}).get("sub_link") or "").strip()
+    if is_pasarguard:
+        if not upstream_subscription_url:
+            raise ExternalSubscriptionRefreshError(
+                "PasarGuard feed has no upstream subscription URL.",
+                code="external_feed_subscription_url_missing",
+            )
+        register_external_subscription_feed_snapshot(
+            cup=cup,
+            source=None,
+            panel=settings["panel"],
+            vpn_client=vpn_client,
+            protected_subscription_url=upstream_subscription_url,
+            remote_identity_ref=str(client_result.get("email") or ""),
+            raw_links=raw_links,
+            config_links=config_links,
+            filter_result=filter_result,
+            provider=Panel.Family.PASARGUARD,
+            metadata={
+                "source": "free_trial_pasarguard_dynamic_subscription",
+                "free_trial_request_id": trial_request.pk,
+                "inbound_id": settings["inbound"].pk,
+            },
+        )
+
+    cup_url = build_subscription_cup_url(cup, store=settings["store"])
+    vpn_client.sub_link = cup_url
+    vpn_client.xui_raw = {
+        **(vpn_client.xui_raw or {}),
+        "free_trial_cup_id": cup.pk,
+        "free_trial_request_id": trial_request.pk,
+        "qasedak_subscription_url_saved": True,
+        "external_panel_subscription_link_saved": bool(upstream_subscription_url),
+    }
+    vpn_client.save(update_fields=["sub_link", "xui_raw", "updated_at"])
+    return cup
+
+
 def create_free_trial_for_customer(customer, telegram_user_id=None, *, store=None, bot_config=None):
     telegram_user_id = str(telegram_user_id or "").strip()
     if not customer and not telegram_user_id:
@@ -296,6 +434,7 @@ def create_free_trial_for_customer(customer, telegram_user_id=None, *, store=Non
     trial_request = None
     client_result = None
     vpn_client = None
+    subscription_cup = None
     try:
         now = timezone.now()
         expires_at = now + timedelta(hours=settings["duration_hours"])
@@ -378,6 +517,14 @@ def create_free_trial_for_customer(customer, telegram_user_id=None, *, store=Non
                     remote_client_key=client_result.get("remote_client_key") or "",
                     xui_raw=client_result.get("raw", {}),
                 )
+                subscription_cup = _create_free_trial_subscription_cup(
+                    trial_request=trial_request,
+                    vpn_client=vpn_client,
+                    client_result=client_result,
+                    settings=settings,
+                    customer=customer,
+                    telegram_user_id=telegram_user_id,
+                )
                 trial_request.vpn_client = vpn_client
                 trial_request.status = FreeTrialRequest.Status.DELIVERED
                 trial_request.config_link = config_link
@@ -424,6 +571,7 @@ def create_free_trial_for_customer(customer, telegram_user_id=None, *, store=Non
             "تست رایگان شما آماده شد.",
             request=trial_request,
             vpn_client=vpn_client,
+            subscription_cup=subscription_cup,
         )
     except Exception as exc:
         safe_error = sanitize_free_trial_log_value(exc)
@@ -482,7 +630,12 @@ def format_free_trial_result(result):
     if not result.success:
         return result.message
     trial_request = result.request
-    config_link = (trial_request.config_link if trial_request else "") or getattr(result.vpn_client, "direct_link", "") or ""
+    config_link = (
+        build_subscription_cup_url(result.subscription_cup, store=getattr(result.vpn_client, "store", None))
+        if result.subscription_cup
+        else ""
+    )
+    config_link = config_link or (trial_request.config_link if trial_request else "") or getattr(result.vpn_client, "direct_link", "") or ""
     traffic_gb = trial_request.traffic_gb if trial_request else Decimal("0")
     duration_hours = trial_request.duration_hours if trial_request else 0
     return (

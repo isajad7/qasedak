@@ -300,7 +300,7 @@ class PasarGuardPanelAdapter:
         )
 
     def _payload(self, request, username, marker, group_ids, existing_user=None):
-        expires_at = expires_at_from_days(request.duration_days)
+        expires_at = getattr(request, "expires_at", None) or expires_at_from_days(request.duration_days)
         payload = {
             "username": username,
             "status": "active",

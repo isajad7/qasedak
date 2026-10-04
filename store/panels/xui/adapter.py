@@ -109,6 +109,7 @@ class XUIProvisioningRequest:
     client_uuid: str = ""
     sub_id: str = ""
     email: str = ""
+    expires_at: object | None = None
 
 
 class XUIPanelAdapter:

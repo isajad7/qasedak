@@ -11351,6 +11351,50 @@ class PlanInboundRouteTests(TestCase):
         self.assertFalse(PlanInboundRoute.objects.filter(plan=self.plan).exists())
         self.assertIn("exactly one is required", out.getvalue())
 
+    def test_audit_plan_inbound_routes_fix_default_skips_ready_independent_delivery(self):
+        config = PlanDeliveryConfig.objects.create(
+            plan=self.plan,
+            delivery_mode=PlanDeliveryConfig.DeliveryMode.DIRECT_LINKS,
+        )
+        PlanDeliverySource.objects.create(
+            delivery_config=config,
+            source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+            panel=self.route_inbound.panel,
+            inbound=self.route_inbound,
+            priority=1,
+        )
+        out = StringIO()
+
+        call_command("audit_plan_inbound_routes", "--store-id", str(self.store.pk), "--fix-default", stdout=out)
+
+        rendered = out.getvalue()
+        self.assertIn("independent delivery ready", rendered)
+        self.assertNotIn("missing_general_routes", rendered)
+        self.assertFalse(PlanInboundRoute.objects.filter(plan=self.plan).exists())
+
+    def test_audit_plan_inbound_routes_reports_broken_independent_source_not_missing_route(self):
+        config = PlanDeliveryConfig.objects.create(
+            plan=self.plan,
+            delivery_mode=PlanDeliveryConfig.DeliveryMode.DIRECT_LINKS,
+        )
+        PlanDeliverySource.objects.create(
+            delivery_config=config,
+            source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+            panel=self.route_inbound.panel,
+            inbound=self.route_inbound,
+            priority=1,
+        )
+        self.route_inbound.is_active = False
+        self.route_inbound.save(update_fields=["is_active", "updated_at"])
+        out = StringIO()
+
+        call_command("audit_plan_inbound_routes", "--store-id", str(self.store.pk), stdout=out)
+
+        rendered = out.getvalue()
+        self.assertIn("INVALID delivery", rendered)
+        self.assertIn("inactive", rendered.lower())
+        self.assertNotIn("missing_general_routes", rendered)
+
     def test_plan_admin_loads_route_inline(self):
         from django.contrib import admin
         from .admin import PlanAdmin, PlanInboundRouteInline
@@ -11626,6 +11670,63 @@ class AdminCatalogTests(TestCase):
         status = get_plan_route_status(self.plan, self.store)
 
         self.assertEqual(status["code"], "missing")
+
+    def test_route_status_ready_for_independent_delivery_without_legacy_route(self):
+        from .admin_catalog import get_catalog_context, get_plan_route_status, validate_plan_sales_readiness
+
+        self.store.allow_global_inbound_fallback = False
+        self.store.save(update_fields=["allow_global_inbound_fallback", "updated_at"])
+        config = PlanDeliveryConfig.objects.create(
+            plan=self.plan,
+            delivery_mode=PlanDeliveryConfig.DeliveryMode.SUBSCRIPTION,
+        )
+        PlanDeliverySource.objects.create(
+            delivery_config=config,
+            source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+            panel=self.panel,
+            inbound=self.ready_inbound,
+            quantity=1,
+            priority=1,
+        )
+
+        status = get_plan_route_status(self.plan, self.store)
+        readiness = validate_plan_sales_readiness(self.plan, self.store)
+        context = get_catalog_context(self.store)
+        item = next(item for item in context["plan_items"] if item["plan"].pk == self.plan.pk)
+
+        self.assertEqual(status["code"], "delivery_config")
+        self.assertTrue(readiness["ready"])
+        self.assertEqual(item["route_status"]["code"], "delivery_config")
+        self.assertEqual(context["summary"]["missing_route_count"], 0)
+        self.assertFalse(PlanInboundRoute.objects.filter(plan=self.plan).exists())
+
+    def test_route_status_reports_broken_independent_source_not_missing_route(self):
+        from .admin_catalog import get_plan_route_status, validate_plan_sales_readiness
+
+        self.store.allow_global_inbound_fallback = False
+        self.store.save(update_fields=["allow_global_inbound_fallback", "updated_at"])
+        config = PlanDeliveryConfig.objects.create(
+            plan=self.plan,
+            delivery_mode=PlanDeliveryConfig.DeliveryMode.DIRECT_LINKS,
+        )
+        PlanDeliverySource.objects.create(
+            delivery_config=config,
+            source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+            panel=self.panel,
+            inbound=self.ready_inbound,
+            quantity=1,
+            priority=1,
+        )
+        self.ready_inbound.is_active = False
+        self.ready_inbound.save(update_fields=["is_active", "updated_at"])
+
+        status = get_plan_route_status(self.plan, self.store)
+        readiness = validate_plan_sales_readiness(self.plan, self.store)
+
+        self.assertEqual(status["code"], "delivery_invalid")
+        self.assertFalse(readiness["ready"])
+        self.assertTrue(any("inactive" in warning.lower() for warning in status["warnings"]))
+        self.assertFalse(any("route" in warning.lower() for warning in status["warnings"]))
 
     def test_route_status_invalid_for_legacy_and_inactive_inbound(self):
         from .admin_catalog import get_plan_route_status
@@ -12256,6 +12357,23 @@ class FreeTrialServiceTests(TestCase):
         self.assertEqual(vpn_client.store, self.store)
         self.assertEqual(vpn_client.inbound, self.inbound)
         self.assertEqual(vpn_client.traffic_limit_bytes, 1024 ** 3)
+        cup = SubscriptionCup.objects.get(vpn_client=vpn_client)
+        self.assertEqual(cup.customer, self.customer)
+        self.assertIsNone(cup.order)
+        self.assertTrue((cup.metadata or {}).get("is_free_trial"))
+        self.assertEqual((cup.metadata or {}).get("free_trial_request_id"), trial_request.pk)
+        self.assertEqual(cup.traffic_limit_bytes, 1024 ** 3)
+        self.assertEqual(
+            list(CupItem.objects.filter(cup=cup, is_active=True).values_list("config_link__raw_link", flat=True)),
+            ["vless://example"],
+        )
+        from .admin_cup_center.services import cup_queryset
+        from .subscription_cups import build_subscription_cup_url
+
+        self.assertEqual(vpn_client.sub_link, build_subscription_cup_url(cup, store=self.store))
+        self.assertFalse(cup_queryset(kind="main").filter(pk=cup.pk).exists())
+        self.assertTrue(cup_queryset(kind="free_trials").filter(pk=cup.pk).exists())
+        self.assertEqual(Order.objects.filter(customer=self.customer).count(), 0)
         self.inbound.refresh_from_db()
         self.assertEqual(self.inbound.current_users, 1)
         xui_mock.assert_called_once()
@@ -12264,7 +12382,7 @@ class FreeTrialServiceTests(TestCase):
         self.assertEqual(xui_mock.call_args.kwargs["inbound"], self.inbound)
         self.assertEqual(xui_mock.call_args.kwargs["duration_hours"], 24)
 
-    def test_pasarguard_free_trial_uses_adapter_and_persists_native_direct_link(self):
+    def test_pasarguard_free_trial_builds_dynamic_cup_with_exact_expiry(self):
         from .free_trial_services import create_free_trial_for_customer
 
         pg_panel = Panel.objects.create(
@@ -12292,21 +12410,29 @@ class FreeTrialServiceTests(TestCase):
         )
         self.store.free_trial_panel = pg_panel
         self.store.free_trial_inbound = pg_inbound
-        self.store.free_trial_duration_hours = 25
+        self.store.free_trial_duration_hours = 6
         self.store.save(update_fields=["free_trial_panel", "free_trial_inbound", "free_trial_duration_hours", "updated_at"])
         adapter = Mock()
-        adapter.create_enabled_client.return_value = {
-            "uuid": "77777777-7777-4777-8777-777777777777",
-            "email": "trial_pg_42",
-            "sub_id": "pg-sub",
-            "sub_link": "https://pasarguard.example.com/sub/private-token",
-            "direct_link": "vless://pasarguard-direct.example.com",
-            "raw_links": ["vless://pasarguard-direct.example.com"],
-            "expires_at": timezone.now() + timedelta(days=2),
-            "xui_node_id": "",
-            "remote_client_key": "pasarguard:panel:user:trial_pg_42",
-            "raw": {"family": "pasarguard", "native_raw_delivery": True, "subscription_url_saved": True},
-        }
+        raw_links = [
+            "vless://aaaaaaaa-aaaa-4aaa-8aaa-000000001231@pg-one.example.com:443?type=tcp&security=none#Trial-One",
+            "trojan://password@pg-two.example.com:443#Trial-Two",
+        ]
+
+        def create_pg_client(request):
+            return {
+                "uuid": "77777777-7777-4777-8777-777777777777",
+                "email": "trial_pg_42",
+                "sub_id": "pg-sub",
+                "sub_link": "https://pasarguard.example.com/sub/private-token",
+                "direct_link": raw_links[0],
+                "raw_links": raw_links,
+                "expires_at": request.expires_at,
+                "xui_node_id": "",
+                "remote_client_key": "pasarguard:panel:user:trial_pg_42",
+                "raw": {"family": "pasarguard", "native_raw_delivery": True, "subscription_url_saved": True},
+            }
+
+        adapter.create_enabled_client.side_effect = create_pg_client
 
         with patch("store.free_trial_services.get_safe_panel_adapter", return_value=adapter):
             result = create_free_trial_for_customer(self.customer, telegram_user_id="42", store=self.store)
@@ -12316,17 +12442,30 @@ class FreeTrialServiceTests(TestCase):
         request = adapter.create_enabled_client.call_args.args[0]
         self.assertEqual(request.inbound, pg_inbound)
         self.assertEqual(request.inbounds, [pg_inbound])
-        self.assertEqual(request.duration_days, 2)
         self.assertEqual(request.limit_ip, 1)
         trial_request = FreeTrialRequest.objects.get()
         self.assertEqual(trial_request.panel, pg_panel)
         self.assertEqual(trial_request.inbound, pg_inbound)
-        self.assertEqual(trial_request.config_link, "vless://pasarguard-direct.example.com")
+        self.assertEqual(trial_request.config_link, raw_links[0])
+        self.assertLess(abs((request.expires_at - trial_request.expires_at).total_seconds()), 2)
+        self.assertLess(abs((trial_request.expires_at - (trial_request.created_at + timedelta(hours=6))).total_seconds()), 2)
         vpn_client = trial_request.vpn_client
         self.assertEqual(vpn_client.inbound, pg_inbound)
-        self.assertEqual(vpn_client.sub_link, "https://pasarguard.example.com/sub/private-token")
-        self.assertEqual(vpn_client.direct_link, "vless://pasarguard-direct.example.com")
+        self.assertIn("/sub/", vpn_client.sub_link)
+        self.assertNotIn("pasarguard.example.com", vpn_client.sub_link)
+        self.assertEqual(vpn_client.direct_link, raw_links[0])
         self.assertEqual((vpn_client.xui_raw or {}).get("family"), "pasarguard")
+        cup = SubscriptionCup.objects.get(vpn_client=vpn_client)
+        self.assertEqual(result.subscription_cup, cup)
+        self.assertLess(abs((cup.expires_at - trial_request.expires_at).total_seconds()), 2)
+        self.assertEqual(
+            list(CupItem.objects.filter(cup=cup, is_active=True).order_by("position").values_list("config_link__raw_link", flat=True)),
+            raw_links,
+        )
+        feed = ExternalSubscriptionFeed.objects.get(cup=cup)
+        self.assertEqual(feed.provider, Panel.Family.PASARGUARD)
+        self.assertEqual(feed.protected_subscription_url, "https://pasarguard.example.com/sub/private-token")
+        self.assertEqual(feed.last_good_config_count, 2)
 
     @patch("store.free_trial_services.create_trial_client_details")
     def test_fast_duplicate_click_is_blocked_by_lock_before_xui_call(self, xui_mock):
@@ -21291,6 +21430,11 @@ class TelegramPurchaseFlowTests(TestCase):
         self.assertIsNotNone(trial_request.customer)
         self.assertIsNotNone(trial_request.vpn_client)
         self.assertEqual(trial_request.vpn_client.status, VPNClient.Status.ACTIVE)
+        cup = SubscriptionCup.objects.get(vpn_client=trial_request.vpn_client)
+        self.assertEqual(
+            list(CupItem.objects.filter(cup=cup, is_active=True).values_list("config_link__raw_link", flat=True)),
+            ["vless://example"],
+        )
         from .bot_targets import get_vpn_client_telegram_targets
 
         targets = get_vpn_client_telegram_targets(trial_request.vpn_client, store=self.store)
@@ -21303,22 +21447,24 @@ class TelegramPurchaseFlowTests(TestCase):
             and "text" in call.kwargs.get("json", {})
         ]
         self.assertTrue(any("تست رایگان شما آماده شد" in payload["text"] for payload in payloads))
-        config_payload = next(payload for payload in payloads if "vless://example" in payload["text"])
+        config_payload = next(payload for payload in payloads if f"/sub/{cup.token}" in payload["text"])
         self.assertEqual(config_payload["parse_mode"], "HTML")
         self.assertIn("<pre>", config_payload["text"])
-        self.assertIn("https://example.com/sub/sub123", config_payload["text"])
+        self.assertIn(f"/sub/{cup.token}", config_payload["text"])
         self.assertIn("🔗 لینک اشتراک", config_payload["text"])
-        self.assertIn("⚡ لینک مستقیم", config_payload["text"])
+        self.assertIn("🧭 لینک مدیریت و ورود به برنامه", config_payload["text"])
+        self.assertNotIn("https://example.com/sub/sub123", json.dumps(config_payload, ensure_ascii=False))
+        self.assertNotIn("⚡ لینک مستقیم", config_payload["text"])
         self.assertTrue(
             any(
-                button.get("copy_text", {}).get("text") == "vless://example"
+                button.get("copy_text", {}).get("text") == f"/sub/{cup.token}"
                 for row in config_payload["reply_markup"]["inline_keyboard"]
                 for button in row
             )
         )
         self.assertTrue(
             any(
-                button.get("copy_text", {}).get("text") == "https://example.com/sub/sub123"
+                button.get("copy_text", {}).get("text") == f"/sub/{cup.token}?view=dashboard"
                 for row in config_payload["reply_markup"]["inline_keyboard"]
                 for button in row
             )
@@ -21330,12 +21476,21 @@ class TelegramPurchaseFlowTests(TestCase):
         return_value={
             **fake_client_result("46464646-4646-4646-8646-464646464646"),
             "sub_link": "https://pasarguard.example.com/sub/private-token",
-            "direct_link": "vless://pasarguard-direct.example.com",
+            "direct_link": "vless://aaaaaaaa-aaaa-4aaa-8aaa-000000004646@pasarguard-direct.example.com:443?type=tcp&security=none#PG-One",
+            "raw_links": [
+                "vless://aaaaaaaa-aaaa-4aaa-8aaa-000000004646@pasarguard-direct.example.com:443?type=tcp&security=none#PG-One",
+                "trojan://password@pasarguard-backup.example.com:443#PG-Two",
+            ],
             "raw": {"family": "pasarguard", "native_raw_delivery": True, "subscription_url_saved": True},
         },
     )
     @patch("store.bots.requests.post", return_value=DummyBotResponse())
-    def test_free_trial_confirm_hides_pasarguard_native_subscription_link(self, post_mock, trial_mock):
+    def test_free_trial_confirm_sends_qasedak_cup_for_pasarguard_trial(self, post_mock, trial_mock):
+        self.panel.family = Panel.Family.PASARGUARD
+        self.panel.capability_profile = Panel.CapabilityProfile.PASARGUARD_GROUPS
+        self.panel.username = ""
+        self.panel.password = "pg-api-key"
+        self.panel.save(update_fields=["family", "capability_profile", "username", "password", "updated_at"])
         self.enable_free_trial()
 
         response = self.post_update(self.callback("user:free_trial_confirm", callback_id="trial-confirm-pg"))
@@ -21343,17 +21498,30 @@ class TelegramPurchaseFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         trial_request = FreeTrialRequest.objects.get()
         self.assertEqual(trial_request.status, FreeTrialRequest.Status.DELIVERED)
+        cup = SubscriptionCup.objects.get(vpn_client=trial_request.vpn_client)
+        self.assertEqual(
+            list(CupItem.objects.filter(cup=cup, is_active=True).order_by("position").values_list("config_link__raw_link", flat=True)),
+            [
+                "vless://aaaaaaaa-aaaa-4aaa-8aaa-000000004646@pasarguard-direct.example.com:443?type=tcp&security=none#PG-One",
+                "trojan://password@pasarguard-backup.example.com:443#PG-Two",
+            ],
+        )
+        feed = ExternalSubscriptionFeed.objects.get(cup=cup)
+        self.assertEqual(feed.provider, Panel.Family.PASARGUARD)
         payloads = [
             call.kwargs["json"]
             for call in post_mock.call_args_list
             if call.kwargs.get("json", {}).get("chat_id") == "42"
             and "text" in call.kwargs.get("json", {})
         ]
-        config_payload = next(payload for payload in payloads if "vless://pasarguard-direct.example.com" in payload["text"])
+        config_payload = next(payload for payload in payloads if f"/sub/{cup.token}" in payload["text"])
         rendered_payload = json.dumps(config_payload, ensure_ascii=False)
-        self.assertIn("⚡ لینک مستقیم", config_payload["text"])
-        self.assertNotIn("🔗 لینک اشتراک", config_payload["text"])
+        self.assertIn("🔗 لینک اشتراک", config_payload["text"])
+        self.assertIn("🧭 لینک مدیریت و ورود به برنامه", config_payload["text"])
+        self.assertNotIn("⚡ لینک مستقیم", config_payload["text"])
         self.assertNotIn("https://pasarguard.example.com/sub/private-token", rendered_payload)
+        self.assertNotIn("vless://", rendered_payload)
+        self.assertNotIn("trojan://", rendered_payload)
         self.assertFalse(
             any(
                 button.get("copy_text", {}).get("text") == "https://pasarguard.example.com/sub/private-token"

@@ -6381,6 +6381,25 @@ class SubscriptionCupItemInline(admin.TabularInline):
         return _("Config link saved (hidden), hash ending %(suffix)s") % {"suffix": suffix}
 
 
+class SubscriptionCupKindFilter(admin.SimpleListFilter):
+    title = _("Cup kind")
+    parameter_name = "cup_kind"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("main", _("Main cups")),
+            ("free_trials", _("Free trials")),
+        )
+
+    def queryset(self, request, queryset):
+        free_trial_query = Q(metadata__is_free_trial=True) | Q(metadata__source="free_trial")
+        if self.value() == "main":
+            return queryset.exclude(free_trial_query)
+        if self.value() == "free_trials":
+            return queryset.filter(free_trial_query)
+        return queryset
+
+
 @admin.register(SubscriptionCup)
 class SubscriptionCupAdmin(ImportExportModelAdmin):
     inlines = (SubscriptionCupItemInline,)
@@ -6397,7 +6416,7 @@ class SubscriptionCupAdmin(ImportExportModelAdmin):
         "expires_at",
         "created_at",
     )
-    list_filter = ("status", "created_at", "expires_at", "plan")
+    list_filter = (SubscriptionCupKindFilter, "status", "created_at", "expires_at", "plan")
     search_fields = (
         "title",
         "token",

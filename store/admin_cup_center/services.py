@@ -259,13 +259,21 @@ def _active_item_filter():
     return Q(items__is_active=True, items__config_link__is_active=True)
 
 
-def cup_queryset():
-    return (
+def free_trial_cup_filter():
+    return Q(metadata__is_free_trial=True) | Q(metadata__source="free_trial")
+
+
+def cup_queryset(*, kind="all"):
+    queryset = (
         SubscriptionCup.objects.select_related("customer", "order", "plan", "vpn_client")
         .annotate(active_item_count=Count("items", filter=_active_item_filter(), distinct=True))
         .annotate(inactive_item_count=Count("items", filter=Q(items__is_active=False) | Q(items__config_link__is_active=False), distinct=True))
-        .order_by("-created_at", "-pk")
     )
+    if kind == "main":
+        queryset = queryset.exclude(free_trial_cup_filter())
+    elif kind == "free_trials":
+        queryset = queryset.filter(free_trial_cup_filter())
+    return queryset.order_by("-created_at", "-pk")
 
 
 def cup_item_queryset(cup):

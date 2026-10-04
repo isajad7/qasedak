@@ -35,6 +35,12 @@ from .plan_delivery_services import (
     MODE_DIRECT_LINKS,
     MODE_GLOBAL_FALLBACK,
     MODE_SUBSCRIPTION,
+    READINESS_CONFLICT,
+    READINESS_INCOMPLETE,
+    SOURCE_CUP_RECIPE,
+    SOURCE_PLAN_ROUTES,
+    SOURCE_STORE_FALLBACK,
+    SOURCE_V2_CONFIG,
     active_delivery_config_for_plan,
     active_delivery_sources,
     delivery_mode_choices,
@@ -57,11 +63,15 @@ ROUTE_STATUS_UNAVAILABLE_FOR_SALES = "unavailable_for_sales"
 ROUTE_STATUS_LEGACY_INBOUND = "legacy_inbound"
 ROUTE_STATUS_FALLBACK = "fallback"
 ROUTE_STATUS_OPERATOR_SPECIFIC = "operator_specific"
+ROUTE_STATUS_DELIVERY_CONFIG = "delivery_config"
+ROUTE_STATUS_DELIVERY_INVALID = "delivery_invalid"
+ROUTE_STATUS_LEGACY_CONFLICT = "legacy_conflict"
 
 READY_ROUTE_STATUSES = {
     ROUTE_STATUS_READY,
     ROUTE_STATUS_OPERATOR_SPECIFIC,
     ROUTE_STATUS_FALLBACK,
+    ROUTE_STATUS_DELIVERY_CONFIG,
 }
 INVALID_ROUTE_STATUSES = {
     ROUTE_STATUS_INVALID,
@@ -69,6 +79,8 @@ INVALID_ROUTE_STATUSES = {
     ROUTE_STATUS_INBOUND_INACTIVE,
     ROUTE_STATUS_UNAVAILABLE_FOR_SALES,
     ROUTE_STATUS_LEGACY_INBOUND,
+    ROUTE_STATUS_DELIVERY_INVALID,
+    ROUTE_STATUS_LEGACY_CONFLICT,
 }
 
 ROUTE_STATUS_LABELS = {
@@ -81,6 +93,9 @@ ROUTE_STATUS_LABELS = {
     ROUTE_STATUS_LEGACY_INBOUND: "Legacy",
     ROUTE_STATUS_FALLBACK: "Fallback",
     ROUTE_STATUS_OPERATOR_SPECIFIC: "Route اپراتوری",
+    ROUTE_STATUS_DELIVERY_CONFIG: "تحویل مستقل",
+    ROUTE_STATUS_DELIVERY_INVALID: "منبع تحویل ناقص",
+    ROUTE_STATUS_LEGACY_CONFLICT: "تداخل legacy",
 }
 
 ROUTE_STATUS_TONES = {
@@ -93,6 +108,9 @@ ROUTE_STATUS_TONES = {
     ROUTE_STATUS_LEGACY_INBOUND: "danger",
     ROUTE_STATUS_FALLBACK: "warning",
     ROUTE_STATUS_OPERATOR_SPECIFIC: "info",
+    ROUTE_STATUS_DELIVERY_CONFIG: "success",
+    ROUTE_STATUS_DELIVERY_INVALID: "danger",
+    ROUTE_STATUS_LEGACY_CONFLICT: "danger",
 }
 
 CONFIG_LINK_PATTERN = re.compile(r"\b(?:vless|vmess|trojan|ss)://\S+", re.IGNORECASE)
@@ -341,8 +359,51 @@ def valid_general_routes(plan, store=None):
     ]
 
 
+def delivery_configuration_uses_legacy_route(delivery_config):
+    return bool(delivery_config and delivery_config.source_of_truth in {SOURCE_PLAN_ROUTES, SOURCE_STORE_FALLBACK})
+
+
+def _delivery_destination(delivery_config):
+    if delivery_config.active_recipe_id:
+        return f"Recipe #{delivery_config.active_recipe_id}"
+    return delivery_config.source_summary or delivery_config.mode_label
+
+
+def _status_from_delivery_configuration(delivery_config):
+    warnings = list(delivery_config.warnings or [])
+    if delivery_config.source_of_truth == SOURCE_STORE_FALLBACK or delivery_config.effective_mode == MODE_GLOBAL_FALLBACK:
+        if delivery_config.readiness_status == READINESS_INCOMPLETE:
+            return status_dict(ROUTE_STATUS_INVALID, warnings=warnings or ["Fallback فروشگاه منبع آماده ندارد."])
+        return status_dict(
+            ROUTE_STATUS_FALLBACK,
+            warnings=warnings or ["تحویل از fallback عمومی فروشگاه انجام می‌شود."],
+            destination="Fallback عمومی",
+        )
+    if delivery_config.readiness_status == READINESS_CONFLICT or delivery_config.effective_mode == MODE_CONFLICT:
+        return status_dict(
+            ROUTE_STATUS_LEGACY_CONFLICT,
+            warnings=list(dict.fromkeys(list(delivery_config.conflicts or []) + warnings)),
+            destination=_delivery_destination(delivery_config),
+        )
+    if delivery_config.readiness_status == READINESS_INCOMPLETE:
+        return status_dict(
+            ROUTE_STATUS_DELIVERY_INVALID,
+            warnings=warnings or ["منبع تحویل محصول کامل نیست."],
+            destination=_delivery_destination(delivery_config),
+        )
+    return status_dict(
+        ROUTE_STATUS_DELIVERY_CONFIG,
+        warnings=warnings,
+        destination=_delivery_destination(delivery_config),
+    )
+
+
 def get_plan_route_status(plan, store=None):
     effective_store = store or getattr(plan, "store", None)
+    delivery_config = resolve_plan_delivery_configuration(plan, effective_store)
+    if not delivery_configuration_uses_legacy_route(delivery_config):
+        return _status_from_delivery_configuration(delivery_config)
+
     routes = active_routes_for_catalog_plan(plan, effective_store)
     route_statuses = [route_readiness(route, effective_store) for route in routes]
     valid_routes = [status["routes"][0] for status in route_statuses if status["is_ready"] and status["routes"]]
@@ -521,6 +582,7 @@ def get_plan_catalog_items(store=None):
                 "route_status": route_status,
                 "readiness": readiness,
                 "delivery_config": delivery_config,
+                "requires_legacy_route": delivery_configuration_uses_legacy_route(delivery_config),
                 "delivery_method": delivery_config.mode_label,
                 "delivery_sources": delivery_config.source_summary,
                 "delivery_status_label": delivery_config.readiness_label,
@@ -573,21 +635,33 @@ def get_route_coverage_summary(store=None):
     active_items = [item for item in plan_items if item["plan"].is_active]
     sales_candidates = [item for item in plan_items if plan_is_sales_candidate(item["plan"])]
     route_items = get_route_overview_items(store)
-    invalid_route_count = sum(1 for item in route_items if item["is_active"] and item["readiness"]["is_invalid"])
+    delivery_by_plan_id = {item["plan"].pk: item["delivery_config"] for item in plan_items}
+    invalid_route_count = sum(
+        1
+        for item in route_items
+        if item["is_active"]
+        and item["readiness"]["is_invalid"]
+        and delivery_configuration_uses_legacy_route(delivery_by_plan_id.get(item["plan"].pk))
+    )
     missing_route_count = sum(
         1
         for item in sales_candidates
-        if item["route_status"]["code"] in {ROUTE_STATUS_MISSING, ROUTE_STATUS_FALLBACK}
+        if item["requires_legacy_route"] and item["route_status"]["code"] in {ROUTE_STATUS_MISSING, ROUTE_STATUS_FALLBACK}
+    )
+    delivery_issue_count = sum(
+        1
+        for item in sales_candidates
+        if not item["readiness"]["ready"] and item["route_status"]["code"] not in {ROUTE_STATUS_MISSING, ROUTE_STATUS_FALLBACK}
     )
     sales_ready_inbound_count = get_sales_ready_inbounds(store).count()
     fallback_enabled = bool(store and getattr(store, "allow_global_inbound_fallback", True))
     routing_enabled = bool(store and getattr(store, "plan_inbound_routing_enabled", True))
 
-    if not store or not sales_candidates or not sales_ready_inbound_count:
+    if not store or not sales_candidates or (not sales_ready_inbound_count and not any(item["delivery_config"].expected_output_count for item in sales_candidates)):
         overall_code = "incomplete"
         overall_label = "تنظیمات ناقص"
         overall_tone = "warning"
-    elif invalid_route_count or (missing_route_count and routing_enabled and not fallback_enabled):
+    elif delivery_issue_count or invalid_route_count or (missing_route_count and routing_enabled and not fallback_enabled):
         overall_code = "needs_fix"
         overall_label = "نیازمند اصلاح"
         overall_tone = "danger"
@@ -602,6 +676,7 @@ def get_route_coverage_summary(store=None):
         "sellable_plan_count": len(sales_candidates),
         "missing_route_count": missing_route_count,
         "invalid_route_count": invalid_route_count,
+        "delivery_issue_count": delivery_issue_count,
         "sales_ready_inbound_count": sales_ready_inbound_count,
         "fallback_enabled": fallback_enabled,
         "routing_enabled": routing_enabled,
@@ -643,6 +718,15 @@ def get_catalog_action_items(store=None):
                 "url": reverse("admin:store_planinboundroute_bulk_assign"),
             }
         )
+    if summary["delivery_issue_count"]:
+        items.append(
+            {
+                "title": "منبع تحویل پلن ناقص است",
+                "description": f"{summary['delivery_issue_count']:,} پلن فعال تنظیم تحویل مستقل دارد اما منبع آن آماده نیست.",
+                "tone": "danger",
+                "url": catalog_url(store),
+            }
+        )
     return items
 
 
@@ -681,10 +765,11 @@ def filter_plan_catalog_items(items, filters=None):
             continue
         if visibility == "private" and item["is_public"]:
             continue
-        has_explicit_route = item["route_status"]["code"] not in {ROUTE_STATUS_MISSING, ROUTE_STATUS_FALLBACK}
+        has_explicit_route = item["requires_legacy_route"] and item["route_status"]["code"] not in {ROUTE_STATUS_MISSING, ROUTE_STATUS_FALLBACK}
+        has_delivery = item["readiness"]["ready"]
         if route == "has_route" and not has_explicit_route:
             continue
-        if route == "missing_route" and has_explicit_route:
+        if route == "missing_route" and (has_explicit_route or has_delivery):
             continue
         filtered_items.append(item)
     return filtered_items
@@ -696,7 +781,7 @@ def get_catalog_context(store=None, filters=None):
     action_plan_items = [
         item
         for item in plan_items
-        if item["plan"].is_active and (item["route_status"]["is_invalid"] or item["route_status"]["code"] in {ROUTE_STATUS_MISSING, ROUTE_STATUS_FALLBACK})
+        if item["plan"].is_active and not item["readiness"]["ready"]
     ]
     return {
         "summary": get_route_coverage_summary(store),

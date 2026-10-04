@@ -33,6 +33,14 @@
                 {% endfor %}
             </select>
         </label>
+        <label class="tw-filter-field">
+            <span>نوع</span>
+            <select name="kind">
+                <option value="main" {% if kind == "main" %}selected{% endif %}>اصلی</option>
+                <option value="free_trials" {% if kind == "free_trials" %}selected{% endif %}>تست‌ها</option>
+                <option value="all" {% if kind == "all" %}selected{% endif %}>همه</option>
+            </select>
+        </label>
         <div class="tw-filter-actions">
             <button type="submit" class="tw-button tw-button-primary">اعمال</button>
             <a href="{{ cup_center_url }}" class="tw-button tw-button-secondary">پاک کردن</a>

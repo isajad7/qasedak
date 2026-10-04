@@ -3,6 +3,13 @@ from django.core.exceptions import ValidationError
 from django.db.models import Q
 
 from store.models import Inbound, Plan, PlanInboundRoute, Store
+from store.plan_delivery_services import (
+    READINESS_CONFLICT,
+    READINESS_INCOMPLETE,
+    SOURCE_PLAN_ROUTES,
+    SOURCE_STORE_FALLBACK,
+    resolve_plan_delivery_configuration,
+)
 
 
 class Command(BaseCommand):
@@ -90,6 +97,12 @@ class Command(BaseCommand):
                 return True
         return False
 
+    def delivery_uses_legacy_route(self, delivery):
+        return delivery.source_of_truth in {SOURCE_PLAN_ROUTES, SOURCE_STORE_FALLBACK}
+
+    def delivery_is_ready(self, delivery):
+        return delivery.readiness_status not in {READINESS_INCOMPLETE, READINESS_CONFLICT} and delivery.expected_output_count > 0
+
     def audit_store(self, store):
         self.stdout.write(f"Store #{store.pk} {store.name}")
         self.stdout.write("  Bulk Assign tool: Admin > Plan Inbound Routes > Bulk Assign")
@@ -102,8 +115,13 @@ class Command(BaseCommand):
         )
         self.stdout.write(f"  active_plans={len(plans)} active_routes={len(routes)}")
 
+        delivery_by_plan = {plan.pk: resolve_plan_delivery_configuration(plan, store) for plan in plans}
+
         invalid_count = 0
         for route in routes:
+            delivery = delivery_by_plan.get(route.plan_id) or resolve_plan_delivery_configuration(route.plan, store)
+            if not self.delivery_uses_legacy_route(delivery):
+                continue
             valid, message = self.route_is_valid(route, store)
             if valid:
                 continue
@@ -115,7 +133,29 @@ class Command(BaseCommand):
                 )
             )
 
-        missing_plans = [plan for plan in plans if not self.has_valid_general_route(plan, store)]
+        missing_plans = []
+        for plan in plans:
+            delivery = delivery_by_plan.get(plan.pk) or resolve_plan_delivery_configuration(plan, store)
+            if not self.delivery_uses_legacy_route(delivery):
+                if self.delivery_is_ready(delivery):
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            f"  independent delivery ready: plan #{plan.pk} {plan.name} "
+                            f"mode={delivery.effective_mode} source={delivery.source_of_truth}"
+                        )
+                    )
+                else:
+                    invalid_count += 1
+                    reason = "; ".join(str(item) for item in list(delivery.conflicts or []) + list(delivery.warnings or [])) or "delivery source is incomplete"
+                    self.stdout.write(
+                        self.style.ERROR(
+                            f"  INVALID delivery: plan #{plan.pk} {plan.name} "
+                            f"mode={delivery.effective_mode} source={delivery.source_of_truth} reason={reason}"
+                        )
+                    )
+                continue
+            if not self.has_valid_general_route(plan, store):
+                missing_plans.append(plan)
         if missing_plans:
             self.stdout.write(self.style.WARNING(f"  missing_general_routes={len(missing_plans)}"))
             for plan in missing_plans:

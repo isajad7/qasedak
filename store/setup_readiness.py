@@ -121,6 +121,7 @@ def plan_has_ready_canonical_delivery(plan, store=None):
         MODE_SUBSCRIPTION,
         READINESS_CONFLICT,
         READINESS_INCOMPLETE,
+        SOURCE_CUP_RECIPE,
         SOURCE_V2_CONFIG,
         resolve_plan_delivery_configuration,
     )
@@ -129,7 +130,7 @@ def plan_has_ready_canonical_delivery(plan, store=None):
         return False
     delivery = resolve_plan_delivery_configuration(plan, store)
     return bool(
-        delivery.source_of_truth == SOURCE_V2_CONFIG
+        delivery.source_of_truth in {SOURCE_V2_CONFIG, SOURCE_CUP_RECIPE}
         and delivery.effective_mode in {MODE_DIRECT_LINKS, MODE_SUBSCRIPTION}
         and delivery.readiness_status not in {READINESS_INCOMPLETE, READINESS_CONFLICT}
         and delivery.source_count > 0

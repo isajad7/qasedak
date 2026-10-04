@@ -74,7 +74,10 @@ def _get_cup(cup_id):
 
 def cup_center_index(request):
     _require_perm(request, "store.view_subscriptioncup")
-    cups = cup_queryset()
+    kind = str(request.GET.get("kind") or "main").strip()
+    if kind not in {"main", "free_trials", "all"}:
+        kind = "main"
+    cups = cup_queryset(kind=kind)
     status = str(request.GET.get("status") or "").strip()
     query = str(request.GET.get("q") or "").strip()
     if status:
@@ -84,6 +87,7 @@ def cup_center_index(request):
     context = {
         **_base_context(request, "مدیریت لینک‌های اشتراک"),
         "items": cup_list_items(cups[:100], request=request),
+        "kind": kind,
         "status": status,
         "query": query,
         "status_choices": SubscriptionCup.Status.choices,

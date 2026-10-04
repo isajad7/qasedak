@@ -10,6 +10,10 @@ from store.free_trial_services import (
     validate_free_trial_settings,
 )
 from store.jalali import format_jalali_datetime, persian_digits
+from store.subscription_cups import (
+    build_subscription_cup_base64_url,
+    build_subscription_cup_url,
+)
 
 from .config_delivery import send_config_links_message
 from .formatting import bot_volume_label
@@ -43,6 +47,12 @@ def free_trial_subscription_link_is_internal(vpn_client):
         str(raw.get("family") or "").lower() == "pasarguard"
         or raw.get("native_raw_delivery")
     )
+
+
+def free_trial_cup_dashboard_url(cup, *, store=None):
+    url = build_subscription_cup_url(cup, store=store)
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}view=dashboard"
 
 
 def start_free_trial_flow(client, config, bot_user, *, chat_id, is_admin_bot_user_func=default_is_admin_bot_user):
@@ -92,8 +102,14 @@ def confirm_free_trial_flow(client, config, bot_user, *, chat_id, is_admin_bot_u
         )
     else:
         trial_request = result.request
-        subscription_link = "" if free_trial_subscription_link_is_internal(result.vpn_client) else getattr(result.vpn_client, "sub_link", "")
-        direct_link = getattr(result.vpn_client, "direct_link", "") or (trial_request.config_link if trial_request else "")
+        cup = result.subscription_cup
+        store = getattr(result.vpn_client, "store", None)
+        subscription_link = build_subscription_cup_url(cup, store=store) if cup else (
+            "" if free_trial_subscription_link_is_internal(result.vpn_client) else getattr(result.vpn_client, "sub_link", "")
+        )
+        dashboard_link = free_trial_cup_dashboard_url(cup, store=store) if cup else ""
+        client_link = build_subscription_cup_base64_url(cup, store=store) if cup else ""
+        direct_link = "" if cup else (getattr(result.vpn_client, "direct_link", "") or (trial_request.config_link if trial_request else ""))
         if not direct_link and not subscription_link and trial_request:
             direct_link = trial_request.config_link
         traffic_gb = trial_request.traffic_gb if trial_request else Decimal("0")
@@ -103,6 +119,8 @@ def confirm_free_trial_flow(client, config, bot_user, *, chat_id, is_admin_bot_u
             chat_id=chat_id,
             subscription_link=subscription_link,
             direct_link=direct_link,
+            dashboard_link=dashboard_link,
+            client_link=client_link,
             title="🎁 تست رایگان شما آماده شد",
             detail_lines=[
                 f"حجم: {bot_volume_label(traffic_gb)}",
