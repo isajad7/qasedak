@@ -4367,6 +4367,8 @@ class ExternalSubscriptionFeed(TimeStampedModel):
     refresh_interval_hours = models.PositiveIntegerField(_("refresh interval hours"), default=1, validators=[MinValueValidator(1)])
     next_refresh_at = models.DateTimeField(_("next refresh at"), null=True, blank=True, db_index=True)
     last_attempt_at = models.DateTimeField(_("last attempt at"), null=True, blank=True)
+    refresh_token = models.CharField(max_length=32, blank=True, editable=False)
+    refresh_lease_until = models.DateTimeField(null=True, blank=True, editable=False)
     last_success_at = models.DateTimeField(_("last success at"), null=True, blank=True)
     consecutive_failures = models.PositiveIntegerField(_("consecutive failures"), default=0)
     status = models.CharField(

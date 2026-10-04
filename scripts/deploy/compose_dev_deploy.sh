@@ -235,6 +235,8 @@ fi
 printf 'Order automation and customer activity scheduler heartbeats verified.\n'
 docker exec "$current" python manage.py collect_customer_activity --status
 docker exec "$current" python manage.py run_customer_outreach --status
+# Repair existing customer Cup bindings, read current PasarGuard links, and verify client serialization.
+docker exec "$current" python manage.py sync_pasarguard_subscriptions --refresh --public-base-url https://botsell.panelwpvideo.ir
 # Reviewed initial rollout on this single-store deployment; later owner choices are preserved.
 docker exec "$current" python manage.py run_customer_outreach --activate-initial --only-active-store
 docker exec "$current" python manage.py run_customer_outreach

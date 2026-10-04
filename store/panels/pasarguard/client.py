@@ -186,7 +186,7 @@ class PasarGuardClient:
         return True
 
     def _subscription_get(self, url, *, accept="application/json"):
-        headers = {**self._headers(), "Accept": accept}
+        headers = {**self._headers(), "Accept": accept, "Cache-Control": "no-cache", "Pragma": "no-cache"}
         try:
             return self.session.get(url, headers=headers, timeout=self.timeout)
         except requests.RequestException as exc:

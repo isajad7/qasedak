@@ -5,16 +5,18 @@ import binascii
 import hashlib
 import json
 import re
+import secrets
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import timedelta
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from django.db import transaction
-from django.db.models import Max
+from django.db.models import Max, Q
 from django.utils import timezone
 
-from .models import ConfigLink, CupItem, ExternalSubscriptionFeed, Panel, PlanDeliverySource
+from .models import ConfigLink, CupItem, ExternalSubscriptionFeed, Panel, PlanDeliverySource, SubscriptionCup
+from .db_locking import select_for_update_self
 from .panels.errors import PanelIntegrationError
 from .subscription_cups import apply_config_link_parse, create_config_link_from_raw
 
@@ -532,10 +534,15 @@ def _summary_from_filter(feed, filter_result, *, ok, status, dry_run=False, kept
     )
 
 
-def _mark_feed_failure(feed, *, code, message="", filter_result=None, now=None):
+def _mark_feed_failure(feed, *, code, message="", filter_result=None, now=None, refresh_token=None):
     now = now or timezone.now()
+    originally_disabled = not feed.active or feed.status == "disabled"
     with transaction.atomic():
-        feed = ExternalSubscriptionFeed.objects.select_for_update().select_related("cup").get(pk=feed.pk)
+        feed = select_for_update_self(ExternalSubscriptionFeed.objects.select_related("cup")).get(pk=feed.pk)
+        if refresh_token and (feed.refresh_token != refresh_token or not feed.refresh_lease_until or feed.refresh_lease_until <= now):
+            return _summary_from_filter(feed, filter_result, ok=False, status=feed.status, skipped=True, kept_last_good=True, error_code="refresh_superseded")
+        if not feed.cup.is_accessible or (not originally_disabled and (not feed.active or feed.status == "disabled")):
+            return _summary_from_filter(feed, filter_result, ok=False, status=feed.status, skipped=True, kept_last_good=True, error_code="external_feed_disabled")
         feed.last_attempt_at = now
         feed.consecutive_failures += 1
         feed.status = ExternalSubscriptionFeed.Status.ERROR if feed.consecutive_failures >= FEED_ERROR_THRESHOLD else ExternalSubscriptionFeed.Status.DEGRADED
@@ -603,10 +610,18 @@ def _link_by_raw(existing_items):
     return by_raw
 
 
-def _reconcile_success(feed, filter_result, *, now=None):
+def _reconcile_success(feed, filter_result, *, now=None, refresh_token=None, allow_disabled=False):
     now = now or timezone.now()
+    original = feed
     with transaction.atomic():
-        feed = ExternalSubscriptionFeed.objects.select_for_update().select_related("cup").get(pk=feed.pk)
+        SubscriptionCup.objects.select_for_update().get(pk=feed.cup_id)
+        feed = select_for_update_self(ExternalSubscriptionFeed.objects.select_related("cup")).get(pk=feed.pk)
+        if refresh_token and (feed.refresh_token != refresh_token or not feed.refresh_lease_until or feed.refresh_lease_until <= now):
+            return _summary_from_filter(feed, filter_result, ok=False, status=feed.status, skipped=True, kept_last_good=True, error_code="refresh_superseded")
+        if any(getattr(feed, name) != getattr(original, name) for name in ("cup_id", "panel_id", "vpn_client_id", "protected_subscription_url", "resolved_filter_policy")):
+            return _summary_from_filter(feed, filter_result, ok=False, status=feed.status, skipped=True, kept_last_good=True, error_code="refresh_source_changed")
+        if not feed.cup.is_accessible or ((not feed.active or feed.status == "disabled") and not allow_disabled):
+            return _summary_from_filter(feed, filter_result, ok=False, status=feed.status, skipped=True, kept_last_good=True, error_code="external_feed_disabled")
         existing_items = list(
             CupItem.objects.select_for_update()
             .select_related("config_link")
@@ -740,7 +755,32 @@ def _should_block_massive_drop(feed, filter_result, *, force=False):
     return lost_count > previous_count * DROP_PROTECTION_RATIO
 
 
-def refresh_external_subscription_feed(feed_id, *, force=False, dry_run=False, candidate_raw_links=None, adapter_factory=None):
+def refresh_external_subscription_feed(feed_id, *, force=False, dry_run=False, candidate_raw_links=None, adapter_factory=None, min_interval_seconds=0):
+    feed_pk = getattr(feed_id, "pk", feed_id)
+    token = None
+    if not dry_run:
+        now = timezone.now()
+        # Claim under a short row lock, commit, then perform HTTP. This works across workers/containers.
+        with transaction.atomic():
+            feed = select_for_update_self(ExternalSubscriptionFeed.objects.select_related("cup")).get(pk=feed_pk)
+            unavailable = (not feed.cup.is_accessible or (not force and (not feed.active or feed.status == "disabled"))
+                or (feed.refresh_lease_until and feed.refresh_lease_until > now)
+                or (min_interval_seconds and feed.last_attempt_at and feed.last_attempt_at > now - timedelta(seconds=min_interval_seconds)))
+            if unavailable:
+                return ExternalSubscriptionRefreshSummary(feed_id=feed.pk, ok=False, status=feed.status, skipped=True,
+                    kept_last_good=True, current_item_count=source_owned_cup_item_count(feed), error_code="refresh_not_available")
+            token = secrets.token_hex(16)
+            feed.refresh_token, feed.refresh_lease_until, feed.last_attempt_at = token, now + timedelta(seconds=90), now
+            feed.save(update_fields=["refresh_token", "refresh_lease_until", "last_attempt_at"])
+    try:
+        return _refresh_claimed_feed(feed_pk, force=force, dry_run=dry_run, candidate_raw_links=candidate_raw_links,
+            adapter_factory=adapter_factory, refresh_token=token)
+    finally:
+        if token:
+            ExternalSubscriptionFeed.objects.filter(pk=feed_pk, refresh_token=token).update(refresh_token="", refresh_lease_until=None)
+
+
+def _refresh_claimed_feed(feed_id, *, force=False, dry_run=False, candidate_raw_links=None, adapter_factory=None, refresh_token=None):
     feed = (
         ExternalSubscriptionFeed.objects.select_related("cup", "panel", "vpn_client", "delivery_source")
         .get(pk=getattr(feed_id, "pk", feed_id))
@@ -773,7 +813,7 @@ def refresh_external_subscription_feed(feed_id, *, force=False, dry_run=False, c
                 error_code=exc.code,
                 message=exc.safe_message,
             )
-        return _mark_feed_failure(feed, code=exc.code, message=exc.safe_message)
+        return _mark_feed_failure(feed, code=exc.code, message=exc.safe_message, refresh_token=refresh_token)
 
     filter_result = filter_native_configs(raw_links, feed.resolved_filter_policy)
     failure_code = ""
@@ -798,15 +838,18 @@ def refresh_external_subscription_feed(feed_id, *, force=False, dry_run=False, c
             code=failure_code,
             message=failure_code,
             filter_result=filter_result,
+            refresh_token=refresh_token,
         )
-    return _reconcile_success(feed, filter_result)
+    return _reconcile_success(feed, filter_result, refresh_token=refresh_token,
+                              allow_disabled=force and (not feed.active or feed.status == "disabled"))
 
 
 def refresh_due_external_subscription_feeds(*, force=False, limit=None, dry_run=False, adapter_factory=None, now=None):
     now = now or timezone.now()
-    queryset = ExternalSubscriptionFeed.objects.filter(active=True).exclude(status=ExternalSubscriptionFeed.Status.DISABLED)
+    queryset = ExternalSubscriptionFeed.objects.filter(active=True, cup__status="active").exclude(status=ExternalSubscriptionFeed.Status.DISABLED)
+    queryset = queryset.filter(Q(cup__expires_at__isnull=True) | Q(cup__expires_at__gt=now))
     if not force:
-        queryset = queryset.filter(next_refresh_at__lte=now)
+        queryset = queryset.filter(Q(next_refresh_at__isnull=True) | Q(next_refresh_at__lte=now))
     queryset = queryset.select_related("cup", "panel", "vpn_client", "delivery_source").order_by("next_refresh_at", "pk")
     if limit:
         queryset = queryset[: max(int(limit), 0)]

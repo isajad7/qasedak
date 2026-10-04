@@ -253,6 +253,8 @@ def subscription_cup(request, token):
     if not cup.is_accessible:
         return _subscription_plain_response("Subscription is not active.\n", status=403)
 
+    from .subscription_sync import refresh_subscription_cup_on_read
+    refresh_subscription_cup_on_read(cup)
     output_format = _normalized_subscription_format(request)
     if output_format == "json":
         return _no_store(JsonResponse(render_subscription_cup_json(cup)))
