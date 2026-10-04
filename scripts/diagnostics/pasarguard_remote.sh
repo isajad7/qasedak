@@ -35,7 +35,7 @@ from store.panels.pasarguard.adapter import PasarGuardPanelAdapter
 from store.panels.pasarguard.schemas import normalize_pasarguard_username, pasarguard_note_marker
 from store.panels.xui.adapter import XUIProvisioningRequest
 for order in Order.objects.filter(pk__in=[1135,1136]).select_related('plan').order_by('pk'):
-    sources=list(PlanDeliverySource.objects.filter(plan=order.plan,is_active=True).select_related('panel','inbound__panel').order_by('pk'))
+    sources=list(PlanDeliverySource.objects.filter(delivery_config__plan=order.plan,active=True).select_related('panel','inbound__panel').order_by('pk'))
     sources=[s for s in sources if s.inbound_id and (s.panel or s.inbound.panel).family=='pasarguard']
     print(json.dumps({'order_id':order.pk,'provisioning_status':order.provisioning_status,'source_count':len(sources)}),flush=True)
     if not sources: continue
