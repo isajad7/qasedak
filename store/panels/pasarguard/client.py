@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ssl
 from urllib.parse import urljoin
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from ..errors import sanitize_error_value
 from .errors import (
@@ -19,6 +21,25 @@ def _content_type(response):
     return str(getattr(response, "headers", {}).get("content-type", "")).split(";", 1)[0]
 
 
+class PasarGuardHTTPSAdapter(HTTPAdapter):
+    """Use verified TLS 1.2 on the production path that stalls with TLS 1.3."""
+
+    @staticmethod
+    def _tls_context():
+        context = ssl.create_default_context(cafile=requests.certs.where())
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.maximum_version = ssl.TLSVersion.TLSv1_2
+        return context
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        pool_kwargs["ssl_context"] = self._tls_context()
+        return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        proxy_kwargs["ssl_context"] = self._tls_context()
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+
 class PasarGuardClient:
     def __init__(self, panel, *, session=None, timeout=15):
         self.panel = panel
@@ -26,6 +47,8 @@ class PasarGuardClient:
         self.api_key = str(getattr(panel, "password", "") or "").strip()
         self.timeout = timeout
         self.session = session or requests.Session()
+        if session is None:
+            self.session.mount("https://", PasarGuardHTTPSAdapter())
 
     def _url(self, path):
         if not self.base_url:

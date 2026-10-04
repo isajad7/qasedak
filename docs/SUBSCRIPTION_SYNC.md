@@ -29,6 +29,15 @@ than permanently ignored. No HTTP occurs while transaction row locks are held.
 
 ## Operations
 
+PasarGuard's HTTPS adapter uses TLS 1.2 with certificate and hostname validation.
+On 2026-10-04 the production server and its app container completed TLS 1.3
+handshakes but received no HTTP response; the same unauthenticated endpoint
+returned HTTP 401 in about 0.5 seconds with verified TLS 1.2 on both surfaces.
+The external runner responded normally. This is a transport compatibility fix
+for API and native subscription reads; it does not retry remote writes or
+disable certificate checks. Real local HTTPS regression tests cover both the
+negotiated version and rejection of an untrusted certificate.
+
 ```
 python manage.py sync_pasarguard_subscriptions
 python manage.py sync_pasarguard_subscriptions --refresh
