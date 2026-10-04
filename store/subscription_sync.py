@@ -132,7 +132,37 @@ def refresh_subscription_cup_on_read(cup):
     return results
 
 
-def repair_and_refresh_pasarguard_subscriptions(*, refresh=False, limit=None, public_base_url=None):
+def _bulk_adapter(panel, network_errors):
+    from .panels import get_safe_panel_adapter
+    adapter = get_safe_panel_adapter(panel)
+    adapter.client.timeout = (2, 4)
+    original_fetch = adapter.client.fetch_native_links
+
+    def fetch(url):
+        try:
+            return original_fetch(url)
+        except Exception as exc:
+            # Inspect types/errno only: exceptions can contain private upstream URLs.
+            seen, pending = set(), [exc]
+            while pending:
+                current = pending.pop()
+                if id(current) in seen:
+                    continue
+                seen.add(id(current))
+                name = type(current).__name__
+                if name in {"ConnectionError", "ConnectTimeout", "ReadTimeout", "SSLError", "NameResolutionError", "NewConnectionError", "ConnectTimeoutError", "ReadTimeoutError", "gaierror"}:
+                    network_errors[name] += 1
+                errno = getattr(current, "errno", None)
+                if isinstance(errno, int):
+                    network_errors[f"os_errno_{errno}"] += 1
+                pending.extend(value for value in (getattr(current, "__cause__", None), getattr(current, "reason", None)) if isinstance(value, BaseException))
+            raise
+
+    adapter.client.fetch_native_links = fetch
+    return adapter
+
+
+def repair_and_refresh_pasarguard_subscriptions(*, refresh=False, limit=None, public_base_url=None, progress=None):
     now = timezone.now()
     cups = SubscriptionCup.objects.filter(status="active").filter(Q(expires_at__isnull=True) | Q(expires_at__gt=now)).order_by("pk")
     if limit:
@@ -148,10 +178,13 @@ def repair_and_refresh_pasarguard_subscriptions(*, refresh=False, limit=None, pu
               "refreshed": 0, "failed": 0, "skipped_refresh": 0, "error_codes": {}, "verified_cups": 0}
     if not refresh:
         return result
+    if progress:
+        progress({"phase": "bindings", **result})
     errors, successful_cups = Counter(), set()
+    network_errors = Counter()
     feeds = ExternalSubscriptionFeed.objects.filter(provider="pasarguard", active=True, cup_id__in=cups.values("pk")).exclude(status="disabled")
-    for feed in feeds.order_by("pk"):
-        summary = refresh_external_subscription_feed(feed.pk)
+    for index, feed in enumerate(feeds.order_by("pk"), start=1):
+        summary = refresh_external_subscription_feed(feed.pk, adapter_factory=lambda panel: _bulk_adapter(panel, network_errors))
         if summary.ok:
             result["refreshed"] += 1
             successful_cups.add(feed.cup_id)
@@ -161,6 +194,8 @@ def repair_and_refresh_pasarguard_subscriptions(*, refresh=False, limit=None, pu
             result["failed"] += 1
         if summary.error_code:
             errors[summary.error_code] += 1
+        if progress and index % 10 == 0:
+            progress({"phase": "refresh", "feeds_checked": index, "refreshed": result["refreshed"], "failed": result["failed"], "error_codes": dict(errors), "network_errors": dict(network_errors)})
     from .subscription_cups import active_cup_links, render_subscription_cup_base64
     for cup in SubscriptionCup.objects.filter(pk__in=successful_cups):
         decoded = base64.b64decode(render_subscription_cup_base64(cup)).decode("utf-8").splitlines()
@@ -168,6 +203,7 @@ def repair_and_refresh_pasarguard_subscriptions(*, refresh=False, limit=None, pu
             raise RuntimeError("Cup client serialization differs from current active items.")
         result["verified_cups"] += 1
     result["error_codes"] = dict(errors)
+    result["network_errors"] = dict(network_errors)
     if public_base_url:
         import requests
         from .subscription_cups import build_subscription_cup_client_path

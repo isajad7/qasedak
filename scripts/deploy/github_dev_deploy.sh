@@ -24,7 +24,8 @@ printf '%s\n' "$DEV_SSH_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
 chmod 600 "$ssh_dir/key" "$ssh_dir/known_hosts"
 
 ssh_opts=(-i "$ssh_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes
-          -o UserKnownHostsFile="$ssh_dir/known_hosts" -o ConnectTimeout=15 -p "$port")
+          -o UserKnownHostsFile="$ssh_dir/known_hosts" -o ConnectTimeout=15
+          -o ServerAliveInterval=20 -o ServerAliveCountMax=6 -p "$port")
 target="$DEV_SSH_USER@$DEV_SSH_HOST"
 archive="$RUNNER_TEMP/qasedak-$GITHUB_SHA.tar.gz"
 stage=''

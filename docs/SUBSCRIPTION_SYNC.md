@@ -43,6 +43,10 @@ to five real HTTPS Cup URLs as v2rayNG; mismatch or unreachable public output fa
 the command without printing tokens or config links. The reviewed server deploy
 runs repair/refresh/public verification after app health. A backup already precedes
 deployment. Additive migration 0069 supplies the lease fields.
+Bulk reads use 2-second connect / 4-second read timeouts and print safe progress
+counts. Network diagnostics include exception class names and numeric errno only.
+Deploy SSH sends keepalives, and retrying an already healthy revision repeats the
+idempotent repair/verification so an interrupted repair is not silently skipped.
 
 ## Code map
 

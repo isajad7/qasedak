@@ -222,6 +222,7 @@ class SubscriptionSyncTests(TestCase):
             self.assertIn('"public_verified": 1', output.getvalue())
             self.assertIn(cup.token, get.call_args.args[0])
             self.assertNotIn(cup.token, output.getvalue())
+
         bad = Mock(status_code=200, content=base64.b64encode(b"vless://old-list\n"))
         with patch("store.external_subscription_sources.PasarGuardSubscriptionFetcher.fetch_native_links", return_value=latest), patch("requests.get", return_value=bad):
             output = StringIO()
@@ -229,3 +230,19 @@ class SubscriptionSyncTests(TestCase):
                 call_command("sync_pasarguard_subscriptions", refresh=True, public_base_url="https://vpn.example.com", stdout=output)
             self.assertIn("list_mismatch", output.getvalue())
             self.assertNotIn(cup.token, output.getvalue())
+
+    def test_bulk_timeout_reports_safe_network_counts_and_preserves_links(self):
+        import requests
+        cup, _ = self.static_cup()
+        previous = active_cup_links(cup)
+        adapter = Mock()
+        adapter.client.fetch_native_links.side_effect = requests.ReadTimeout("https://private.example/s/private-old-token")
+        output = StringIO()
+        with patch("store.panels.get_safe_panel_adapter", return_value=adapter):
+            call_command("sync_pasarguard_subscriptions", refresh=True, stdout=output)
+        self.assertEqual(adapter.client.timeout, (2, 4))
+        self.assertIn('"ReadTimeout": 1', output.getvalue())
+        self.assertIn('"failed": 1', output.getvalue())
+        self.assertNotIn("private.example", output.getvalue())
+        self.assertNotIn("private-old-token", output.getvalue())
+        self.assertEqual(active_cup_links(cup), previous)
