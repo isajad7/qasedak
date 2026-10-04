@@ -26,8 +26,9 @@ exit 0
 fi
 
 
+
 docker exec -i "$app" python manage.py shell --no-imports <<'PY'
-import json, ssl, time, socket
+import json, ssl, time
 from urllib.parse import urlsplit
 import requests
 from requests.adapters import HTTPAdapter
@@ -53,47 +54,30 @@ class PasarGuardHTTPSAdapter(HTTPAdapter):
 
 
 
-def summarize_error(exc):
-    names=set()
-    stack=[exc]
-    seen=set()
-    while stack:
-        e=stack.pop()
-        if id(e) in seen:continue
-        seen.add(id(e));names.add(type(e).__name__)
-        stack.extend(v for v in (getattr(e,'__cause__',None),getattr(e,'__context__',None),getattr(e,'reason',None),*getattr(e,'args',())) if isinstance(v,BaseException))
-    return {'error_types':sorted(names),'error_code':getattr(exc,'error_code',''),'http_status':(getattr(exc,'safe_context',{}) or {}).get('status_code')}
 for p in Panel.objects.filter(family='pasarguard',is_active=True).order_by('pk'):
-    parts=urlsplit(p.url)
-    try:
-        with socket.create_connection((parts.hostname,parts.port or 443),timeout=3) as sock:
-            with ssl.create_default_context().wrap_socket(sock,server_hostname=parts.hostname) as tls:
-                print(json.dumps({'panel_id':p.pk,'default_negotiated_tls':tls.version()}),flush=True)
-    except Exception as exc:print(json.dumps(summarize_error(exc)),flush=True)
-    feed=ExternalSubscriptionFeed.objects.filter(panel=p,active=True,provider='pasarguard').exclude(status='disabled').first()
-    for mode in ['shared','connection_close','fresh']:
-        shared=requests.Session()
-        shared.trust_env=False
-        shared.mount('https://',PasarGuardHTTPSAdapter())
-        if mode=='connection_close':shared.headers['Connection']='close'
-        actions=['api','simple_groups','api_repeat']+(['subscription'] if feed else [])
-        for action in actions:
-            session=shared
-            if mode=='fresh':
-                session=requests.Session();session.trust_env=False;session.mount('https://',PasarGuardHTTPSAdapter())
-            c=PasarGuardClient(p,session=session,timeout=(3,5))
-            start=time.monotonic()
-            result={'panel_id':p.pk,'mode':mode,'action':action}
+    with requests.Session() as session:
+        session.trust_env=False
+        session.mount('https://',PasarGuardHTTPSAdapter())
+        session.headers['Connection']='close'
+        c=PasarGuardClient(p,session=session,timeout=(3,10))
+        for action in ['api','groups']:
+            result={'panel_id':p.pk,'action':action}
             try:
-                if action in ['api','api_repeat']:payload=c.get_system()
-                elif action=='simple_groups':payload=c.list_groups_simple()
-                else:payload=c.fetch_native_links(feed.protected_subscription_url)
+                payload=c.get_system() if action=='api' else c.list_groups()
                 result['ok']=True
-                if action not in ['api','api_repeat']:result['count']=len(payload)
-            except Exception as exc:
-                result.update(ok=False,**summarize_error(exc))
-            result['elapsed_ms']=round((time.monotonic()-start)*1000)
+                if action=='groups':result['count']=len(payload)
+            except Exception as exc:result.update(ok=False,error_type=type(exc).__name__,code=getattr(exc,'error_code',''),http_status=(getattr(exc,'safe_context',{}) or {}).get('status_code'))
             print(json.dumps(result),flush=True)
-            if mode=='fresh':session.close()
-        shared.close()
+        for feed in ExternalSubscriptionFeed.objects.filter(panel=p,active=True,provider='pasarguard',vpn_client__isnull=False).exclude(status='disabled').select_related('vpn_client').order_by('pk')[:3]:
+            vc=feed.vpn_client
+            result={'panel_id':p.pk,'feed_id':feed.pk,'client_id':vc.pk}
+            try:
+                user=c.get_user(vc.xui_email or vc.username)
+                upstream=user.get('subscription_url') or ''
+                result.update(user_found=True,remote_url_matches_saved=upstream==feed.protected_subscription_url,url_present=bool(upstream))
+                if upstream:
+                    links=c.fetch_native_links(upstream)
+                    result.update(ok=True,native_configs=len(links))
+            except Exception as exc:result.update(ok=False,error_type=type(exc).__name__,code=getattr(exc,'error_code',''),http_status=(getattr(exc,'safe_context',{}) or {}).get('status_code'))
+            print(json.dumps(result),flush=True)
 PY
