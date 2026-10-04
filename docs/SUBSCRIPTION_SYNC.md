@@ -38,9 +38,14 @@ Reusing the TLS 1.2 connection also stalled subsequent requests, while
 0.5 seconds. PasarGuard sessions therefore close each response connection.
 The external runner responded normally. This is a transport compatibility fix
 for API and native subscription reads; it does not retry remote writes or
-disable certificate checks. Real local HTTPS regression tests cover both the
-negotiated version, separate connections for repeated requests, and rejection
-of an untrusted certificate.
+disable certificate checks. The create-user POST still timed out when urllib3
+sent its headers and JSON body separately. Sending the same paid order's small
+JSON request together returned HTTP 201 in 0.42 seconds and its native
+subscription returned HTTP 200. The adapter therefore combines headers and
+bodies for non-streamed POST/PUT/PATCH JSON writes up to 64 KiB, without adding
+retries or changing other panel transports. Real local HTTPS regression tests
+cover the negotiated version, separate connections, untrusted certificate
+rejection, and single-write POST body preservation.
 
 ```
 python manage.py sync_pasarguard_subscriptions
