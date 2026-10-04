@@ -95,12 +95,19 @@ if order:
         panel=vc.inbound.panel
         result.update(client_id=vc.pk,panel_id=panel.pk,inbound_id=vc.inbound_id,store_matches=vc.store_id==order.store_id)
         try:
-            data=XUIService(panel).get_inbound_clients(vc.inbound,use_cache=False)
+            service=XUIService(panel)
+            data=service.get_inbound_clients(vc.inbound,use_cache=False)
             exact=[c for c in data if c.get('id')==str(vc.uuid)]
             email=[c for c in data if c.get('email')==(vc.xui_email or vc.username)]
             result.update(ok=True,remote_exact_uuid_matches=len(exact),remote_email_matches=len(email),remote_client_count=len(data))
             target=(exact or email or [None])[0]
             if target:result.update(remote_enabled=target.get('enable'),remote_expiry_ms=target.get('expiryTime'),remote_quota_bytes=target.get('totalGB'))
+            if not target:
+                found=service.find_client_by_identifier(vc.uuid)
+                result['found_on_other_inbound']=bool(found)
+                if found:
+                    result['found_remote_inbound_id']=found.get('inbound_id')
+                    result['found_matched_field']=found.get('matched_field')
         except Exception as exc:
             result.update(ok=False,error_type=type(exc).__name__,error_code=getattr(exc,'error_code',''),safe_error=sanitize_xui_operational_text(exc,panel=panel,max_length=300))
     print(json.dumps(result),flush=True)
