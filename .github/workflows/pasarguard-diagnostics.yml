@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/pasarguard-diagnostics.yml
       - scripts/diagnostics/pasarguard_remote.sh
+      - scripts/diagnostics/pasarguard_external.py
 permissions:
   contents: read
 jobs:
@@ -35,3 +36,8 @@ jobs:
             -o UserKnownHostsFile="$ssh_dir/known_hosts" -o ConnectTimeout=15 \
             -o ServerAliveInterval=20 -o ServerAliveCountMax=6 -p "${DEV_SSH_PORT:-22}" \
             "$DEV_SSH_USER@$DEV_SSH_HOST" 'bash -s' < scripts/diagnostics/pasarguard_remote.sh
+          ssh -i "$ssh_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$ssh_dir/known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=20 -o ServerAliveCountMax=6 -p "${DEV_SSH_PORT:-22}" \
+            "$DEV_SSH_USER@$DEV_SSH_HOST" 'bash -s -- --origin' < scripts/diagnostics/pasarguard_remote.sh \
+            | python scripts/diagnostics/pasarguard_external.py

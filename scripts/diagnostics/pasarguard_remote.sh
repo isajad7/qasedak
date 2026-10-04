@@ -5,9 +5,28 @@ source /etc/qasedak/dev-deploy.conf
 app="$(docker ps --filter "label=com.docker.compose.project=$QASEDAK_DEV_PROJECT" --filter "label=com.docker.compose.service=$QASEDAK_DEV_SERVICE" --format '{{.ID}}')"
 [[ "$app" =~ ^[0-9a-f]{12,64}$ ]]
 [[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$app")" == "$QASEDAK_DEV_SERVICE" ]]
+if [[ "${1:-}" == "--origin" ]]; then
+docker exec -i "$app" python manage.py shell --no-imports <<'ORIGIN'
+import json
+from urllib.parse import urlsplit
+from store.models import Panel
+for panel in Panel.objects.filter(family='pasarguard', is_active=True).order_by('pk'):
+    try:
+        parts = urlsplit(panel.url)
+        host = parts.hostname
+        if parts.scheme not in {'http', 'https'} or not host: continue
+        netloc = f'[{host}]' if ':' in host else host
+        if parts.port: netloc += f':{parts.port}'
+        origin = parts._replace(netloc=netloc, query='', fragment='').geturl()
+        print(json.dumps({'panel_id': panel.pk, 'origin': origin}), flush=True)
+    except ValueError:
+        continue
+ORIGIN
+exit 0
+fi
 docker exec -i "$app" python manage.py shell <<'PY'
 import copy, json, socket, ssl, time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urljoin
 import requests
 from store.models import Panel, ExternalSubscriptionFeed
 from store.panels.pasarguard.client import PasarGuardClient
@@ -57,6 +76,17 @@ for panel in Panel.objects.filter(family='pasarguard', is_active=True).order_by(
     urls = {'api': panel.url}
     if feed: urls['subscription'] = feed.protected_subscription_url
     print(json.dumps({'panel_id': panel.pk, 'configured_proxy': bool(panel.proxy_url), 'environment_proxy': bool(requests.utils.get_environ_proxies(panel.url)), 'source_host_matches_panel': bool(feed and urlsplit(feed.protected_subscription_url).hostname == urlsplit(panel.url).hostname), 'transport': {name: transport(url) for name, url in urls.items()}}), flush=True)
+    started = time.monotonic()
+    unauthenticated = {'panel_id': panel.pk, 'location': 'production_server', 'action': 'unauthenticated_api'}
+    try:
+        with requests.Session() as probe:
+            probe.trust_env = False
+            with probe.get(urljoin(panel.url.rstrip('/') + '/', 'api/system'), headers={'User-Agent': 'qasedak-connectivity-check'}, timeout=(3, 12), stream=True) as response:
+                unauthenticated['http_status'] = response.status_code
+    except Exception as exc:
+        unauthenticated['error'] = error(exc)
+    unauthenticated['elapsed_ms'] = round((time.monotonic() - started) * 1000)
+    print(json.dumps(unauthenticated), flush=True)
     modes = ['direct'] + (['environment'] if requests.utils.get_environ_proxies(panel.url) else []) + (['configured_proxy'] if panel.proxy_url else [])
     if urlsplit(panel.url).scheme == 'https' and urlsplit(panel.url).port == 8443:
         modes += ['https443']
