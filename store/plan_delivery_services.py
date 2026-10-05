@@ -436,6 +436,19 @@ def get_or_create_delivery_config(plan, *, delivery_mode=None):
 
 
 def save_delivery_config_sources(plan, *, delivery_mode, failure_policy, sources):
+    from .external_subscription_sources import (
+        POLICY_METADATA_KEY,
+        normalize_external_subscription_filter_policy,
+        update_existing_feed_intervals_for_source,
+    )
+
+    def interval_only_changed(old_policy, new_policy):
+        old_without_interval = dict(old_policy or {})
+        new_without_interval = dict(new_policy or {})
+        old_interval = old_without_interval.pop("refresh_interval_hours", None)
+        new_interval = new_without_interval.pop("refresh_interval_hours", None)
+        return old_without_interval == new_without_interval and old_interval != new_interval
+
     config = get_or_create_delivery_config(plan, delivery_mode=delivery_mode)
     config.delivery_mode = delivery_mode
     config.failure_policy = failure_policy or PlanDeliveryConfig.FailurePolicy.STRICT
@@ -444,8 +457,14 @@ def save_delivery_config_sources(plan, *, delivery_mode, failure_policy, sources
     config.save()
 
     existing = {source.pk: source for source in config.sources.all()}
+    existing_policies = {
+        source.pk: normalize_external_subscription_filter_policy((source.metadata or {}).get(POLICY_METADATA_KEY) or {})
+        for source in existing.values()
+        if (source.metadata or {}).get(POLICY_METADATA_KEY)
+    }
     kept_ids = []
     for index, source_data in enumerate(sources, start=1):
+        source_data = dict(source_data)
         source_id = source_data.pop("id", None)
         source = existing.get(source_id) if source_id else None
         if not source:
@@ -458,7 +477,12 @@ def save_delivery_config_sources(plan, *, delivery_mode, failure_policy, sources
         source.full_clean()
         source.save()
         kept_ids.append(source.pk)
+        new_policy_data = (source.metadata or {}).get(POLICY_METADATA_KEY)
+        old_policy = existing_policies.get(source.pk)
+        if old_policy and new_policy_data:
+            new_policy = normalize_external_subscription_filter_policy(new_policy_data)
+            if interval_only_changed(old_policy, new_policy):
+                update_existing_feed_intervals_for_source(source, new_policy["refresh_interval_hours"])
 
     config.sources.exclude(pk__in=kept_ids).update(active=False)
     return config
-
