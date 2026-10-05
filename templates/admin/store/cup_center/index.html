@@ -11,11 +11,18 @@
             </p>
         </div>
         <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row lg:tw-shrink-0">
+            {% if perms.store.change_subscriptioncup %}
+                <form method="post" action="{{ refresh_active_sources_url }}" class="tw-m-0">
+                    {% csrf_token %}
+                    <button type="submit" class="tw-button tw-button-secondary">به‌روزرسانی همهٔ کاپ‌های فعال</button>
+                </form>
+            {% endif %}
             {% if perms.store.add_subscriptioncup %}<a href="{{ quick_build_url }}" class="tw-button tw-button-primary">ساخت سریع لینک اشتراک از اینباندها</a>{% endif %}
             {% if perms.store.add_subscriptioncup %}<a href="{{ new_cup_url }}" class="tw-button tw-button-primary">ساخت Cup دستی</a>{% endif %}
             <a href="{{ subscription_cup_admin_url }}" class="tw-button tw-button-secondary">مدل SubscriptionCup</a>
         </div>
     </div>
+    <p class="tw-mt-3 tw-mb-0 tw-text-xs tw-leading-6 tw-text-slate-500">محدوده دکمه گروهی: کاپ‌های فعال و منقضی‌نشده با منبع پویای فعال. منابع دستی و ثابت دست‌نخورده می‌مانند و نتیجه پس از اجرای پس‌زمینه در وضعیت منابع دیده می‌شود. زمان‌ها به وقت تهران هستند.</p>
 </section>
 
 <section class="tw-section">
@@ -58,6 +65,7 @@
                     <th>Order / User</th>
                     <th>Status</th>
                     <th>Items</th>
+                    <th>وضعیت منابع</th>
                     <th>Expires</th>
                     <th>Created</th>
                     <th>Subscription URL</th>
@@ -75,6 +83,7 @@
                         </td>
                         <td>{% include "admin/store/panel_center/_badge.html" with tone=item.status_tone label=item.cup.get_status_display %}</td>
                         <td>{{ item.active_item_count }} فعال<small>{{ item.inactive_item_count }} غیرفعال</small></td>
+                        <td>{{ item.feed_summary }}</td>
                         <td>{{ item.cup.expires_at|date:"Y-m-d H:i"|default:"-" }}</td>
                         <td>{{ item.cup.created_at|date:"Y-m-d H:i" }}</td>
                         <td><code class="tw-safe-command">{{ item.subscription.masked_url }}</code></td>
@@ -89,14 +98,14 @@
                                 {% if perms.store.change_subscriptioncup %}
                                     <form method="post" action="{{ item.rebuild_url }}">
                                         {% csrf_token %}
-                                        <button type="submit" class="tw-mini-button">Rebuild</button>
+                                        <button type="submit" class="tw-mini-button">بازسازی محلی</button>
                                     </form>
                                 {% endif %}
                             </div>
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="9"><div class="tw-empty-state">هنوز Cup ساخته نشده است.</div></td></tr>
+                    <tr><td colspan="10"><div class="tw-empty-state">هنوز Cup ساخته نشده است.</div></td></tr>
                 {% endfor %}
             </tbody>
         </table>

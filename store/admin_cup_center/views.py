@@ -27,6 +27,7 @@ from store.admin_cup_center.services import (
     add_manual_links_to_cup,
     create_manual_cup,
     create_panel_config_into_cup,
+    cup_external_feed_rows,
     cup_item_rows,
     cup_list_items,
     cup_queryset,
@@ -36,10 +37,13 @@ from store.admin_cup_center.services import (
     quick_builder_inventory_pool_rows,
     quick_builder_panel_groups,
     quick_build_subscription_cup,
+    queue_active_external_source_refreshes,
     rebuild_cup_from_source,
     render_cup_preview,
     remove_cup_item,
     replace_cup_item_config_link,
+    refresh_cup_external_sources,
+    set_source_less_feed_refresh_interval,
     set_cup_item_active,
     set_cup_status,
     move_cup_item,
@@ -63,6 +67,7 @@ def _base_context(request, title, cup=None):
         "cup_center_url": reverse("admin_store_cup_center"),
         "new_cup_url": reverse("admin_store_cup_center_new"),
         "quick_build_url": reverse("admin_store_cup_center_quick_build"),
+        "refresh_active_sources_url": reverse("admin_store_cup_center_refresh_active_sources"),
         "subscription_cup_admin_url": reverse("admin:store_subscriptioncup_changelist"),
     }
     return context
@@ -366,8 +371,27 @@ def cup_center_detail(request, cup_id):
                 move_cup_item(cup, request.POST.get("item_id"), "up")
             elif action == "move_item_down":
                 move_cup_item(cup, request.POST.get("item_id"), "down")
+            elif action == "refresh_external_sources":
+                result = refresh_cup_external_sources(cup)
+                if not result.requested_count:
+                    messages.warning(request, "برای این Cup منبع پویای فعال و قابل تازه‌سازی پیدا نشد.")
+                else:
+                    messages.info(
+                        request,
+                        "به‌روزرسانی از منابع تمام شد: "
+                        f"موفق {result.ok_count}، ناموفق {result.failed_count}، ردشده {result.skipped_count}.",
+                    )
+            elif action == "update_feed_refresh_interval":
+                set_source_less_feed_refresh_interval(
+                    cup,
+                    request.POST.get("feed_id"),
+                    request.POST.get("refresh_interval_hours"),
+                )
+                messages.success(request, "فاصله به‌روزرسانی خودکار منبع ذخیره شد.")
             else:
                 messages.warning(request, "Action معتبر نبود.")
+        except CupCenterError as exc:
+            messages.error(request, str(exc) or "Action انجام نشد.")
         except Exception:
             messages.error(request, "Action انجام نشد.")
         return redirect("admin_store_cup_center_detail", cup.pk)
@@ -376,6 +400,7 @@ def cup_center_detail(request, cup_id):
         **_base_context(request, f"Cup #{cup.pk}", cup=cup),
         "subscription": subscription_url_summary(cup, request=request),
         "item_rows": cup_item_rows(cup),
+        "feed_rows": cup_external_feed_rows(cup),
         "active_item_count": cup.items.filter(is_active=True, config_link__is_active=True).count(),
         "inactive_item_count": cup.items.filter(is_active=False).count() + cup.items.filter(is_active=True, config_link__is_active=False).count(),
         "preview_url": reverse("admin_store_cup_center_preview", args=[cup.pk]),
@@ -387,6 +412,22 @@ def cup_center_detail(request, cup_id):
         "change_url": reverse("admin:store_subscriptioncup_change", args=[cup.pk]),
     }
     return TemplateResponse(request, "admin/store/cup_center/detail.html", context)
+
+
+@require_POST
+def cup_center_refresh_active_sources(request):
+    _require_perm(request, "store.change_subscriptioncup")
+    result = queue_active_external_source_refreshes(actor=request.user)
+    if result.queued_feed_count:
+        messages.info(
+            request,
+            "درخواست به‌روزرسانی برای "
+            f"{result.queued_feed_count} منبع پویا از {result.eligible_cup_count} Cup فعال ثبت شد؛ "
+            "نتیجه بعد از اجرای worker در وضعیت منابع دیده می‌شود.",
+        )
+    else:
+        messages.warning(request, "هیچ منبع پویای فعال و غیرمنقضی برای صف به‌روزرسانی پیدا نشد.")
+    return redirect("admin_store_cup_center")
 
 
 def cup_center_item_link_secret(request, cup_id, item_id):
@@ -577,7 +618,7 @@ def cup_center_rebuild(request, cup_id):
     except CupCenterError:
         rebuilt = None
     if rebuilt:
-        messages.success(request, "Cup از source خود rebuild شد.")
+        messages.success(request, "بازسازی محلی Cup از داده‌های ذخیره‌شده انجام شد.")
         return redirect("admin_store_cup_center_detail", rebuilt.pk)
-    messages.warning(request, "برای این Cup source خودکار قابل rebuild پیدا نشد.")
+    messages.warning(request, "برای این Cup منبع محلی قابل بازسازی پیدا نشد.")
     return redirect("admin_store_cup_center_detail", cup.pk)

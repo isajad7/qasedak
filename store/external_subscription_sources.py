@@ -501,6 +501,41 @@ def next_refresh_at_for_feed(feed, *, now=None, interval_hours=None):
     return now + timedelta(seconds=interval_seconds + jitter_seconds)
 
 
+def policy_with_refresh_interval(policy, refresh_interval_hours):
+    interval_hours = _as_positive_int(
+        refresh_interval_hours,
+        DEFAULT_REFRESH_INTERVAL_HOURS,
+        max_value=24 * 30,
+    )
+    updated = dict(policy or {})
+    updated["refresh_interval_hours"] = interval_hours
+    return updated, interval_hours
+
+
+def update_external_feed_refresh_interval(feed_id, refresh_interval_hours, *, now=None):
+    now = now or timezone.now()
+    with transaction.atomic():
+        feed = select_for_update_self(ExternalSubscriptionFeed.objects.select_related("cup")).get(pk=getattr(feed_id, "pk", feed_id))
+        policy, interval_hours = policy_with_refresh_interval(feed.resolved_filter_policy, refresh_interval_hours)
+        feed.resolved_filter_policy = policy
+        feed.refresh_interval_hours = interval_hours
+        feed.next_refresh_at = next_refresh_at_for_feed(feed, now=now, interval_hours=interval_hours)
+        feed.save(update_fields=["resolved_filter_policy", "refresh_interval_hours", "next_refresh_at", "updated_at"])
+    return feed
+
+
+def update_existing_feed_intervals_for_source(source, refresh_interval_hours, *, now=None):
+    source_id = getattr(source, "pk", source)
+    if not source_id:
+        return 0
+    count = 0
+    queryset = ExternalSubscriptionFeed.objects.filter(delivery_source_id=source_id).order_by("pk")
+    for feed in queryset:
+        update_external_feed_refresh_interval(feed.pk, refresh_interval_hours, now=now)
+        count += 1
+    return count
+
+
 def source_owned_cup_item_count(feed):
     if not getattr(feed, "pk", None):
         return 0

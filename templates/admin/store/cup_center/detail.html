@@ -52,13 +52,72 @@
         </div>
         {% if perms.store.change_subscriptioncup %}
             <div class="tw-flex tw-flex-col tw-gap-2 sm:tw-flex-row tw-mt-2">
+                <form method="post" class="tw-m-0">{% csrf_token %}<button type="submit" name="action" value="refresh_external_sources" class="tw-button tw-button-primary">به‌روزرسانی از منابع</button></form>
                 <form method="post" class="tw-m-0">{% csrf_token %}<button type="submit" name="action" value="enable_cup" class="tw-button tw-button-secondary">فعال کردن Cup</button></form>
                 <form method="post" class="tw-m-0">{% csrf_token %}<button type="submit" name="action" value="disable_cup" class="tw-button tw-button-secondary">غیرفعال کردن Cup</button></form>
-                <form method="post" action="{{ rebuild_url }}" class="tw-m-0">{% csrf_token %}<button type="submit" class="tw-button tw-button-secondary">Rebuild</button></form>
+                <form method="post" action="{{ rebuild_url }}" class="tw-m-0">{% csrf_token %}<button type="submit" class="tw-button tw-button-secondary">بازسازی محلی</button></form>
             </div>
+            <p class="tw-mt-2 tw-mb-0 tw-text-xs tw-leading-6 tw-text-slate-500">به‌روزرسانی از منابع ساب حساب موجود پنل را دوباره می‌خواند. بازسازی محلی فقط آیتم‌های ذخیره‌شده داخل قاصدک را دوباره می‌چیند.</p>
         {% endif %}
     </div>
 </section>
+
+<section class="tw-section">
+    <div class="tw-table-wrap tw-admin-card">
+        <div class="tw-section-heading tw-mb-4"><h2>وضعیت منابع پویا</h2></div>
+        <p class="tw-mt-0 tw-text-sm tw-leading-7 tw-text-slate-600">فاصله‌ی خودکار برای اجرای دوره‌ای پس‌زمینه است؛ خواندن ساب توسط مشتری همچنان مسیر تازه‌سازی هنگام درخواست را دارد. زمان‌ها به وقت تهران هستند.</p>
+        <table class="tw-catalog-table">
+            <thead>
+                <tr>
+                    <th>منبع</th>
+                    <th>فاصله</th>
+                    <th>آخرین تلاش</th>
+                    <th>آخرین موفقیت</th>
+                    <th>موعد بعدی</th>
+                    <th>وضعیت</th>
+                    <th>لینک‌ها</th>
+                    <th>خطا / تنظیم</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in feed_rows %}
+                    <tr>
+                        <td>{{ row.label }}</td>
+                        <td>{{ row.interval_hours }} ساعت</td>
+                        <td>{{ row.last_attempt_at }}</td>
+                        <td>{{ row.last_success_at }}</td>
+                        <td>{{ row.next_refresh_at }}</td>
+                        <td>{% include "admin/store/panel_center/_badge.html" with tone=row.status_tone label=row.status_label %}</td>
+                        <td>{{ row.current_item_count }} فعلی<small>آخرین خروجی سالم: {{ row.last_good_config_count }} · دریافتی پنل: {{ row.last_seen_upstream_count }} · پس از فیلتر: {{ row.last_filtered_count }}</small></td>
+                        <td>
+                            {% if row.error_message %}<small>{{ row.error_message }}</small>{% else %}<small>-</small>{% endif %}
+                            {% if row.can_edit_interval and perms.store.change_subscriptioncup %}
+                                <form method="post" class="tw-flex tw-flex-col tw-gap-2 tw-mt-2">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action" value="update_feed_refresh_interval">
+                                    <input type="hidden" name="feed_id" value="{{ row.feed.pk }}">
+                                    <label class="tw-text-xs tw-font-bold tw-text-slate-600" for="feed-refresh-{{ row.feed.pk }}">فاصله به‌روزرسانی خودکار — ساعت</label>
+                                    <input id="feed-refresh-{{ row.feed.pk }}" type="number" name="refresh_interval_hours" value="{{ row.interval_hours }}" min="1" max="720" list="cup-feed-refresh-hour-options" class="cup-field">
+                                    <button type="submit" class="tw-mini-button">ذخیره فاصله</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="8"><div class="tw-empty-state">برای این Cup منبع پویای ثبت‌شده وجود ندارد.</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<datalist id="cup-feed-refresh-hour-options">
+    <option value="1"></option>
+    <option value="3"></option>
+    <option value="6"></option>
+    <option value="12"></option>
+    <option value="24"></option>
+</datalist>
 
 <section class="tw-section">
     <div class="tw-admin-card">

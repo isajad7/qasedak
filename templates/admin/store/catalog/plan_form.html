@@ -240,8 +240,9 @@
 	                                        <input id="id_source_{{ row.index }}_dynamic_max_configs" type="number" name="source-{{ row.index }}-dynamic_max_configs" value="{% if row.dynamic_policy.max_configs %}{{ row.dynamic_policy.max_configs }}{% endif %}" min="1" class="plan-delivery-field">
 	                                    </div>
 	                                    <div class="qadmin-form-field">
-	                                        <label for="id_source_{{ row.index }}_dynamic_refresh_interval_hours">Refresh hours</label>
-	                                        <input id="id_source_{{ row.index }}_dynamic_refresh_interval_hours" type="number" name="source-{{ row.index }}-dynamic_refresh_interval_hours" value="{{ row.dynamic_policy.refresh_interval_hours }}" min="1" class="plan-delivery-field">
+	                                        <label for="id_source_{{ row.index }}_dynamic_refresh_interval_hours">فاصله به‌روزرسانی خودکار — ساعت</label>
+	                                        <input id="id_source_{{ row.index }}_dynamic_refresh_interval_hours" type="number" name="source-{{ row.index }}-dynamic_refresh_interval_hours" value="{{ row.dynamic_policy.refresh_interval_hours }}" min="1" max="720" list="dynamic-refresh-hour-options" class="plan-delivery-field">
+	                                            <small>برای اجرای دوره‌ای پس‌زمینه است؛ خواندن ساب مشتری همچنان هنگام درخواست تازه‌سازی می‌شود.</small>
 	                                    </div>
 	                                </div>
 	                                <div class="qadmin-inline-checks">
@@ -372,8 +373,9 @@
 	                        <input type="number" name="source-__prefix__-dynamic_max_configs" value="" min="1" class="plan-delivery-field">
 	                    </div>
 	                    <div class="qadmin-form-field">
-	                        <label>Refresh hours</label>
-	                        <input type="number" name="source-__prefix__-dynamic_refresh_interval_hours" value="1" min="1" class="plan-delivery-field">
+	                        <label>فاصله به‌روزرسانی خودکار — ساعت</label>
+	                        <input type="number" name="source-__prefix__-dynamic_refresh_interval_hours" value="1" min="1" max="720" list="dynamic-refresh-hour-options" class="plan-delivery-field">
+                            <small>برای اجرای دوره‌ای پس‌زمینه است؛ خواندن ساب مشتری همچنان هنگام درخواست تازه‌سازی می‌شود.</small>
 	                    </div>
 	                </div>
 	                <div class="qadmin-inline-checks">
@@ -384,6 +386,14 @@
 	        </div>
 	    </article>
 	</template>
+
+<datalist id="dynamic-refresh-hour-options">
+    <option value="1"></option>
+    <option value="3"></option>
+    <option value="6"></option>
+    <option value="12"></option>
+    <option value="24"></option>
+</datalist>
 
 <script>
   (function () {

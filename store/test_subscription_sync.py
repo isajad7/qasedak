@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from . import tests as fixtures
 from .external_subscription_sources import ExternalSubscriptionRefreshError, refresh_due_external_subscription_feeds, refresh_external_subscription_feed
-from .models import ConfigLink, CupItem, ExternalSubscriptionFeed, Order, SubscriptionCup
+from .models import ConfigLink, CupItem, ExternalSubscriptionFeed, Order, PlanDeliveryConfig, PlanDeliverySource, SubscriptionCup
 from .subscription_cups import active_cup_links, create_config_link_from_raw, rebuild_subscription_cup_for_vpn_client
 from .subscription_sync import ensure_pasarguard_feeds_for_cup
 
@@ -152,6 +152,78 @@ class SubscriptionSyncTests(TestCase):
         self.assertEqual((report["checked"], report["ok"]), (1, 1))
         self.assertEqual(active_cup_links(cup), [self.direct_link(971)])
 
+    def test_source_interval_change_updates_connected_feeds_and_survives_refresh(self):
+        from .plan_delivery_services import save_delivery_config_sources
+
+        feed, cup, source, _panel = self.create_dynamic_feed_with_links(
+            [self.direct_link(972)],
+            policy={"max_configs": 3, "refresh_interval_hours": 1},
+        )
+        feed.refresh_from_db()
+        original_policy = dict(feed.resolved_filter_policy)
+        new_policy = {**original_policy, "refresh_interval_hours": 6}
+
+        save_delivery_config_sources(
+            self.plan,
+            delivery_mode=PlanDeliveryConfig.DeliveryMode.SUBSCRIPTION,
+            failure_policy=source.delivery_config.failure_policy,
+            sources=[
+                {
+                    "id": source.pk,
+                    "source_type": source.source_type,
+                    "label": source.label,
+                    "quantity": source.quantity,
+                    "priority": source.priority,
+                    "required": source.required,
+                    "is_fallback": source.is_fallback,
+                    "metadata": {"dynamic_subscription_policy": new_policy},
+                    "panel": source.panel,
+                    "inbound": source.inbound,
+                    "inventory_pool": None,
+                }
+            ],
+        )
+
+        feed.refresh_from_db()
+        source.refresh_from_db()
+        policy_after_interval_change = dict(feed.resolved_filter_policy)
+        self.assertEqual(feed.refresh_interval_hours, 6)
+        self.assertEqual(policy_after_interval_change["refresh_interval_hours"], 6)
+        self.assertEqual(source.metadata["dynamic_subscription_policy"]["refresh_interval_hours"], 6)
+        self.assertEqual(
+            {key: value for key, value in policy_after_interval_change.items() if key != "refresh_interval_hours"},
+            {key: value for key, value in original_policy.items() if key != "refresh_interval_hours"},
+        )
+
+        with patch("store.external_subscription_sources.PasarGuardSubscriptionFetcher.fetch_native_links", return_value=[self.direct_link(973)]):
+            summary = refresh_external_subscription_feed(feed.pk, force=True)
+
+        self.assertTrue(summary.ok)
+        feed.refresh_from_db()
+        self.assertEqual(feed.refresh_interval_hours, 6)
+        self.assertEqual(feed.resolved_filter_policy["refresh_interval_hours"], 6)
+        self.assertGreaterEqual(feed.next_refresh_at - feed.last_success_at, timedelta(hours=6))
+        self.assertLessEqual(feed.next_refresh_at - feed.last_success_at, timedelta(hours=6, minutes=30))
+        self.assertEqual(active_cup_links(cup), [self.direct_link(973)])
+
+    def test_refresh_updates_panel_subscription_links_without_changing_token_or_account(self):
+        feed, cup, _source, _panel = self.create_dynamic_feed_with_links([self.direct_link(974)])
+        original_token = cup.token
+        original_vpn_client_id = feed.vpn_client_id
+        original_upstream = feed.protected_subscription_url
+        replacement_links = [self.direct_link(975), self.direct_link(976)]
+
+        summary = refresh_external_subscription_feed(feed.pk, force=True, candidate_raw_links=replacement_links)
+
+        self.assertTrue(summary.ok)
+        cup.refresh_from_db()
+        feed.refresh_from_db()
+        self.assertEqual(cup.token, original_token)
+        self.assertEqual(feed.vpn_client_id, original_vpn_client_id)
+        self.assertEqual(feed.protected_subscription_url, original_upstream)
+        self.assertEqual(active_cup_links(cup), replacement_links)
+        self.assertEqual(self.read(cup), replacement_links)
+
     def test_lease_blocks_another_request_even_when_forced(self):
         feed, cup, _, _ = self.create_dynamic_feed_with_links([self.direct_link(980)])
         ExternalSubscriptionFeed.objects.filter(pk=feed.pk).update(refresh_token="other-runner", refresh_lease_until=timezone.now() + timedelta(seconds=30))
@@ -211,6 +283,131 @@ class SubscriptionSyncTests(TestCase):
         feed.refresh_from_db()
         self.assertEqual(feed.status, "disabled")
         self.assertEqual(active_cup_links(cup), [self.direct_link(995)])
+
+    def test_cup_center_manual_refresh_updates_available_sources_and_keeps_failed_last_good(self):
+        cup = SubscriptionCup.objects.create(customer=self.customer, order=self.order, plan=self.plan)
+        ok_old = self.direct_link(1001)
+        failed_old = self.direct_link(1002)
+        ok_feed, cup, _ok_source, _ok_panel = self.create_dynamic_feed_with_links([ok_old], cup=cup)
+        failed_source = PlanDeliverySource.objects.create(
+            delivery_config=_ok_source.delivery_config,
+            source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+            panel=_ok_panel,
+            inbound=_ok_source.inbound,
+            quantity=1,
+            priority=2,
+        )
+        failed_feed, cup, _failed_source, _failed_panel = self.create_dynamic_feed_with_links(
+            [failed_old],
+            panel=_ok_panel,
+            source=failed_source,
+            cup=cup,
+        )
+        ok_new = self.direct_link(1003)
+        self.client.force_login(self.admin_user)
+
+        def fetch(feed):
+            if feed.pk == failed_feed.pk:
+                raise ExternalSubscriptionRefreshError("Panel failed safely", code="provider_failed")
+            return [ok_new]
+
+        with patch("store.external_subscription_sources.PasarGuardSubscriptionFetcher.fetch_native_links", side_effect=fetch):
+            response = self.client.post(
+                reverse("admin_store_cup_center_detail", args=[cup.pk]),
+                {"action": "refresh_external_sources"},
+            )
+
+        self.assertRedirects(response, reverse("admin_store_cup_center_detail", args=[cup.pk]))
+        failed_feed.refresh_from_db()
+        ok_feed.refresh_from_db()
+        self.assertEqual(failed_feed.last_error_code, "provider_failed")
+        self.assertEqual(ok_feed.status, ExternalSubscriptionFeed.Status.HEALTHY)
+        self.assertCountEqual(active_cup_links(cup), [ok_new, failed_old])
+
+    def test_cup_center_manual_refresh_preserves_last_good_on_suspicious_drop(self):
+        old_links = [self.direct_link(1010 + index) for index in range(10)]
+        feed, cup, _source, _panel = self.create_dynamic_feed_with_links(old_links)
+        self.client.force_login(self.admin_user)
+
+        with patch("store.external_subscription_sources.PasarGuardSubscriptionFetcher.fetch_native_links", return_value=[self.direct_link(1020)]):
+            response = self.client.post(
+                reverse("admin_store_cup_center_detail", args=[cup.pk]),
+                {"action": "refresh_external_sources"},
+            )
+
+        self.assertRedirects(response, reverse("admin_store_cup_center_detail", args=[cup.pk]))
+        feed.refresh_from_db()
+        self.assertEqual(feed.last_error_code, "suspicious_config_drop")
+        self.assertEqual(active_cup_links(cup), old_links)
+
+    def test_cup_center_group_refresh_queues_active_feeds_for_worker_without_panel_calls(self):
+        feed, cup, source, panel = self.create_dynamic_feed_with_links([self.direct_link(1004)])
+        disabled_cup = SubscriptionCup.objects.create(customer=self.customer, order=self.order, plan=self.plan)
+        disabled_feed, disabled_cup, _disabled_source, _disabled_panel = self.create_dynamic_feed_with_links(
+            [self.direct_link(1005)],
+            panel=panel,
+            source=source,
+            cup=disabled_cup,
+        )
+        SubscriptionCup.objects.filter(pk=disabled_cup.pk).update(status=SubscriptionCup.Status.DISABLED)
+        disabled_feed.refresh_from_db()
+        disabled_next_refresh_at = disabled_feed.next_refresh_at
+        self.client.force_login(self.admin_user)
+
+        with patch("store.external_subscription_sources.PasarGuardSubscriptionFetcher.fetch_native_links") as fetch:
+            response = self.client.post(reverse("admin_store_cup_center_refresh_active_sources"))
+
+        self.assertRedirects(response, reverse("admin_store_cup_center"))
+        fetch.assert_not_called()
+        feed.refresh_from_db()
+        disabled_feed.refresh_from_db()
+        self.assertLessEqual(feed.next_refresh_at, timezone.now())
+        self.assertEqual(disabled_feed.next_refresh_at, disabled_next_refresh_at)
+
+        with patch("store.external_subscription_sources.PasarGuardSubscriptionFetcher.fetch_native_links", return_value=[self.direct_link(1006)]):
+            report = refresh_due_external_subscription_feeds()
+
+        self.assertEqual((report["checked"], report["ok"]), (1, 1))
+        self.assertEqual(active_cup_links(cup), [self.direct_link(1006)])
+
+    def test_source_less_trial_cup_can_set_interval_and_refresh_without_purchase_side_effects(self):
+        before_order_count = Order.objects.count()
+        cup = SubscriptionCup.objects.create(
+            customer=self.customer,
+            plan=self.plan,
+            metadata={"is_free_trial": True, "source": "free_trial"},
+        )
+        feed, cup, _source, _panel = self.create_dynamic_feed_with_links([self.direct_link(1007)], cup=cup)
+        ExternalSubscriptionFeed.objects.filter(pk=feed.pk).update(delivery_source=None)
+        self.client.force_login(self.admin_user)
+
+        response = self.client.post(
+            reverse("admin_store_cup_center_detail", args=[cup.pk]),
+            {
+                "action": "update_feed_refresh_interval",
+                "feed_id": str(feed.pk),
+                "refresh_interval_hours": "12",
+            },
+        )
+
+        self.assertRedirects(response, reverse("admin_store_cup_center_detail", args=[cup.pk]))
+        feed.refresh_from_db()
+        self.assertIsNone(feed.delivery_source_id)
+        self.assertEqual(feed.refresh_interval_hours, 12)
+        self.assertEqual(feed.resolved_filter_policy["refresh_interval_hours"], 12)
+
+        with patch("store.external_subscription_sources.PasarGuardSubscriptionFetcher.fetch_native_links", return_value=[self.direct_link(1008)]):
+            response = self.client.post(
+                reverse("admin_store_cup_center_detail", args=[cup.pk]),
+                {"action": "refresh_external_sources"},
+            )
+
+        self.assertRedirects(response, reverse("admin_store_cup_center_detail", args=[cup.pk]))
+        cup.refresh_from_db()
+        self.assertEqual(Order.objects.count(), before_order_count)
+        self.assertTrue((cup.metadata or {}).get("is_free_trial"))
+        self.assertIsNone(cup.order_id)
+        self.assertEqual(active_cup_links(cup), [self.direct_link(1008)])
 
     def test_public_verification_checks_real_client_output_and_masks_failure(self):
         cup, _ = self.static_cup()

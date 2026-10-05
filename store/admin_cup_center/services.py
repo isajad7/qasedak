@@ -4,6 +4,7 @@ import sys
 from dataclasses import dataclass, field
 from decimal import Decimal
 from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import transaction
@@ -20,7 +21,13 @@ from store.config_inventory_services import (
     inventory_allocation_mode_label,
     inventory_asset_status_label,
 )
-from store.models import ConfigAllocation, ConfigInventoryAsset, ConfigInventoryPool, ConfigLink, CupItem, Inbound, Panel, SubscriptionCup
+from store.external_subscription_sources import (
+    refresh_external_subscription_feed,
+    safe_external_subscription_text,
+    source_owned_cup_item_count,
+    update_external_feed_refresh_interval,
+)
+from store.models import ConfigAllocation, ConfigInventoryAsset, ConfigInventoryPool, ConfigLink, CupItem, ExternalSubscriptionFeed, Inbound, Panel, SubscriptionCup
 from store.jalali import persian_digits
 from store.panels.errors import (
     CupBuildValidationError,
@@ -51,6 +58,7 @@ from store.xui_api import sanitize_xui_operational_text
 
 
 logger = logging.getLogger(__name__)
+TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 
 class CupCenterError(Exception):
@@ -113,6 +121,22 @@ class PanelConfigResult:
     panel_name: str
     inbound_label: str
     email_masked: str = ""
+
+
+@dataclass
+class CupExternalRefreshResult:
+    requested_count: int = 0
+    ok_count: int = 0
+    failed_count: int = 0
+    skipped_count: int = 0
+    results: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class CupExternalRefreshQueueResult:
+    eligible_cup_count: int = 0
+    queued_feed_count: int = 0
+    scope: str = "active_cups"
 
 
 @dataclass
@@ -564,8 +588,161 @@ def subscription_url_summary(cup, *, request=None):
     }
 
 
+def _tehran_datetime(value):
+    if not value:
+        return "-"
+    return timezone.localtime(value, TEHRAN_TZ).strftime("%Y-%m-%d %H:%M")
+
+
+def _feed_status_tone(feed):
+    if feed.status == ExternalSubscriptionFeed.Status.HEALTHY and not feed.consecutive_failures:
+        return "emerald"
+    if feed.status == ExternalSubscriptionFeed.Status.ERROR:
+        return "rose"
+    if feed.status == ExternalSubscriptionFeed.Status.DISABLED or not feed.active:
+        return "slate"
+    return "amber"
+
+
+def _feed_error_message(feed):
+    metadata = feed.metadata or {}
+    last_error = metadata.get("last_refresh_error") if isinstance(metadata, dict) else None
+    message = ""
+    if isinstance(last_error, dict):
+        message = last_error.get("message") or ""
+    return safe_external_subscription_text(message or feed.last_error_code or "")
+
+
+def _feed_label(feed):
+    panel = getattr(feed, "panel", None)
+    source = getattr(feed, "delivery_source", None)
+    if source:
+        return f"{panel or '-'} / {source}"
+    return str(panel or "-")
+
+
+def cup_external_feed_rows(cup):
+    rows = []
+    feeds = (
+        ExternalSubscriptionFeed.objects.filter(cup=cup)
+        .select_related("panel", "delivery_source", "vpn_client")
+        .order_by("panel__name", "pk")
+    )
+    for feed in feeds:
+        current_count = source_owned_cup_item_count(feed)
+        rows.append(
+            {
+                "feed": feed,
+                "label": _feed_label(feed),
+                "interval_hours": feed.refresh_interval_hours,
+                "last_attempt_at": _tehran_datetime(feed.last_attempt_at),
+                "last_success_at": _tehran_datetime(feed.last_success_at),
+                "next_refresh_at": _tehran_datetime(feed.next_refresh_at),
+                "status_label": feed.get_status_display(),
+                "status_tone": _feed_status_tone(feed),
+                "current_item_count": current_count,
+                "last_good_config_count": feed.last_good_config_count,
+                "last_seen_upstream_count": feed.last_seen_upstream_count,
+                "last_filtered_count": feed.last_filtered_count,
+                "error_message": _feed_error_message(feed),
+                "can_edit_interval": not feed.delivery_source_id,
+            }
+        )
+    return rows
+
+
+def cup_external_feed_summary(feeds):
+    feeds = list(feeds)
+    if not feeds:
+        return "منبع پویا ندارد"
+    status_counts = {}
+    last_success_values = []
+    for feed in feeds:
+        status = feed.get_status_display()
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if feed.last_success_at:
+            last_success_values.append(feed.last_success_at)
+    statuses = " / ".join(f"{count} {status}" for status, count in sorted(status_counts.items()))
+    last_success = _tehran_datetime(max(last_success_values)) if last_success_values else "-"
+    return f"{len(feeds)} منبع · {statuses} · آخرین موفقیت {last_success}"
+
+
+def _refreshable_external_feeds(cup=None):
+    now = timezone.now()
+    queryset = (
+        ExternalSubscriptionFeed.objects.filter(active=True)
+        .exclude(status=ExternalSubscriptionFeed.Status.DISABLED)
+        .select_related("cup", "panel", "delivery_source", "vpn_client")
+        .order_by("cup_id", "pk")
+    )
+    if cup is not None:
+        queryset = queryset.filter(cup=cup)
+        if not cup.is_accessible:
+            return queryset.none()
+    else:
+        queryset = queryset.filter(cup__status=SubscriptionCup.Status.ACTIVE)
+        queryset = queryset.filter(Q(cup__expires_at__isnull=True) | Q(cup__expires_at__gt=now))
+    return queryset
+
+
+def refresh_cup_external_sources(cup):
+    result = CupExternalRefreshResult()
+    for feed in list(_refreshable_external_feeds(cup=cup)):
+        result.requested_count += 1
+        try:
+            summary = refresh_external_subscription_feed(feed.pk)
+        except Exception:
+            logger.error("Cup source refresh crashed for feed_id=%s", feed.pk)
+            result.failed_count += 1
+            result.results.append({"feed_id": feed.pk, "ok": False, "error_code": "external_feed_refresh_crashed"})
+            continue
+        safe_summary = summary.to_safe_dict()
+        result.results.append(safe_summary)
+        result.ok_count += int(summary.ok)
+        result.skipped_count += int(summary.skipped)
+        result.failed_count += int(not summary.ok and not summary.skipped)
+    return result
+
+
+def queue_active_external_source_refreshes(*, actor=None):
+    now = timezone.now()
+    actor_label = str(getattr(actor, "username", "") or getattr(actor, "pk", "") or "")[:80]
+    feeds = list(_refreshable_external_feeds())
+    cup_ids = set()
+    for feed in feeds:
+        cup_ids.add(feed.cup_id)
+        metadata = dict(feed.metadata or {})
+        metadata["last_admin_refresh_request"] = {
+            "queued_at": now.isoformat(),
+            "scope": "active_cups",
+            "actor": actor_label,
+            "worker": "refresh_external_subscription_feeds",
+        }
+        feed.metadata = metadata
+        feed.next_refresh_at = now
+        feed.save(update_fields=["next_refresh_at", "metadata", "updated_at"])
+    return CupExternalRefreshQueueResult(eligible_cup_count=len(cup_ids), queued_feed_count=len(feeds))
+
+
+def set_source_less_feed_refresh_interval(cup, feed_id, refresh_interval_hours):
+    feed = ExternalSubscriptionFeed.objects.select_related("cup").get(pk=feed_id, cup=cup)
+    if feed.delivery_source_id:
+        raise CupCenterError("فاصله این منبع از تنظیمات منبع محصول خوانده می‌شود.", code="feed_interval_source_managed")
+    try:
+        hours = int(refresh_interval_hours)
+    except (TypeError, ValueError) as exc:
+        raise CupCenterError("فاصله باید عدد صحیح بین ۱ تا ۷۲۰ ساعت باشد.", code="feed_interval_invalid") from exc
+    if not 1 <= hours <= 720:
+        raise CupCenterError("فاصله باید عدد صحیح بین ۱ تا ۷۲۰ ساعت باشد.", code="feed_interval_invalid")
+    return update_external_feed_refresh_interval(feed.pk, hours)
+
+
 def cup_list_items(cups, *, request=None):
     items = []
+    cups = list(cups)
+    feeds_by_cup = {}
+    for feed in ExternalSubscriptionFeed.objects.filter(cup_id__in=[cup.pk for cup in cups]):
+        feeds_by_cup.setdefault(feed.cup_id, []).append(feed)
     for cup in cups:
         urls = subscription_url_summary(cup, request=request)
         items.append(
@@ -580,6 +757,7 @@ def cup_list_items(cups, *, request=None):
                 "add_manual_url": cup_center_url("admin_store_cup_center_add_manual", cup.pk),
                 "create_from_inbound_url": cup_center_url("admin_store_cup_center_create_from_inbound", cup.pk),
                 "rebuild_url": cup_center_url("admin_store_cup_center_rebuild", cup.pk),
+                "feed_summary": cup_external_feed_summary(feeds_by_cup.get(cup.pk, [])),
                 "status_tone": cup_status_tone(cup),
             }
         )

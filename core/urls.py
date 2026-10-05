@@ -78,6 +78,7 @@ from store.admin_cup_center.views import (
     cup_center_quick_build,
     cup_center_quick_result,
     cup_center_rebuild,
+    cup_center_refresh_active_sources,
 )
 from store.admin_config_inventory import (
     config_inventory_dashboard,
@@ -239,6 +240,11 @@ urlpatterns = [
     path(
         'admin/store/cup-center/quick-build/<int:cup_id>/result',
         admin.site.admin_view(cup_center_quick_result),
+    ),
+    path(
+        'admin/store/cup-center/refresh-active-sources/',
+        admin.site.admin_view(cup_center_refresh_active_sources),
+        name='admin_store_cup_center_refresh_active_sources',
     ),
     path(
         'admin/store/cup-center/<int:cup_id>/',
