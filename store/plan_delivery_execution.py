@@ -102,7 +102,8 @@ def _mark_order_provisioning(order, *, idempotency_key):
 
     order.is_paid = True
     order.verification_status = Order.VerificationStatus.VERIFIED
-    order.status = Order.Status.CONFIRMED
+    if order.status != Order.Status.COMPLETED:
+        order.status = Order.Status.CONFIRMED
     provisioning_services._mark_provisioning_state(
         order,
         Order.ProvisioningStatus.PROVISIONING,
@@ -395,8 +396,19 @@ def _execute_multi_panel_group(order, sources):
             ]
             existing_count = sum(1 for item in existing_results if item)
             if existing_count and existing_count != len(inbounds):
-                raise XUIError("partial_multi_inbound_remote_client_exists")
-            if existing_count == len(inbounds):
+                per_inbound_results = list(existing_results)
+                for position, inbound in enumerate(inbounds):
+                    if per_inbound_results[position]:
+                        continue
+                    per_inbound_results[position] = provisioning_services.create_enabled_client_details(
+                        email_prefix=identity["email_prefix"], total_gb=order.plan.volume_gb,
+                        duration_days=order.plan.duration_days, panel=panel, inbound=inbound,
+                        limit_ip=order.plan.device_limit, client_uuid=identity["uuid"],
+                        sub_id=identity["sub_id"], email=identity["email"],
+                    )
+                    if not per_inbound_results[position]:
+                        raise XUIError("remote_multi_inbound_create_failed")
+            elif existing_count == len(inbounds):
                 per_inbound_results = existing_results
             else:
                 client_result = provisioning_services.create_enabled_multi_inbound_client_details(
@@ -482,12 +494,19 @@ def _execute_inventory_source(order, source):
         is_fallback=source.is_fallback,
     )
     try:
-        allocation_result = allocate_assets_from_pool(
-            source.inventory_pool,
-            source.quantity,
-            order=order,
-        )
-        for asset, allocation in zip(allocation_result.assets, allocation_result.allocations):
+        allocations = list(ConfigAllocation.objects.select_related("asset").filter(
+            order=order, metadata__plan_delivery_source_id=source.pk,
+            status=ConfigAllocation.Status.ACTIVE,
+        ).order_by("pk"))
+        missing = max(int(source.quantity or 1) - len(allocations), 0)
+        if missing:
+            allocation_result = allocate_assets_from_pool(source.inventory_pool, missing, order=order)
+            for allocation in allocation_result.allocations:
+                allocation.metadata = {**(allocation.metadata or {}), "plan_delivery_source_id": source.pk}
+                allocation.save(update_fields=["metadata", "updated_at"])
+            allocations.extend(allocation_result.allocations)
+        for allocation in allocations:
+            asset = allocation.asset
             raw_link = str(asset.raw_link or "").strip()
             if not raw_link:
                 continue

@@ -220,6 +220,9 @@ def sync_admin_order_messages(
         from .keyboards import empty_inline_keyboard as empty_inline_keyboard_func
 
     text = format_order_message_func(order, title=title)
+    from .admin_orders import order_admin_keyboard
+
+    reply_markup = order_admin_keyboard(order)
     if prefix_message:
         text = f"{prefix_message}\n\n{text}"
 
@@ -252,13 +255,14 @@ def sync_admin_order_messages(
                     event_type=event_type,
                     order=order,
                     chat_id=admin_user_id,
+                    reply_markup=reply_markup,
                 ):
                     sent_or_edited += 1
                 continue
 
             for ref in admin_refs:
                 try:
-                    edit_admin_order_message_func(client, ref, text, reply_markup=empty_inline_keyboard_func())
+                    edit_admin_order_message_func(client, ref, text, reply_markup=reply_markup)
                 except delivery_error_cls as exc:
                     log_event_func(
                         config,
@@ -508,7 +512,7 @@ def _send_customer_order_event_message(client, order, *, event_type, chat_id, re
     )
 
 
-def notify_order_event(order, *, event_type):
+def notify_order_event(order, *, event_type, force_customer=False):
     from .order_delivery import notify_customer_order_event
 
     title_by_event = {
@@ -520,22 +524,26 @@ def notify_order_event(order, *, event_type):
         "approved": BotEventLog.EventType.ORDER_APPROVED,
         "rejected": BotEventLog.EventType.ORDER_REJECTED,
     }
-    if not (order.metadata or {}).get("suppress_admin_order_updates"):
-        sync_admin_order_messages(
-            order,
-            title=title_by_event.get(event_type, "Order updated"),
-            event_type=log_type_by_event.get(event_type, BotEventLog.EventType.WEBHOOK),
-        )
-
     client_cls, delivery_error_cls, log_event_func = _default_delivery_deps()
-    return notify_customer_order_event(
+    sent = notify_customer_order_event(
         order,
         event_type=event_type,
         client_cls=client_cls,
         delivery_error_cls=delivery_error_cls,
         log_event_func=log_event_func,
         send_customer_order_event_message_func=_send_customer_order_event_message,
+        force=force_customer,
     )
+    if not (order.metadata or {}).get("suppress_admin_order_updates"):
+        try:
+            sync_admin_order_messages(
+                order,
+                title=title_by_event.get(event_type, "Order updated"),
+                event_type=log_type_by_event.get(event_type, BotEventLog.EventType.WEBHOOK),
+            )
+        except Exception:
+            logger.exception("Could not update admin order messages order_id=%s", order.pk)
+    return sent
 
 
 def notify_support_message(conversation, message):

@@ -1372,13 +1372,13 @@ def send_final_order_status(client, order, *, title, chat_id, callback_query=Non
                 chat_id=message_ref["chat_id"],
                 message_id=message_ref["message_id"],
                 text=text,
-                reply_markup=empty_inline_keyboard(),
+                reply_markup=order_admin_keyboard(order),
             )
             return
     except BotDeliveryError:
         pass
 
-    client.send_message(text, chat_id=chat_id)
+    client.send_message(text, chat_id=chat_id, reply_markup=order_admin_keyboard(order))
 
 
 def handle_bot_update(provider, webhook_secret, update, *, source="webhook"):
@@ -1449,9 +1449,9 @@ def handle_bot_update(provider, webhook_secret, update, *, source="webhook"):
 def parse_callback_data(data):
     data = (data or "").strip()
     parts = data.split(":")
-    if len(parts) == 2 and parts[0] in {"approve", "reject", "detail"}:
+    if len(parts) == 2 and parts[0] in {"approve", "reject", "detail", "retry", "resend"}:
         return parts[0], parts[1]
-    if len(parts) == 3 and parts[0] == "order" and parts[1] in {"approve", "reject", "detail"}:
+    if len(parts) == 3 and parts[0] == "order" and parts[1] in {"approve", "reject", "detail", "retry", "resend"}:
         return parts[1], parts[2]
     return "", ""
 

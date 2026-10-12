@@ -11168,7 +11168,8 @@ class PlanInboundRouteTests(TestCase):
 
     @patch("store.order_actions.enable_client", return_value=True)
     @patch("store.xui_api.create_inactive_client_details", return_value=fake_client_result("55555555-5555-4555-8555-555555555555"))
-    def test_deferred_activation_selects_route_when_order_has_no_inbound(self, _create_client, _enable_client):
+    @patch("store.provisioning_services.lookup_existing_remote_client", return_value=None)
+    def test_deferred_activation_selects_route_when_order_has_no_inbound(self, _lookup, _create_client, _enable_client):
         self.create_route(inbound=self.route_inbound)
         order = Order.objects.create(
             store=self.store,
@@ -18014,7 +18015,8 @@ class DashboardSubscriptionActionTests(TestCase):
         "store.xui_api.create_inactive_client_details",
         return_value=fake_client_result("22222222-2222-4222-8222-222222222222"),
     )
-    def test_activate_order_provisions_deferred_panel_client(self, provision_mock, enable_mock):
+    @patch("store.provisioning_services.lookup_existing_remote_client", return_value=None)
+    def test_activate_order_provisions_deferred_panel_client(self, lookup_mock, provision_mock, enable_mock):
         order = Order.objects.create(
             store=self.store,
             customer=self.customer,
@@ -18043,7 +18045,8 @@ class DashboardSubscriptionActionTests(TestCase):
 
     @patch("store.order_actions.enable_client", return_value=True)
     @patch("store.xui_api.create_inactive_client_details")
-    def test_activate_bulk_order_creates_and_enables_requested_clients(self, provision_mock, enable_mock):
+    @patch("store.provisioning_services.lookup_existing_remote_client", return_value=None)
+    def test_activate_bulk_order_creates_and_enables_requested_clients(self, lookup_mock, provision_mock, enable_mock):
         def bulk_result(index, uuid):
             result = fake_client_result(uuid)
             result["email"] = f"bulk_user_{index}"
@@ -23767,7 +23770,9 @@ class TelegramPurchaseFlowTests(TestCase):
         self.assertIn("777", edited_chat_ids)
         for call in edit_calls:
             if str(call["json"]["chat_id"]) in {"999", "777"}:
-                self.assertEqual(call["json"]["reply_markup"], {"inline_keyboard": []})
+                callbacks = [button["callback_data"] for row in call["json"]["reply_markup"]["inline_keyboard"] for button in row]
+                self.assertIn(f"order:resend:{order.order_tracking_code}", callbacks)
+                self.assertNotIn(f"approve:{order.order_tracking_code}", callbacks)
                 self.assertIn("Order approved", call["json"]["text"])
 
     @patch("store.order_actions.enable_client", return_value=True)

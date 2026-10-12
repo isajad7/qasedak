@@ -1,4 +1,5 @@
 from django.db.models import Q
+from django.utils import timezone
 
 from store.customer_delivery import (
     customer_delivery_flat_links,
@@ -7,6 +8,7 @@ from store.customer_delivery import (
 )
 from store.jalali import persian_digits
 from store.models import BotConfiguration, BotEventLog, BotUser
+from store.order_recovery import record_order_metadata
 
 from .config_delivery import config_send_result_count, send_config_links_message
 
@@ -86,8 +88,7 @@ def send_customer_order_event_message(
 
     groups = order_config_link_groups(order)
     if not groups:
-        client.send_message(text, chat_id=chat_id, reply_markup=reply_markup)
-        return 1
+        raise ValueError("لینک قابل تحویل برای این سفارش پیدا نشد.")
 
     sent = 0
     for group in groups:
@@ -126,8 +127,22 @@ def notify_customer_order_event(
     delivery_error_cls,
     log_event_func,
     send_customer_order_event_message_func,
+    force=False,
 ):
-    if not order.customer_id or (event_type != "cancelled" and (order.metadata or {}).get("suppress_customer_notification")):
+    tracked = event_type == "approved"
+    state = {
+        "status": "sending",
+        "attempts": int(((order.metadata or {}).get("customer_notification") or {}).get("attempts") or 0) + 1,
+        "attempted_at": timezone.now().isoformat(),
+        "error": "",
+        "sent_count": 0,
+        "failed_count": 0,
+    }
+    suppressed = event_type != "cancelled" and not force and (order.metadata or {}).get("suppress_customer_notification")
+    if not order.customer_id or suppressed:
+        if tracked:
+            state["status"] = "skipped" if suppressed else "no_target"
+            record_order_metadata(order, "customer_notification", state)
         return 0
 
     base_bot_users = (
@@ -155,28 +170,46 @@ def notify_customer_order_event(
             bot_users = [targeted_bot_user]
         elif bot_config_id:
             bot_users = base_bot_users.filter(bot_config_id=bot_config_id)
+        else:
+            bot_users = base_bot_users.none()
     elif bot_config_id:
         bot_users = base_bot_users.filter(bot_config_id=bot_config_id)
     elif order.store_id:
         bot_users = base_bot_users.filter(Q(bot_config__store=order.store) | Q(bot_config__store__isnull=True))
 
     sent = 0
+    failed = 0
+    if tracked:
+        record_order_metadata(order, "customer_notification", state)
     for bot_user in bot_users:
         try:
-            send_customer_order_event_message_func(
+            delivered = send_customer_order_event_message_func(
                 client_cls(bot_user.bot_config),
                 order,
                 event_type=event_type,
                 chat_id=bot_user.chat_id,
             )
-        except delivery_error_cls as exc:
+            if not delivered:
+                raise ValueError("پیام و لینک سرویس ارسال نشد.")
+        except Exception as exc:
+            failed += 1
+            from store.xui_api import sanitize_xui_operational_text
+
+            state["error"] = sanitize_xui_operational_text(exc, max_length=700)
             log_event_func(
                 bot_user.bot_config,
                 event_type=BotEventLog.EventType.ERROR,
                 status=BotEventLog.Status.FAILED,
                 order=order,
-                message=f"Could not notify customer {bot_user.pk}: {exc}",
+                message=f"Could not notify customer {bot_user.pk}: {state['error']}",
             )
             continue
         sent += 1
+    if tracked:
+        state.update(
+            status="partial" if sent and failed else "sent" if sent else "failed" if failed else "no_target",
+            sent_count=sent,
+            failed_count=failed,
+        )
+        record_order_metadata(order, "customer_notification", state)
     return sent

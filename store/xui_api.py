@@ -2253,13 +2253,13 @@ class XUIService:
             "raw": target_client,
         }
 
-    def create_inactive_client(self, *, email_prefix, total_gb, expire_days, inbound, limit_ip=2):
+    def create_inactive_client(self, *, email_prefix, total_gb, expire_days, inbound, limit_ip=2, client_uuid="", sub_id="", email=""):
         resolve_inbound_panel(inbound, self.panel, require_active=True)
         self._assert_precise_scope(inbound, operation="create")
         self.login()
-        client_uuid = str(uuid.uuid4())
-        sub_id = "".join(random.choices(string.ascii_letters + string.digits, k=16))
-        email = build_xui_client_email(email_prefix, client_uuid)
+        client_uuid = str(client_uuid or uuid.uuid4())
+        sub_id = sub_id or "".join(random.choices(string.ascii_letters + string.digits, k=16))
+        email = email or build_xui_client_email(email_prefix, client_uuid)
         total_bytes = bytes_from_gb(total_gb)
 
         client_data = {
@@ -2501,6 +2501,10 @@ class XUIService:
         if not target_client:
             raise XUIError("Client UUID was not found on the panel.")
 
+        if xui_bool(target_client.get("enable")) and int(target_client.get("expiryTime") or 0) > 0:
+            # A previous activation may have succeeded before its response timed out.
+            return True
+
         current_time = int(time.time() * 1000)
         target_client["enable"] = True
         target_client["expiryTime"] = current_time + (order.plan.duration_days * 86_400_000)
@@ -2534,15 +2538,70 @@ class XUIService:
         current_time = int(time.time() * 1000)
         current_expiry = int(target_client.get("expiryTime") or 0)
         expiry_base = max(current_time, current_expiry)
+        renewal_order = getattr(vpn_client, "_renewal_order", None)
+        intent = dict(((renewal_order.metadata or {}).get("renewal_intent") or {}) if renewal_order else {})
+        if renewal_order:
+            if intent and (
+                intent.get("client_pk") != vpn_client.pk
+                or intent.get("inbound_pk") != vpn_client.inbound_id
+                or intent.get("uuid") != str(vpn_client.uuid)
+                or intent.get("total_bytes") != bytes_from_gb(plan.volume_gb)
+                or intent.get("limit_ip") != plan.device_limit
+                or intent.get("duration_days") != plan.duration_days
+            ):
+                raise XUIError("مقصد یا پلن تمدید تغییر کرده؛ نتیجه قبلی باید دستی بررسی شود.")
+            if not intent:
+                intent = {
+                    "client_pk": vpn_client.pk,
+                    "inbound_pk": vpn_client.inbound_id,
+                    "uuid": str(vpn_client.uuid),
+                    "previous_expiry": current_expiry,
+                    "target_expiry": expiry_base + (plan.duration_days * 86_400_000),
+                    "total_bytes": bytes_from_gb(plan.volume_gb),
+                    "limit_ip": plan.device_limit,
+                    "duration_days": plan.duration_days,
+                    "reset_status": "pending",
+                }
+            elif current_expiry not in {intent["previous_expiry"], intent["target_expiry"]}:
+                raise XUIError("نتیجه تمدید روی پنل نامشخص است؛ تمدید دوباره انجام نشد.")
+
+        target_expiry = intent.get("target_expiry") or expiry_base + (plan.duration_days * 86_400_000)
+        already_updated = bool(intent) and (
+            current_expiry == target_expiry
+            and int(target_client.get("totalGB") or 0) == intent["total_bytes"]
+            and int(target_client.get("limitIp") or 0) == intent["limit_ip"]
+            and xui_bool(target_client.get("enable"))
+        )
+        if renewal_order and intent.get("reset_status") == "started":
+            raise XUIError("نتیجه صفر کردن مصرف نامشخص است؛ برای جلوگیری از تکرار، پنل را دستی بررسی کنید.")
+        if renewal_order and intent.get("reset_status") == "done" and not already_updated:
+            raise XUIError("سرویس پس از تمدید تغییر کرده؛ عملیات تکرار نشد.")
+
+        def save_intent():
+            if renewal_order:
+                metadata = dict(renewal_order.metadata or {})
+                metadata["renewal_intent"] = intent
+                renewal_order.metadata = metadata
+                renewal_order.save(update_fields=["metadata", "updated_at"])
+
+        save_intent()
         target_client["enable"] = True
         target_client["totalGB"] = bytes_from_gb(plan.volume_gb)
         target_client["limitIp"] = plan.device_limit
-        target_client["expiryTime"] = expiry_base + (plan.duration_days * 86_400_000)
+        target_client["expiryTime"] = target_expiry
 
         email = vpn_client.xui_email or vpn_client.username
-        self._post_client_update(vpn_client.inbound, str(vpn_client.uuid), target_client, email=email)
+        if not already_updated:
+            self._post_client_update(vpn_client.inbound, str(vpn_client.uuid), target_client, email=email)
 
-        self._post_client_reset_traffic(vpn_client.inbound, email)
+        if not renewal_order or intent.get("reset_status") != "done":
+            if renewal_order:
+                intent["reset_status"] = "started"
+                save_intent()
+            self._post_client_reset_traffic(vpn_client.inbound, email)
+            if renewal_order:
+                intent["reset_status"] = "done"
+                save_intent()
 
         cache.delete(self._inbound_cache_key(vpn_client.inbound))
         cache.delete(f"xui:client-traffic:{self.panel.pk}:{email}")
@@ -3128,7 +3187,7 @@ def refresh_vpn_client_links(vpn_client):
     return details
 
 
-def create_inactive_client_details(email_prefix, total_gb, expire_days, panel, inbound, limit_ip=2):
+def create_inactive_client_details(email_prefix, total_gb, expire_days, panel, inbound, limit_ip=2, **identity):
     try:
         resolved_panel = resolve_inbound_panel(inbound, panel, require_active=True)
         return XUIService(resolved_panel).create_inactive_client(
@@ -3137,6 +3196,7 @@ def create_inactive_client_details(email_prefix, total_gb, expire_days, panel, i
             expire_days=expire_days,
             inbound=inbound,
             limit_ip=limit_ip,
+            **identity,
         )
     except Exception as exc:
         logger.warning(
@@ -3236,6 +3296,7 @@ def renew_client(vpn_client, plan):
         panel = resolve_inbound_panel(vpn_client.inbound, require_active=True)
         return XUIService(panel).update_client_subscription(vpn_client, plan)
     except Exception as exc:
+        vpn_client._renewal_error = sanitize_xui_operational_text(exc, panel=getattr(vpn_client.inbound, "panel", None))
         logger.warning(
             "Could not renew X-UI client: %s",
             sanitize_xui_operational_text(exc, panel=getattr(vpn_client.inbound, "panel", None)),

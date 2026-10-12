@@ -282,6 +282,9 @@ def _create_panel_links_for_rule(order, cup, rule, *, adapter_factory):
         return result
 
     for index in range(1, int(rule.quantity or 1) + 1):
+        from .provisioning_services import lookup_existing_remote_client, multi_inbound_order_identity
+
+        identity = multi_inbound_order_identity(order, inbounds, index=int(rule.pk) * 1000 + index)
         request = XUIProvisioningRequest(
             email_prefix=_safe_email_prefix(order, rule, index),
             total_gb=getattr(order.plan, "volume_gb", Decimal("1")) or Decimal("1"),
@@ -289,13 +292,23 @@ def _create_panel_links_for_rule(order, cup, rule, *, adapter_factory):
             inbound=inbounds[0] if len(inbounds) == 1 else None,
             inbounds=inbounds if len(inbounds) > 1 else None,
             limit_ip=int(getattr(order.plan, "device_limit", 2) or 2),
+            client_uuid=identity["uuid"], sub_id=identity["sub_id"], email=identity["email"],
         )
         try:
-            remote_result = (
-                adapter.create_enabled_multi_inbound_client(request)
-                if len(inbounds) > 1
-                else adapter.create_enabled_client(request)
-            )
+            existing = []
+            if order.provisioning_attempts > 1 and str(panel.family).lower() != Panel.Family.PASARGUARD:
+                existing = [lookup_existing_remote_client(panel, inbound, identity) for inbound in inbounds]
+            if existing and all(existing):
+                remote_result = {**existing[0], "bundle_inbound_results": existing} if len(inbounds) > 1 else existing[0]
+            elif any(existing):
+                result.errors.append("ساخت چنداینباندی ناقص است؛ نتیجه پنل باید بررسی شود و ساخت تکراری انجام نشد.")
+                return result
+            else:
+                remote_result = (
+                    adapter.create_enabled_multi_inbound_client(request)
+                    if len(inbounds) > 1
+                    else adapter.create_enabled_client(request)
+                )
             entries = _direct_link_entries(remote_result, inbounds)
             if any(not entry["direct_link"] for entry in entries):
                 result.errors.append("Panel created a client but did not return all direct links.")
@@ -317,18 +330,20 @@ def _create_panel_links_for_rule(order, cup, rule, *, adapter_factory):
                         "remote_sub_link_saved": bool((entry["remote_result"] or {}).get("sub_link")),
                     },
                 )
-                CupItem.objects.create(
+                CupItem.objects.get_or_create(
                     cup=cup,
                     config_link=config_link,
-                    position=_next_position(cup),
-                    is_active=True,
-                    added_reason="fulfillment_recipe_panel",
-                    metadata={
-                        "source": "cup_fulfillment_recipe",
-                        "recipe_id": rule.recipe_id,
-                        "rule_id": rule.pk,
-                        "panel_id": panel.pk,
-                        "inbound_pk": getattr(inbound, "pk", None),
+                    defaults={
+                        "position": _next_position(cup),
+                        "is_active": True,
+                        "added_reason": "fulfillment_recipe_panel",
+                        "metadata": {
+                            "source": "cup_fulfillment_recipe",
+                            "recipe_id": rule.recipe_id,
+                            "rule_id": rule.pk,
+                            "panel_id": panel.pk,
+                            "inbound_pk": getattr(inbound, "pk", None),
+                        },
                     },
                 )
                 result.created_link_count += 1
@@ -354,18 +369,26 @@ def _create_inventory_links_for_rule(order, cup, rule):
         result.errors.append("Inventory rule requires an inventory pool.")
         return result
     try:
-        allocation_result = allocate_assets_from_pool(
-            pool,
-            int(rule.quantity or 1),
-            cup=cup,
-            order=order,
-            allocation_mode=rule.allocation_mode or None,
-        )
+        allocations = list(ConfigAllocation.objects.select_related("asset").filter(
+            order=order, cup=cup, metadata__recipe_rule_id=rule.pk,
+            status=ConfigAllocation.Status.ACTIVE,
+        ).order_by("pk"))
+        missing = max(int(rule.quantity or 1) - len(allocations), 0)
+        if missing:
+            allocation_result = allocate_assets_from_pool(
+                pool, missing, cup=cup, order=order,
+                allocation_mode=rule.allocation_mode or None,
+            )
+            for allocation in allocation_result.allocations:
+                allocation.metadata = {**(allocation.metadata or {}), "recipe_rule_id": rule.pk}
+                allocation.save(update_fields=["metadata", "updated_at"])
+            allocations.extend(allocation_result.allocations)
     except Exception as exc:
         result.errors.append(_safe_error(exc))
         return result
 
-    for allocation, asset in zip(allocation_result.allocations, allocation_result.assets):
+    for allocation in allocations:
+        asset = allocation.asset
         config_link = create_config_link_from_raw(
             asset.raw_link,
             source_type=ConfigLink.SourceType.IMPORTED_SUBSCRIPTION,
@@ -377,19 +400,21 @@ def _create_inventory_links_for_rule(order, cup, rule):
                 "allocation_mode": allocation.allocation_mode,
             },
         )
-        CupItem.objects.create(
+        CupItem.objects.get_or_create(
             cup=cup,
             config_link=config_link,
-            position=_next_position(cup),
-            is_active=True,
-            added_reason="fulfillment_recipe_inventory",
-            metadata={
-                "source": "config_inventory_pool",
-                "recipe_id": rule.recipe_id,
-                "rule_id": rule.pk,
-                "pool_id": pool.pk,
-                "asset_id": asset.pk,
-                "allocation_id": allocation.pk,
+            defaults={
+                "position": _next_position(cup),
+                "is_active": True,
+                "added_reason": "fulfillment_recipe_inventory",
+                "metadata": {
+                    "source": "config_inventory_pool",
+                    "recipe_id": rule.recipe_id,
+                    "rule_id": rule.pk,
+                    "pool_id": pool.pk,
+                    "asset_id": asset.pk,
+                    "allocation_id": allocation.pk,
+                },
             },
         )
         result.created_link_count += 1
@@ -400,6 +425,16 @@ def _create_inventory_links_for_rule(order, cup, rule):
 
 
 def _run_rule(order, cup, rule, *, adapter_factory):
+    previous = (order.metadata or {}).get("cup_fulfillment_recipe") or {}
+    completed = next((item for item in previous.get("rule_results", []) if item.get("rule_id") == rule.pk and item.get("success")), None)
+    if completed and CupItem.objects.filter(cup=cup, is_active=True, metadata__rule_id=rule.pk).exists():
+        return RuleFulfillmentResult(
+            rule_id=rule.pk, source_type=rule.source_type, position=rule.position,
+            required=rule.required, success=True,
+            created_link_count=completed.get("created_link_count", 0),
+            panel_generated_count=completed.get("panel_generated_count", 0),
+            inventory_allocation_count=completed.get("inventory_allocation_count", 0),
+        )
     if rule.source_type == CupFillerRule.SourceType.PANEL_INBOUNDS:
         return _create_panel_links_for_rule(order, cup, rule, adapter_factory=adapter_factory)
     if rule.source_type == CupFillerRule.SourceType.INVENTORY_POOL:
@@ -436,6 +471,8 @@ def fulfill_order_with_recipe(order, *, actor=None, adapter_factory=None):
     result = CupFulfillmentResult(status=FULFILLMENT_STATUS_FAILED, recipe=recipe, intercepted=True)
     with transaction.atomic():
         order = Order.objects.select_for_update().select_related("customer", "plan", "store").get(pk=order.pk)
+        order.provisioning_attempts = int(order.provisioning_attempts or 0) + 1
+        order.save(update_fields=["provisioning_attempts", "updated_at"])
         cup = _create_or_reuse_order_cup(order, recipe)
         result.cup = cup
         rules = list(

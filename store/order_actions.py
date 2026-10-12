@@ -135,6 +135,7 @@ def sync_order_primary_client_fields(order, client):
 def provision_missing_panel_client(order):
     from .order_services import select_inbound_for_plan, validate_inbound_for_order
     from .xui_api import create_inactive_client_details
+    from .provisioning_services import lookup_existing_remote_client, order_identity, freeze_order_provisioning_metadata, STRATEGY_LEGACY_PRECREATE_INACTIVE
 
     ensure_legacy_order_client(order)
     missing_count = required_client_count(order) - order.vpn_clients.count()
@@ -178,7 +179,10 @@ def provision_missing_panel_client(order):
     if not inbound:
         return OrderActionResult(False, "فعلاً سرور VPN فعالی برای ساخت کانفیگ در دسترس نیست.")
 
-    metadata = dict(order.metadata or {})
+    order.inbound = inbound
+    metadata = freeze_order_provisioning_metadata(order, inbound, strategy=STRATEGY_LEGACY_PRECREATE_INACTIVE)
+    order.metadata = metadata
+    order.save(update_fields=["inbound", "metadata", "updated_at"])
     username = (
         metadata.get("deferred_panel_username")
         or build_client_display_name(
@@ -189,15 +193,23 @@ def provision_missing_panel_client(order):
             metadata=metadata,
         )
     )
-    for index in range(1, missing_count + 1):
-        client_result = create_inactive_client_details(
-            email_prefix=username,
-            total_gb=order.plan.volume_gb,
-            expire_days=order.plan.duration_days,
-            panel=inbound.panel,
-            inbound=inbound,
-            limit_ip=order.plan.device_limit,
-        )
+    existing_count = order.vpn_clients.count()
+    for index in range(existing_count + 1, existing_count + missing_count + 1):
+        identity = order_identity(order, inbound, index=index)
+        try:
+            client_result = lookup_existing_remote_client(inbound.panel, inbound, identity, require_enabled=False)
+        except Exception:
+            return OrderActionResult(False, "وضعیت کانفیگ روی پنل نامشخص است؛ بدون بررسی موفق، ساخت دوباره انجام نمی‌شود.")
+        if not client_result:
+            client_result = create_inactive_client_details(
+                email_prefix=username,
+                total_gb=order.plan.volume_gb,
+                expire_days=order.plan.duration_days,
+                panel=inbound.panel,
+                inbound=inbound,
+                limit_ip=order.plan.device_limit,
+                client_uuid=identity["uuid"], sub_id=identity["sub_id"], email=identity["email"],
+            )
         if not client_result:
             metadata["panel_provisioning_deferred"] = True
             metadata["panel_provisioning_last_failed_at"] = timezone.now().isoformat()
@@ -260,9 +272,10 @@ def activate_renewal_order(order, *, user=None):
         )
         return OrderActionResult(False, PANEL_LINK_ADMIN_MESSAGE)
 
+    vpn_client._renewal_order = order
     renewed = renew_client(vpn_client, order.plan)
     if not renewed:
-        return OrderActionResult(False, "تمدید روی پنل X-UI ناموفق بود.")
+        return OrderActionResult(False, getattr(vpn_client, "_renewal_error", "") or "تمدید روی پنل X-UI ناموفق بود.")
 
     order.mark_payment_verified(user=user)
     metadata = dict(order.metadata or {})

@@ -88,16 +88,21 @@ def admin_receipt_label(order):
 
 
 def order_admin_keyboard(order):
+    from store.order_recovery import can_resend_order, can_retry_order
+
     tracking_code = order.order_tracking_code
-    return {
-        "inline_keyboard": [
-            [
+    rows = []
+    if can_resend_order(order):
+        rows.append([{"text": "ارسال مجدد پیام و لینک سرویس", "callback_data": f"order:resend:{tracking_code}"}])
+    elif order.status not in {Order.Status.REJECTED, Order.Status.CANCELLED}:
+        rows.append([
                 {"text": "تایید سفارش ✅", "callback_data": f"approve:{tracking_code}"},
                 {"text": "رد سفارش ❌", "callback_data": f"reject:{tracking_code}"},
-            ],
-            [{"text": "مشاهده جزئیات 📦", "callback_data": f"order:detail:{tracking_code}"}],
-        ]
-    }
+        ])
+    if can_retry_order(order):
+        rows.append([{"text": "تلاش مجدد تکمیل سفارش", "callback_data": f"order:retry:{tracking_code}"}])
+    rows.append([{"text": "مشاهده جزئیات 📦", "callback_data": f"order:detail:{tracking_code}"}])
+    return {"inline_keyboard": rows}
 
 
 def format_order_message(order, *, title="سفارش جدید VPN"):
@@ -171,6 +176,20 @@ def format_order_message(order, *, title="سفارش جدید VPN"):
         lines.extend(["", f"<b>متن رسید:</b>\n{escape(excerpt)}"])
     if order.rejection_reason:
         lines.extend(["", f"<b>دلیل رد:</b> {escape(order.rejection_reason)}"])
+    from store.order_recovery import customer_notification_summary
+
+    notification = customer_notification_summary(order)
+    lines.extend([
+        "",
+        f"<b>تکمیل سرویس:</b> {escape(order.get_provisioning_status_display())}",
+        f"<b>ارسال پیام مشتری:</b> {notification['label']}",
+    ])
+    if notification.get("attempted_at"):
+        lines.append(f"<b>آخرین ارسال:</b> {bot_datetime(notification['attempted_at'])}")
+    if notification.get("error"):
+        lines.append(f"<b>خطای پیام:</b> {escape(notification['error'])}")
+    if order.last_provisioning_error:
+        lines.append(f"<b>خطای سرویس:</b> {escape(order.last_provisioning_error)}")
     return "\n".join(lines)
 
 
@@ -312,8 +331,23 @@ def handle_admin_order_callback_update(
         )
         return {"ok": True, "success": True, "detail": True}
 
-    if action == "approve":
+    if action == "resend":
+        from store.order_recovery import resend_order_result
+
+        result = resend_order_result(order)
+        send_final_order_status_func(
+            client, order, title="نتیجه ارسال پیام مشتری", chat_id=chat_id,
+            callback_query=callback_query, prefix_message=result.message,
+        )
+        return {"ok": True, "success": result.success, "message": result.message}
+
+    if action in {"approve", "retry"}:
         from store.order_actions import activate_order
+        from store.order_recovery import can_retry_order
+
+        if action == "retry" and not can_retry_order(order):
+            client.send_message("تلاش مجدد برای این سفارش در دسترس نیست.", chat_id=chat_id)
+            return {"ok": True, "success": False}
 
         log_callback_func(
             config,
@@ -322,7 +356,12 @@ def handle_admin_order_callback_update(
             message=f"Calling activate_order for order {order.order_tracking_code}",
             raw_payload={"callback_data": data, "order_id": tracking_code, "action": action},
         )
-        result = activate_order(order, user=None, notify=True)
+        if action == "retry":
+            from store.order_recovery import retry_order_completion
+
+            result = retry_order_completion(order)
+        else:
+            result = activate_order(order, user=None, notify=True)
         order.refresh_from_db()
         updated_count = sync_admin_order_messages_func(
             order,

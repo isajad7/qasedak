@@ -236,7 +236,7 @@ def order_identity(order, inbound, *, index=1):
     )
     client_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, base))
     sub_id = hashlib.sha256(f"sub:{base}".encode("utf-8")).hexdigest()[:16]
-    email_prefix = order.username or build_client_display_name(
+    email_prefix = (order.metadata or {}).get("provisioning_email_prefix") or order.username or build_client_display_name(
         order.customer,
         order=order,
         preferred_name=order.sender_card_name,
@@ -274,7 +274,7 @@ def multi_inbound_order_identity(order, inbounds, *, index=1):
     )
     client_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, base))
     sub_id = hashlib.sha256(f"sub:{base}".encode("utf-8")).hexdigest()[:16]
-    email_prefix = order.username or build_client_display_name(
+    email_prefix = (order.metadata or {}).get("provisioning_email_prefix") or order.username or build_client_display_name(
         order.customer,
         order=order,
         preferred_name=order.sender_card_name,
@@ -391,14 +391,14 @@ def _matches_remote_client(data, values):
     return matches
 
 
-def _client_result_from_remote(service, inbound, inbound_data, identity, match):
+def _client_result_from_remote(service, inbound, inbound_data, identity, match, *, require_enabled=True):
     client = dict(match.get("client") or {})
     stats = dict(match.get("stats") or {})
     client_uuid = str(client.get("id") or stats.get("id") or identity["uuid"]).strip()
     email = str(client.get("email") or stats.get("email") or identity["email"]).strip()
     sub_id = str(client.get("subId") or client.get("sub_id") or stats.get("subId") or identity["sub_id"]).strip()
     enabled_value = first_xui_value(client.get("enable"), stats.get("enable"))
-    if enabled_value is not None and not xui_bool(enabled_value):
+    if require_enabled and enabled_value is not None and not xui_bool(enabled_value):
         raise XUIError("Remote client exists but is not enabled.")
     hosts = service.get_hosts_for_inbound(inbound.inbound_id)
     direct_link = service.build_direct_link(
@@ -424,7 +424,7 @@ def _client_result_from_remote(service, inbound, inbound_data, identity, match):
     }
 
 
-def lookup_existing_remote_client(panel, inbound, identity):
+def lookup_existing_remote_client(panel, inbound, identity, *, require_enabled=True):
     service = XUIService(panel)
     inbound_data = service.get_inbound(inbound, use_cache=False)
     matches = _matches_remote_client(inbound_data, _remote_candidate_values(identity))
@@ -432,7 +432,7 @@ def lookup_existing_remote_client(panel, inbound, identity):
         raise XUIError("ambiguous_remote_client")
     if not matches:
         return None
-    return _client_result_from_remote(service, inbound, inbound_data, identity, matches[0])
+    return _client_result_from_remote(service, inbound, inbound_data, identity, matches[0], require_enabled=require_enabled)
 
 
 def _local_client_matches(order, inbound, client_result):
@@ -739,10 +739,21 @@ def _activate_modern_enabled_order_locked(order, *, actor=None, strategy=STRATEG
                     for bundle_inbound in inbounds
                 ]
                 existing_count = sum(1 for item in existing_results if item)
-                if existing_count and existing_count != len(inbounds):
-                    raise XUIError("partial_multi_inbound_remote_client_exists")
                 already_remote = existing_count == len(inbounds)
-                if already_remote:
+                if existing_count and not already_remote:
+                    per_inbound_results = list(existing_results)
+                    for position, bundle_inbound in enumerate(inbounds):
+                        if per_inbound_results[position]:
+                            continue
+                        per_inbound_results[position] = create_enabled_client_details(
+                            email_prefix=indexed_identity["email_prefix"], total_gb=order.plan.volume_gb,
+                            duration_days=order.plan.duration_days, panel=panel, inbound=bundle_inbound,
+                            limit_ip=order.plan.device_limit, client_uuid=indexed_identity["uuid"],
+                            sub_id=indexed_identity["sub_id"], email=indexed_identity["email"],
+                        )
+                        if not per_inbound_results[position]:
+                            raise XUIError("remote_multi_inbound_create_failed")
+                elif already_remote:
                     per_inbound_results = existing_results
                 else:
                     client_result = create_enabled_multi_inbound_client_details(
@@ -882,6 +893,8 @@ def _activate_modern_enabled_order_locked(order, *, actor=None, strategy=STRATEG
 def _activate_legacy_order_locked(order, *, actor=None):
     from . import order_actions as order_actions_module
 
+    _mark_provisioning_state(order, Order.ProvisioningStatus.PROVISIONING, increment=True)
+    order.save(update_fields=["provisioning_status", "provisioning_attempts", "updated_at"])
     order_actions_module.ensure_legacy_order_client(order)
     missing_count = order_actions_module.required_client_count(order) - order.vpn_clients.count()
     if missing_count > 0:
@@ -938,6 +951,8 @@ def _activate_legacy_order_locked(order, *, actor=None):
                 order_actions_module.mask_xui_value(vpn_client.uuid),
             )
             return ProvisioningResult(False, "فعال‌سازی روی پنل X-UI ناموفق بود.")
+        vpn_client.mark_active(duration_days=order.plan.duration_days)
+        vpn_client.save(update_fields=["status", "activated_at", "expires_at", "disabled_at", "updated_at"])
 
     order.mark_payment_verified(user=actor)
     changed_fields = order_actions_module.sync_order_primary_client_fields(order, clients[0] if clients else None)
@@ -966,23 +981,14 @@ def _activate_legacy_order_locked(order, *, actor=None):
         ]
     )
 
-    for vpn_client in clients:
-        vpn_client.mark_active(duration_days=order.plan.duration_days)
-        vpn_client.save(
-            update_fields=[
-                "status",
-                "activated_at",
-                "expires_at",
-                "disabled_at",
-                "updated_at",
-            ]
-        )
     return ProvisioningResult(True, "سفارش تایید شد و کانفیگ VPN فعال شد.", client=clients[0] if clients else None)
 
 
 def _activate_renewal_order_locked(order, *, actor=None):
     from . import order_actions as order_actions_module
 
+    _mark_provisioning_state(order, Order.ProvisioningStatus.PROVISIONING, increment=True)
+    order.save(update_fields=["provisioning_status", "provisioning_attempts", "updated_at"])
     result = order_actions_module.activate_renewal_order(order, user=actor)
     order.refresh_from_db()
     if result.success:
@@ -1003,6 +1009,33 @@ def _activate_renewal_order_locked(order, *, actor=None):
 
 
 def approve_and_provision_order(order, actor=None, source=None, notify=True):
+    if not order_is_renewal(order):
+        return _approve_and_provision_order(order, actor=actor, source=source, notify=notify)
+
+    # Persist a short claim before the transaction that performs remote writes.
+    # If that transaction crashes or rolls back, a later click must not renew blindly.
+    from .order_recovery import can_resend_order, record_order_metadata
+
+    claimed = False
+    with transaction.atomic():
+        current = select_for_update_self(Order.objects.all()).get(pk=order.pk)
+        if not can_resend_order(current) and current.status not in {Order.Status.REJECTED, Order.Status.CANCELLED}:
+            metadata = dict(current.metadata or {})
+            attempt = metadata.get("renewal_recovery_attempt") or {}
+            if attempt.get("status") == "running":
+                return ProvisioningResult(False, "عملیات قبلی تمدید در جریان است یا نتیجه آن نامشخص است؛ قبل از تکرار، پنل را بررسی کنید.")
+            metadata["renewal_recovery_attempt"] = {"status": "running", "started_at": timezone.now().isoformat()}
+            current.metadata = metadata
+            current.save(update_fields=["metadata", "updated_at"])
+            claimed = True
+
+    result = _approve_and_provision_order(order, actor=actor, source=source, notify=notify)
+    if claimed:
+        record_order_metadata(order, "renewal_recovery_attempt", {"status": "finished", "finished_at": timezone.now().isoformat()})
+    return result
+
+
+def _approve_and_provision_order(order, actor=None, source=None, notify=True):
     logger.info("approve_and_provision_order started order_id=%s tracking=%s source=%s", order.pk, order.order_tracking_code, source or "")
     with transaction.atomic():
         order = (
@@ -1013,7 +1046,10 @@ def approve_and_provision_order(order, actor=None, source=None, notify=True):
 
         if OrderAutomation.objects.filter(order=order, review_status__in=("cancelling", "cancel_failed", "cancelled")).exists():
             return ProvisioningResult(False, "لغو این سفارش ثبت شده است؛ فعال‌سازی دوباره مجاز نیست.")
-        if order.status == Order.Status.COMPLETED and order.verification_status == Order.VerificationStatus.VERIFIED:
+        from .order_recovery import order_has_partial_delivery
+
+        partial_retry = source == "manual_retry" and order.status == Order.Status.COMPLETED and order_has_partial_delivery(order)
+        if order.status == Order.Status.COMPLETED and order.verification_status == Order.VerificationStatus.VERIFIED and not partial_retry:
             return ProvisioningResult(
                 True,
                 "سفارش قبلاً تکمیل شده است.",
@@ -1021,7 +1057,7 @@ def approve_and_provision_order(order, actor=None, source=None, notify=True):
                 order_status=order.status,
                 provisioning_status=order.provisioning_status,
             )
-        block_reason = _provisioning_block_reason(order)
+        block_reason = "" if partial_retry and order.verification_status == Order.VerificationStatus.VERIFIED else _provisioning_block_reason(order)
         if block_reason:
             logger.warning(
                 "approve_and_provision_order refused order_id=%s tracking=%s status=%s verification=%s reason=%s",
@@ -1038,6 +1074,15 @@ def approve_and_provision_order(order, actor=None, source=None, notify=True):
                 provisioning_status=order.provisioning_status,
                 safe_error=block_reason,
             )
+
+        metadata = dict(order.metadata or {})
+        metadata["provisioning_last_attempt_at"] = timezone.now().isoformat()
+        metadata.setdefault("provisioning_email_prefix", order.username or build_client_display_name(
+            order.customer, order=order, preferred_name=order.sender_card_name,
+            short_id=order.order_tracking_code, metadata=metadata,
+        ))
+        order.metadata = metadata
+        order.save(update_fields=["metadata", "updated_at"])
 
         from .cup_fulfillment_services import fulfill_order_with_recipe
         from .plan_delivery_execution import execute_plan_delivery
@@ -1132,8 +1177,19 @@ def approve_and_provision_order(order, actor=None, source=None, notify=True):
         if notify and not result.already_provisioned:
             from .telegram_bot.notifications import notify_order_event
 
-            notify_order_event(order, event_type="approved")
+            if source == "manual_retry":
+                sent = notify_order_event(order, event_type="approved", force_customer=True)
+            else:
+                sent = notify_order_event(order, event_type="approved")
             result.delivery_attempted = True
+            if not sent:
+                result.message += " پیام مشتری ارسال نشد؛ وضعیت ارسال را بررسی کنید."
+
+    else:
+        order.refresh_from_db()
+        order.provisioning_status = Order.ProvisioningStatus.FAILED
+        order.last_provisioning_error = result.safe_error or result.message
+        order.save(update_fields=["provisioning_status", "last_provisioning_error", "updated_at"])
 
     logger.info(
         "approve_and_provision_order finished order_id=%s tracking=%s ok=%s provisioning=%s",

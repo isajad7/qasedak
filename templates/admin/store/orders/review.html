@@ -104,6 +104,9 @@
                     <div><dt>Provisioned at</dt><dd>{% if delivery.provisioned_at %}{{ delivery.provisioned_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</dd></div>
                     <div><dt>Config ساخته شده؟</dt><dd>{% if delivery.config_created %}بله{% else %}خیر{% endif %}</dd></div>
                     <div><dt>Config ارسال شده؟</dt><dd>{{ delivery.config_sent }}</dd></div>
+                    <div><dt>آخرین تلاش تکمیل سرویس</dt><dd>{{ delivery.last_attempt_at|default:"-" }}</dd></div>
+                    <div><dt>آخرین تلاش ارسال پیام</dt><dd>{{ delivery.notification.attempted_at|date:"Y-m-d H:i:s"|default:"-" }} · {{ delivery.notification.attempts|default:"0" }} تلاش</dd></div>
+                    <div><dt>خطای ارسال پیام</dt><dd>{{ delivery.notification.error|default:"-" }}</dd></div>
                     <div><dt>تعداد کانفیگ</dt><dd>{{ delivery.active_client_count }} فعال از {{ delivery.client_count }}</dd></div>
                     <div><dt>وضعیت کلاینت اصلی</dt><dd>{% if delivery.primary_client_status %}{{ delivery.primary_client_status }}{% else %}-{% endif %}</dd></div>
                     <div><dt>آخرین خطا</dt><dd>{% if delivery.last_error %}{{ delivery.last_error }}{% else %}-{% endif %}</dd></div>
@@ -188,9 +191,17 @@
                     {% csrf_token %}
                     <label class="qadmin-confirm-row">
                         <input type="checkbox" name="confirm_external" value="1" required>
-                        تایید می‌کنم retry delivery ممکن است X-UI و Telegram را اجرا کند.
+                        تلاش مجدد تکمیل همین سفارش و اطلاع‌رسانی به مشتری را تایید می‌کنم.
                     </label>
-                    <button type="submit" name="action" value="retry_delivery" class="qadmin-button qadmin-button-secondary">Retry delivery</button>
+                    <button type="submit" name="action" value="retry_delivery" class="qadmin-button qadmin-button-secondary">تلاش مجدد تکمیل سفارش</button>
+                </form>
+            {% endif %}
+
+            {% if can_resend_result %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <input type="hidden" name="confirm_external" value="1">
+                    <button type="submit" name="action" value="resend_result" class="qadmin-button qadmin-button-secondary">ارسال مجدد پیام و لینک سرویس</button>
                 </form>
             {% endif %}
 

@@ -2099,18 +2099,16 @@ def can_reject_order(order):
 
 
 def can_retry_delivery(order):
-    if not can_approve_order(order):
-        return False
-    if order.status in {Order.Status.COMPLETED, Order.Status.REJECTED, Order.Status.CANCELLED}:
-        return False
-    return bool(prefetched_clients(order))
+    from .order_recovery import can_retry_order
+
+    return can_retry_order(order)
 
 
 def handle_order_review_action(request, order):
     action = request.POST.get("action", "")
     review_url = order_review_url(order)
 
-    if action not in {"approve", "reject", "retry_delivery", "confirm_auto_payment", "cancel_auto_approval"}:
+    if action not in {"approve", "reject", "retry_delivery", "resend_result", "confirm_auto_payment", "cancel_auto_approval"}:
         messages.error(request, "Action معتبر نیست.")
         return redirect(review_url)
     if action in {"reject", "cancel_auto_approval"}:
@@ -2123,6 +2121,12 @@ def handle_order_review_action(request, order):
         return redirect(review_url)
 
     try:
+        if action == "resend_result":
+            from .order_recovery import resend_order_result
+
+            result = resend_order_result(order)
+            (messages.success if result.success else messages.error)(request, safe_action_message(result.message))
+            return redirect(review_url)
         if action == "confirm_auto_payment":
             confirm_auto_payment(order.pk, user=request.user, note=request.POST.get("reason", ""))
             messages.success(request, "تطبیق پرداخت ثبت شد؛ سرویس دوباره ساخته یا تمدید نشد.")
@@ -2166,7 +2170,9 @@ def handle_order_review_action(request, order):
         if not can_retry_delivery(order):
             messages.error(request, "Retry delivery برای این سفارش امن یا در دسترس نیست.")
             return redirect(review_url)
-        result = activate_order(order, user=request.user, notify=True)
+        from .order_recovery import retry_order_completion
+
+        result = retry_order_completion(order, actor=request.user)
         if result.success:
             messages.success(request, safe_action_message(result.message))
         else:
@@ -2182,6 +2188,8 @@ def handle_order_review_action(request, order):
 
 
 def build_review_context(order):
+    from .order_recovery import can_resend_order, customer_notification_summary
+
     payment_label, payment_tone = payment_status(order)
     delivery_label, delivery_tone = delivery_status(order)
     route_label, route_tone = route_status(order)
@@ -2224,7 +2232,9 @@ def build_review_context(order):
             "panel": order.inbound.panel.name if order.inbound_id and order.inbound and order.inbound.panel_id else "",
             "inbound": str(order.inbound) if order.inbound_id else "",
             "config_created": bool(clients),
-            "config_sent": "ثبت جداگانه ندارد",
+            "config_sent": customer_notification_summary(order)["label"],
+            "notification": customer_notification_summary(order),
+            "last_attempt_at": (order.metadata or {}).get("provisioning_last_attempt_at") or "",
             "client_count": len(clients),
             "active_client_count": sum(1 for client in clients if client.status == VPNClient.Status.ACTIVE),
             "last_error": safe_action_message(last_error) if last_error else "",
@@ -2241,6 +2251,7 @@ def build_review_context(order):
         "can_approve": can_approve_order(order),
         "can_reject": can_reject_order(order),
         "can_retry_delivery": can_retry_delivery(order),
+        "can_resend_result": can_resend_order(order),
         "service_reviews": [
             {
                 "label": f"Service #{client.pk}",
@@ -2275,6 +2286,7 @@ def order_review(request, order_id):
     review_context["can_approve"] = review_context["can_approve"] and user_has_capability(request.user, "orders.approve")
     review_context["can_reject"] = review_context["can_reject"] and user_has_capability(request.user, "orders.reject")
     review_context["can_retry_delivery"] = review_context["can_retry_delivery"] and user_has_capability(request.user, "orders.approve")
+    review_context["can_resend_result"] = review_context["can_resend_result"] and user_has_capability(request.user, "orders.approve")
     if not user_has_capability(request.user, "support.reply"):
         review_context["customer_message_url"] = ""
     if not user_has_capability(request.user, "support.view"):
