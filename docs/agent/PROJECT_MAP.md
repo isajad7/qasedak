@@ -43,4 +43,3 @@ rg -n 'class (SubscriptionCupMVPTests|WebCheckoutReceiptTests|ModernPaidProvisio
 ```
 
 Tests are mostly in `store/tests.py` (large) and `payments/tests.py`, with smaller tests under feature packages. `scripts/release_check.sh` and `.github/workflows/ci.yml` define release and CI checks. Documentation for other operational features already exists under `docs/`; search by the feature name instead of duplicating it here.
-
