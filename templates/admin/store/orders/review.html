@@ -52,6 +52,25 @@
             </article>
 
             <article class="qadmin-review-panel">
+                <header><h2>درآمد سفارش</h2></header>
+                <dl class="qadmin-review-grid">
+                    <div><dt>محاسبه در درآمد</dt><dd>{{ revenue_included_label }}</dd></div>
+                    <div><dt>درآمد قابل گزارش</dt><dd>{{ recognized_revenue }}</dd></div>
+                </dl>
+                {% if can_edit_revenue %}
+                <form method="post" class="qadmin-action-form">
+                    {% csrf_token %}
+                    <label for="id_revenue_included">{{ revenue_form.revenue_included.label }}</label>
+                    {{ revenue_form.revenue_included }}
+                    <label for="id_revenue_amount">مبلغ درآمد ({{ revenue_currency }})</label>
+                    {{ revenue_form.revenue_amount }}
+                    <button type="submit" name="action" value="update_revenue" class="qadmin-button">ذخیره وضعیت درآمد</button>
+                </form>
+                {% endif %}
+                <p>درآمد فقط پس از پرداخت و تکمیل سفارش وارد گزارش می‌شود.</p>
+            </article>
+
+            <article class="qadmin-review-panel">
                 <header>
                     <h2>پرداخت / رسید</h2>
                     <span class="qadmin-badge qadmin-badge-{{ payment.tone }}">{{ payment.label }}</span>

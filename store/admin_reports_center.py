@@ -18,6 +18,7 @@ from payments.models import IncomingPaymentSMS
 
 from .customer_analytics import renewal_order_q
 from .jalali import format_jalali_date, persian_digits
+from .order_revenue import revenue_amount_expression
 from .models import (
     BotConfiguration,
     BotEventLog,
@@ -329,7 +330,7 @@ def _orders_created(start, end, store=None):
 
 
 def _money_rows(queryset):
-    return list(queryset.values("currency").annotate(total=Sum("amount"), count=Count("id")).order_by("currency"))
+    return list(queryset.values("currency").annotate(total=Sum(revenue_amount_expression()), count=Count("id")).order_by("currency"))
 
 
 def _format_int(value):
@@ -429,14 +430,14 @@ def get_sales_metrics(period, store=None):
     renewal_filter = renewal_order_q()
 
     revenue_rows = _money_rows(successful)
-    total_revenue = successful.aggregate(total=Sum("amount"))["total"] or 0
-    previous_revenue = previous_successful.aggregate(total=Sum("amount"))["total"] or 0
+    total_revenue = successful.aggregate(total=Sum(revenue_amount_expression()))["total"] or 0
+    previous_revenue = previous_successful.aggregate(total=Sum(revenue_amount_expression()))["total"] or 0
     successful_count = successful.count()
     previous_successful_count = previous_successful.count()
     renewal_successful = successful.filter(renewal_filter)
     previous_renewal_successful = previous_successful.filter(renewal_filter)
     renewal_count = renewal_successful.count()
-    renewal_revenue = renewal_successful.aggregate(total=Sum("amount"))["total"] or 0
+    renewal_revenue = renewal_successful.aggregate(total=Sum(revenue_amount_expression()))["total"] or 0
     new_purchase_count = successful.exclude(renewal_filter).count()
     pending_count = orders.filter(status__in=PENDING_ORDER_STATUSES).count()
     failed_count = orders.filter(status__in=FAILED_ORDER_STATUSES).count()
@@ -446,7 +447,7 @@ def get_sales_metrics(period, store=None):
     volume_expression = ExpressionWrapper(F("plan__volume_gb") * F("quantity"), output_field=DECIMAL_FIELD)
     plan_rows = list(
         successful.values("plan_id", "plan__name", "plan__is_custom_volume", "currency")
-        .annotate(count=Count("id"), revenue=Sum("amount"), sold_gb=Sum(volume_expression))
+        .annotate(count=Count("id"), revenue=Sum(revenue_amount_expression()), sold_gb=Sum(volume_expression))
         .order_by("-count", "-revenue", "plan__name")[:5]
     )
     for row in plan_rows:
@@ -478,11 +479,11 @@ def get_sales_metrics(period, store=None):
         "top_plans": plan_rows,
         "custom_volume": {
             "count": custom_orders.count(),
-            "revenue": custom_orders.aggregate(total=Sum("amount"))["total"] or 0,
+            "revenue": custom_orders.aggregate(total=Sum(revenue_amount_expression()))["total"] or 0,
         },
         "fixed_plan": {
             "count": fixed_orders.count(),
-            "revenue": fixed_orders.aggregate(total=Sum("amount"))["total"] or 0,
+            "revenue": fixed_orders.aggregate(total=Sum(revenue_amount_expression()))["total"] or 0,
         },
         "links": {
             "orders": _workbench_url("admin_store_order_workbench", store, "completed"),
@@ -945,7 +946,7 @@ def get_daily_series(period, store=None):
     revenue_rows = list(
         successful.annotate(day=TruncDate(success_expression, tzinfo=period.timezone))
         .values("day")
-        .annotate(total=Sum("amount"), count=Count("id"))
+        .annotate(total=Sum(revenue_amount_expression()), count=Count("id"))
         .order_by("day")
     )
     customers = _period_filter(_customers_for_store(store), "created_at", period.start, period.end)

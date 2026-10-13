@@ -117,10 +117,46 @@
             <a href="{{ message_url }}" class="qadmin-action qadmin-action-warning">پیام به مشتری</a>
             <a href="{{ support_workbench_url }}" class="qadmin-action qadmin-action-secondary">میز کار پشتیبانی</a>
             <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-secondary">فرم ادمین مشتری</a>
-            <div class="qadmin-disabled-note">
-                <strong>Side effects</strong>
-                <p>این صفحه فقط read-only است و هیچ Telegram/X-UI call اجرا نمی‌کند.</p>
-            </div>
+            {% if can_grant_service %}
+            <h3>اختصاص سرویس به مشتری</h3>
+            <form method="post" class="qadmin-action-form" id="grant-service-form">
+                {% csrf_token %}
+                {{ grant_form.non_field_errors }}
+                <label for="id_plan">پلن سرویس</label>
+                {{ grant_form.plan.errors }}
+                <select id="id_plan" name="plan" required>
+                    <option value="">انتخاب کنید</option>
+                    {% for plan in grant_plans %}
+                    <option value="{{ plan.id }}" data-price="{{ plan.price }}" data-currency="{{ plan.currency }}" {% if grant_form.plan.value|stringformat:"s" == plan.id|stringformat:"s" %}selected{% endif %}>{{ plan.label }} · {{ plan.price }} {{ plan.currency }}</option>
+                    {% endfor %}
+                </select>
+                <label for="id_revenue_included">{{ grant_form.revenue_included.label }}</label>
+                {{ grant_form.revenue_included.errors }}{{ grant_form.revenue_included }}
+                <label for="id_revenue_amount">مبلغ درآمد (<span id="grant-currency">واحد پول پلن</span>)</label>
+                {{ grant_form.revenue_amount.errors }}{{ grant_form.revenue_amount }}
+                <label for="id_reason">{{ grant_form.reason.label }}</label>
+                {{ grant_form.reason.errors }}{{ grant_form.reason }}
+                <button type="submit" name="action" value="grant_service" class="qadmin-button">اختصاص سرویس و ارسال به مشتری</button>
+            </form>
+            <script>
+            (() => {
+                const form = document.getElementById('grant-service-form');
+                const plan = form.querySelector('[name="plan"]');
+                const amount = form.querySelector('[name="revenue_amount"]');
+                const included = form.querySelector('[name="revenue_included"]');
+                const update = (suggestPrice) => {
+                    const option = plan.selectedOptions[0];
+                    document.getElementById('grant-currency').textContent = option.dataset.currency || 'واحد پول پلن';
+                    if (suggestPrice) amount.value = option.dataset.price || '';
+                    amount.disabled = included.value !== 'yes';
+                    amount.required = included.value === 'yes';
+                };
+                plan.addEventListener('change', () => update(true));
+                included.addEventListener('change', () => update(!amount.value));
+                update(false);
+            })();
+            </script>
+            {% endif %}
         </aside>
     </section>
 </div>

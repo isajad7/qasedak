@@ -3802,6 +3802,12 @@ class OrderResource(resources.ModelResource):
         widget=ForeignKeyWidget(Inbound, "id"),
     )
 
+    reported_revenue = fields.Field(column_name="reported_revenue", readonly=True)
+
+    def dehydrate_reported_revenue(self, order):
+        from .order_revenue import order_revenue_amount
+        return order_revenue_amount(order)
+
     class Meta:
         model = Order
         import_id_fields = ("order_tracking_code",)
@@ -3824,6 +3830,9 @@ class OrderResource(resources.ModelResource):
             "discount_source",
             "discount_amount",
             "amount",
+            "revenue_included",
+            "revenue_amount",
+            "reported_revenue",
             "currency",
             "sender_card_name",
             "sender_card_last4",
@@ -4081,6 +4090,8 @@ class OrderAdmin(ImportExportModelAdmin):
         "discount_source",
         "discount_amount",
         "amount",
+        "revenue_included",
+        "revenue_amount",
         "currency",
         "created_at",
         "updated_at",
@@ -4140,6 +4151,8 @@ class OrderAdmin(ImportExportModelAdmin):
                     "discount_amount",
                     "amount",
                     "currency",
+                    "revenue_included",
+                    "revenue_amount",
                 )
             },
         ),

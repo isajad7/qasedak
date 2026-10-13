@@ -27,6 +27,7 @@ from .admin_setup import (
 )
 from .admin_support_services import support_workbench_url
 from .jalali import format_jalali_datetime, format_jalali_date
+from .order_revenue import revenue_amount_expression
 from .models import (
     BotConfiguration,
     BroadcastMessage,
@@ -146,7 +147,7 @@ def format_money(amount, currency):
 
 
 def revenue_by_currency(queryset):
-    rows = queryset.values("currency").annotate(total=Sum("amount"), count=Count("id")).order_by("currency")
+    rows = queryset.values("currency").annotate(total=Sum(revenue_amount_expression()), count=Count("id")).order_by("currency")
     by_currency = {row["currency"]: int(row["total"] or 0) for row in rows}
     display = [format_money(total, currency) for currency, total in by_currency.items()]
     return {

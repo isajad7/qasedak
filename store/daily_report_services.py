@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from .admin_notifications import send_admin_message_to_telegram_admins
 from .jalali import format_jalali_date, persian_digits
+from .order_revenue import revenue_amount_expression
 from .models import (
     BotConfiguration,
     BotEventLog,
@@ -124,7 +125,7 @@ def collect_daily_sales_stats(period_start, period_end, *, store=None):
         or "TOMAN"
     )
     return {
-        "successful_amount": successful.aggregate(total=Sum("amount"))["total"] or 0,
+        "successful_amount": successful.aggregate(total=Sum(revenue_amount_expression()))["total"] or 0,
         "successful_count": len(successful_orders),
         "successful_renewals": sum(1 for order in successful_orders if _is_renewal_order(order)),
         "currency": currency,

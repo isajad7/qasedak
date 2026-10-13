@@ -1408,8 +1408,47 @@ def grant_free_subscription(
     reason="",
     metadata=None,
     notify_customer=True,
+    revenue_included=False,
+    revenue_amount=None,
 ):
     from .order_actions import activate_order
+
+    if revenue_included and (revenue_amount is None or not 0 < revenue_amount <= 2147483647):
+        return ProvisionedOrderResult(False, "مبلغ درآمد باید مثبت باشد.")
+
+    canonical_delivery, delivery_error = canonical_delivery_for_checkout(plan, store)
+    if delivery_error:
+        return ProvisionedOrderResult(False, delivery_error)
+    if canonical_delivery is not None:
+        now = timezone.now()
+        tracking_code = generate_order_tracking()
+        grant_metadata = dict(metadata or {})
+        grant_metadata.update({
+            "source": "admin_free", "free_grant": True, "free_grant_reason": reason,
+            "suppress_new_order_notification": True, "suppress_admin_order_updates": True,
+            "suppress_customer_notification": not notify_customer,
+            "provisioning_strategy": PLAN_DELIVERY_V2_CHECKOUT_STRATEGY,
+            "plan_delivery_v2": {
+                "status": "awaiting_payment", "delivery_config_id": canonical_delivery.delivery_config_id,
+                "delivery_mode": canonical_delivery.effective_mode,
+                "source_of_truth": canonical_delivery.source_of_truth,
+                "source_count": canonical_delivery.source_count,
+                "expected_output_count": canonical_delivery.expected_output_count,
+            },
+        })
+        order = Order.objects.create(
+            store=store, customer=customer, plan=plan, order_tracking_code=tracking_code,
+            username=build_client_display_name(customer, short_id=tracking_code, metadata=grant_metadata),
+            original_amount=plan.price, discount_amount=plan.price, amount=0, currency=plan.currency,
+            status=Order.Status.PENDING_PAYMENT, provisioning_status=Order.ProvisioningStatus.PENDING,
+            payment_method=Order.PaymentMethod.ADMIN_FREE, is_paid=True, payment_submitted_at=now,
+            payment_date=timezone.localdate(now, TEHRAN_TZ), metadata=grant_metadata,
+            revenue_included=bool(revenue_included), revenue_amount=revenue_amount if revenue_included else None,
+        )
+        result = activate_order(order, user=granted_by, notify=True)
+        order.refresh_from_db()
+        vpn_client = order.vpn_clients.order_by("created_at", "pk").first()
+        return ProvisionedOrderResult(result.success, result.message, order, vpn_client)
 
     try:
         inbound = inbound or select_inbound_for_plan(
@@ -1475,6 +1514,8 @@ def grant_free_subscription(
         order_defaults = {
             "status": Order.Status.PENDING_PAYMENT,
             "payment_method": Order.PaymentMethod.ADMIN_FREE,
+            "revenue_included": bool(revenue_included),
+            "revenue_amount": revenue_amount if revenue_included else None,
             "is_paid": True,
             "payment_submitted_at": now,
             "payment_date": timezone.localdate(now, TEHRAN_TZ),
@@ -1515,4 +1556,4 @@ def grant_free_subscription(
     vpn_client = order.vpn_clients.order_by("created_at", "pk").first()
     if not result.success:
         return ProvisionedOrderResult(False, result.message, order, vpn_client)
-    return ProvisionedOrderResult(True, "اشتراک رایگان ساخته و فعال شد.", order, vpn_client)
+    return ProvisionedOrderResult(True, "سرویس مشتری ساخته و فعال شد.", order, vpn_client)

@@ -7,6 +7,7 @@ from django.db.models import Count, ExpressionWrapper, F, OuterRef, Q, Subquery,
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
+from .order_revenue import completed_paid_order_q, revenue_amount_expression
 from .models import Customer, Order, ReferralRewardLedger, Store, VPNClient
 
 
@@ -171,8 +172,7 @@ def _purchase_at_range_q(prefix="", date_from=None, date_to=None):
 
 
 def successful_order_q(prefix="", date_from=None, date_to=None):
-    query = Q(**{f"{prefix}status__in": get_success_order_statuses()})
-    query &= Q(**{f"{prefix}verification_status": Order.VerificationStatus.VERIFIED})
+    query = completed_paid_order_q(prefix)
     query &= _purchase_at_range_q(prefix=prefix, date_from=date_from, date_to=date_to)
     return query
 
@@ -210,7 +210,7 @@ def annotate_customer_queryset(queryset=None, date_from=None, date_to=None):
 
     total_paid = (
         successful_orders.values("customer")
-        .annotate(total=Sum("amount"))
+        .annotate(total=Sum(revenue_amount_expression()))
         .values("total")
     )
     successful_count = (
@@ -274,7 +274,7 @@ def annotate_customer_queryset(queryset=None, date_from=None, date_to=None):
     )
     successful_referral_amount = (
         successful_referral_orders.values("customer__referred_by")
-        .annotate(total=Sum("amount"))
+        .annotate(total=Sum(revenue_amount_expression()))
         .values("total")
     )
 

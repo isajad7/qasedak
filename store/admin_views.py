@@ -135,6 +135,10 @@ from .models import (
     VPNClient,
     normalize_payment_digits,
 )
+from .order_revenue import (
+    AdminServiceGrantForm, is_admin_direct_order, order_counts_in_revenue,
+    order_revenue_amount, revenue_form_for_order, update_order_revenue,
+)
 from .order_actions import activate_order, reject_order
 from .order_automation import OrderAutomationSettingsForm, cancel_auto_approved_order, confirm_auto_payment
 from .orchestrator_v2.models import TenantInstance
@@ -1792,7 +1796,33 @@ def build_customer_review_context(customer):
 @require_any_admin_capability("orders.view", "services.view", "support.view")
 def customer_review(request, customer_id):
     customer = get_review_customer(customer_id)
+    grant_form = AdminServiceGrantForm(request.POST if request.method == "POST" else None)
+    if request.method == "POST":
+        ensure_admin_capability(request.user, "orders.approve")
+        if request.POST.get("action") != "grant_service":
+            messages.error(request, "عملیات معتبر نیست.")
+        elif grant_form.is_valid():
+            from .order_services import grant_free_subscription
+
+            plan = grant_form.cleaned_data["plan"]
+            result = grant_free_subscription(
+                store=plan.store, customer=customer, plan=plan, granted_by=request.user,
+                reason=grant_form.cleaned_data["reason"],
+                revenue_included=grant_form.cleaned_data["revenue_included"],
+                revenue_amount=grant_form.cleaned_data["revenue_amount"],
+            )
+            (messages.success if result.success else messages.error)(request, safe_action_message(result.message))
+            if result.order:
+                return redirect(order_review_url(result.order))
+        else:
+            messages.error(request, "اطلاعات فرم را اصلاح کن.")
     review_context = build_customer_review_context(customer)
+    review_context["grant_form"] = grant_form
+    review_context["can_grant_service"] = user_has_capability(request.user, "orders.approve")
+    review_context["grant_plans"] = [
+        {"id": plan.pk, "label": f"{plan.name} · {plan.store.name}", "price": plan.price, "currency": plan.get_currency_display()}
+        for plan in grant_form.fields["plan"].queryset
+    ]
     if not user_has_capability(request.user, "support.reply"):
         review_context["message_url"] = ""
     context = {
@@ -2108,6 +2138,19 @@ def handle_order_review_action(request, order):
     action = request.POST.get("action", "")
     review_url = order_review_url(order)
 
+    if action == "update_revenue":
+        ensure_admin_capability(request.user, "orders.approve")
+        form = revenue_form_for_order(order, request.POST)
+        if form.is_valid():
+            try:
+                update_order_revenue(order, included=form.cleaned_data["revenue_included"], amount=form.cleaned_data["revenue_amount"])
+                messages.success(request, "وضعیت درآمد ذخیره شد.")
+            except ValidationError as exc:
+                messages.error(request, "؛ ".join(exc.messages))
+        else:
+            messages.error(request, "؛ ".join(str(error) for errors in form.errors.values() for error in errors))
+        return redirect(review_url)
+
     if action not in {"approve", "reject", "retry_delivery", "resend_result", "confirm_auto_payment", "cancel_auto_approval"}:
         messages.error(request, "Action معتبر نیست.")
         return redirect(review_url)
@@ -2275,6 +2318,11 @@ def order_review(request, order_id):
         return handle_order_review_action(request, order)
 
     review_context = build_review_context(order)
+    review_context["revenue_form"] = revenue_form_for_order(order)
+    review_context["can_edit_revenue"] = user_has_capability(request.user, "orders.approve") and not is_admin_direct_order(order)
+    review_context["revenue_included_label"] = "بله" if order_counts_in_revenue(order) else "خیر"
+    review_context["recognized_revenue"] = money_label(order_revenue_amount(order), order.currency)
+    review_context["revenue_currency"] = order.get_currency_display()
     automation = getattr(order, "automation", None)
     has_auto_approval = bool(automation and automation.auto_approved_at)
     review_context["automation"] = automation if has_auto_approval else None

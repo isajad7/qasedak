@@ -24,6 +24,7 @@ from store.jalali import persian_digits
 from store.models import Order
 from store.order_services import get_current_store
 
+from store.order_revenue import revenue_amount_expression
 from .formatting import bot_datetime, bot_money
 from .user_menu import main_menu_keyboard
 
@@ -220,7 +221,7 @@ def admin_sales_report_text(config):
     completed = orders.filter(status=Order.Status.COMPLETED)
     pending = orders.filter(status=Order.Status.PENDING_VERIFICATION)
     rejected = orders.filter(status=Order.Status.REJECTED)
-    revenue = completed.aggregate(total=Sum("amount"))["total"] or 0
+    revenue = completed.aggregate(total=Sum(revenue_amount_expression()))["total"] or 0
     lines = [
         "گزارش فروش",
         "━━━━━━━━━━━━━━",

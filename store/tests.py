@@ -8902,6 +8902,7 @@ class DailyAdminReportServiceTests(TestCase):
             plan=self.plan,
             inbound=self.inbound,
             status=status,
+            is_paid=status == Order.Status.COMPLETED,
             original_amount=amount,
             amount=amount,
             currency=Plan.Currency.TOMAN,
@@ -8932,7 +8933,7 @@ class DailyAdminReportServiceTests(TestCase):
         sales = collect_daily_sales_stats(start, end, store=self.store)
         orders = collect_daily_order_stats(start, end, store=self.store)
 
-        self.assertEqual(sales["successful_amount"], 300000)
+        self.assertEqual(sales["successful_amount"], 100000)
         self.assertEqual(sales["successful_count"], 2)
         self.assertEqual(sales["successful_renewals"], 1)
         self.assertEqual(orders["pending"], 1)

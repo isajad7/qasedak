@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from store.models import BotAdminOrderMessage, BotConfiguration, BotEventLog, Order
 
+from store.order_revenue import revenue_amount_expression
 from .formatting import money
 
 
@@ -569,11 +570,11 @@ def build_sales_report(config):
     completed = orders.filter(status=Order.Status.COMPLETED)
     pending = orders.filter(status=Order.Status.PENDING_VERIFICATION)
     rejected = orders.filter(status=Order.Status.REJECTED)
-    gross = completed.aggregate(total=Sum("amount"))["total"] or 0
+    gross = completed.aggregate(total=Sum(revenue_amount_expression()))["total"] or 0
     completed_count = completed.count()
     plan_rows = (
         completed.values("plan__name")
-        .annotate(count=Count("id"), total=Sum("amount"))
+        .annotate(count=Count("id"), total=Sum(revenue_amount_expression()))
         .order_by("-count")[:5]
     )
 

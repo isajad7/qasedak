@@ -3335,6 +3335,14 @@ class Order(TimeStampedModel):
         db_index=True,
     )
     amount = models.PositiveIntegerField(_("amount"), default=0)
+    revenue_included = models.BooleanField(
+        "محاسبه در درآمد", null=True, blank=True, default=None,
+        help_text="خالی: قاعدهٔ معمول سفارش؛ خرید مستقیم ادمین همیشه خارج از درآمد است.",
+    )
+    revenue_amount = models.PositiveIntegerField(
+        "مبلغ درآمد", null=True, blank=True,
+        help_text="مبلغ انتخاب‌شدهٔ ادمین، با واحد پول سفارش؛ مبلغ پرداخت را تغییر نمی‌دهد.",
+    )
     currency = models.CharField(
         _("currency"),
         max_length=10,
@@ -3452,6 +3460,11 @@ class Order(TimeStampedModel):
 
     def clean(self):
         super().clean()
+        if self.revenue_included is True and not self.revenue_amount:
+            raise ValidationError({"revenue_amount": "مبلغ درآمد باید مثبت باشد."})
+        from .order_revenue import is_admin_direct_order
+        if self.revenue_included is True and is_admin_direct_order(self):
+            raise ValidationError({"revenue_included": "خرید مستقیم ادمین در درآمد حساب نمی‌شود."})
         sales_mode = self.store.sales_mode if self.store_id else Store.SalesMode.TUNNEL
         if sales_mode != Store.SalesMode.OPERATOR_BASED:
             return
