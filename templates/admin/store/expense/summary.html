@@ -1,0 +1,33 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+{% block extrastyle %}{{ block.super }}<link rel="stylesheet" href="{% static 'admin/qasedak_admin.css' %}">{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">خانه</a> &rsaquo; <a href="{% url 'admin:store_expense_changelist' %}">هزینه‌ها</a> &rsaquo; خلاصهٔ مالی</div>{% endblock %}
+{% block content %}
+<div class="qadmin-setup qadmin-reports" dir="rtl">
+  <section class="qadmin-hero"><div><p class="qadmin-eyebrow">Financial overview</p><h1>هزینه‌ها و خلاصهٔ مالی</h1><p>هزینه‌های ثبت‌شده در برابر درآمد سفارش‌های تکمیل‌شده؛ {{ period.display }}</p></div>
+    <div class="qadmin-hero-actions"><a class="qadmin-action" href="{% url 'admin:store_expense_add' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}">ثبت هزینه</a><a class="qadmin-action qadmin-action-secondary" href="{% url 'admin:store_expense_changelist' %}">مدیریت هزینه‌ها</a></div>
+  </section>
+  {% if period.errors %}<section class="qadmin-report-alert qadmin-status-warning">{% for error in period.errors %}<p>{{ error }}</p>{% endfor %}</section>{% endif %}
+  <section class="qadmin-report-filter-panel"><form method="get" class="qadmin-store-switcher">
+    <label>فروشگاه <select name="store" required>{% for item in stores %}<option value="{{ item.pk }}" {% if item.pk == selected_store.pk %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></label>
+    <label>بازه <select name="range"><option value="today" {% if period.key == 'today' %}selected{% endif %}>امروز</option><option value="this_month" {% if period.key == 'this_month' %}selected{% endif %}>ماه جاری</option><option value="7d" {% if period.key == '7d' %}selected{% endif %}>۷ روز اخیر</option><option value="30d" {% if period.key == '30d' %}selected{% endif %}>۳۰ روز اخیر</option><option value="custom" {% if period.is_custom %}selected{% endif %}>بازهٔ دلخواه</option></select></label>
+    <label>از <input name="start" type="text" placeholder="YYYY-MM-DD" value="{{ request.GET.start }}"></label>
+    <label>تا <input name="end" type="text" placeholder="YYYY-MM-DD" value="{{ request.GET.end }}"></label>
+    <label>دسته <select name="category"><option value="">همه</option>{% for key,label in categories %}<option value="{{ key }}" {% if selected_category == key %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>شرح <input name="q" value="{{ query }}" maxlength="100"></label><button class="qadmin-action" type="submit">نمایش</button>
+  </form><p>تاریخ را به صورت میلادی یا شمسی با قالب YYYY-MM-DD وارد کن. جمع مالی برای کل بازه است؛ جمع فهرست از دسته و جست‌وجو نیز پیروی می‌کند.</p></section>
+  {% if not period.blocked and selected_store %}
+  <section class="qadmin-report-filter-panel"><h2>خلاصهٔ مالی</h2>
+    <table><thead><tr><th>واحد پول</th><th>درآمد</th><th>هزینه‌های ثبت‌شده</th><th>درآمد منهای هزینه‌های ثبت‌شده</th></tr></thead><tbody>
+    {% for row in financial_rows %}<tr><td>{{ row.currency }}</td><td>{{ row.revenue_display }}</td><td>{{ row.expense_display }}</td><td>{{ row.net_display }}</td></tr>{% endfor %}
+    </tbody></table>
+    <h3>هزینه به تفکیک دسته</h3><ul>{% for row in category_rows %}<li>{{ row.label }}: {{ row.display }}</li>{% empty %}<li>هزینه‌ای در این بازه ثبت نشده است.</li>{% endfor %}</ul>
+  </section>
+  <section class="qadmin-report-filter-panel"><h2>هزینه‌های مطابق فیلتر</h2><p>جمع: {% for total in matching_totals %}{{ total }}{% if not forloop.last %}، {% endif %}{% empty %}۰ تومان{% endfor %}</p>
+  <table><thead><tr><th>تاریخ</th><th>مبلغ</th><th>دسته</th><th>توضیح</th><th>پنل</th><th>عملیات</th></tr></thead><tbody>
+    {% for item in page %}<tr><td>{{ item.date_display }}</td><td>{{ item.money_display }}</td><td>{{ item.get_category_display }}</td><td>{{ item.description }}</td><td>{{ item.panel.name|default:'—' }}</td><td><a href="{% url 'admin:store_expense_change' item.pk %}">ویرایش</a> · <a href="{% url 'admin:store_expense_delete' item.pk %}">حذف</a></td></tr>{% empty %}<tr><td colspan="6">هزینه‌ای یافت نشد.</td></tr>{% endfor %}
+  </tbody></table>
+  <nav>{% if page.has_previous %}<a href="?{{ page_params }}&amp;page={{ page.previous_page_number }}">قبلی</a>{% endif %} صفحهٔ {{ page.number }} از {{ page.paginator.num_pages }} {% if page.has_next %}<a href="?{{ page_params }}&amp;page={{ page.next_page_number }}">بعدی</a>{% endif %}</nav>
+  </section>{% endif %}
+</div>
+{% endblock %}

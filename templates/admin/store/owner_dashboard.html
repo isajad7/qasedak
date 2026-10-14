@@ -26,6 +26,7 @@
         <div class="qadmin-hero-actions">
             <a href="{% url 'admin_store_customer_activity' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-info">فعالیت واقعی مشتری‌ها</a>
             <a href="{% url 'admin_store_reports_center' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-info">گزارش‌ها و تحلیل</a>
+            <a href="{% url 'admin:store_expense_summary' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-info">هزینه‌ها و خلاصهٔ مالی</a>
             <a href="{% url 'admin_store_campaign_workbench' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action qadmin-action-info">کمپین‌ها و پیام‌رسانی</a>
             <a href="{% url 'admin_store_catalog' %}{% if selected_store %}?store={{ selected_store.pk }}{% endif %}" class="qadmin-action">مدیریت محصولات</a>
             <a href="{% url 'admin_store_backup_center' %}" class="qadmin-action qadmin-action-info">پشتیبان‌گیری و انتقال سرور</a>

@@ -36,6 +36,7 @@
                             <i class="fas fa-chart-line" aria-hidden="true"></i>
                             مشاهده جزئیات داشبورد
                         </a>
+                        {% if perms.store.view_expense %}<a href="{% url 'admin:store_expense_summary' %}{% if admin_home.selected_store %}?store={{ admin_home.selected_store.pk }}{% endif %}" class="tw-button tw-button-secondary">هزینه‌ها و خلاصهٔ مالی</a>{% endif %}
                     {% endif %}
                     {% if request.user|has_admin_capability:"setup.manage" %}
                         <a href="{% url 'admin_store_setup_wizard' %}{% if admin_home.selected_store %}?store={{ admin_home.selected_store.pk }}{% endif %}" class="tw-button tw-button-secondary">

@@ -1,0 +1,5 @@
+{% extends "admin/change_list.html" %}
+{% block content %}
+<p dir="rtl"><a class="button" href="{% url 'admin:store_expense_summary' %}">خلاصهٔ مالی، فیلتر بازه و جمع هزینه‌ها</a></p>
+{{ block.super }}
+{% endblock %}

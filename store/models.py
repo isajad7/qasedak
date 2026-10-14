@@ -2545,6 +2545,40 @@ class ReferralRewardLedger(TimeStampedModel):
         self.reward_gb = value
 
 
+class Expense(TimeStampedModel):
+    class Category(models.TextChoices):
+        SUPPLIER = "supplier", "خرید سرویس از تأمین‌کننده"
+        INFRASTRUCTURE = "infrastructure", "سرور و زیرساخت"
+        DOMAIN = "domain", "دامنه"
+        ADVERTISING = "advertising", "تبلیغات"
+        SOFTWARE = "software", "ابزار و نرم‌افزار"
+        OTHER = "other", "سایر"
+
+    store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name="expenses", verbose_name="فروشگاه")
+    amount = models.PositiveBigIntegerField("مبلغ", validators=[MinValueValidator(1)])
+    currency = models.CharField("واحد پول", max_length=10, choices=(
+        ("TOMAN", "تومان"), ("IRR", "ریال"), ("USD", "USD"),
+    ), default="TOMAN")
+    expense_date = models.DateField("تاریخ هزینه", default=timezone.localdate, db_index=True)
+    category = models.CharField("دسته‌بندی", max_length=20, choices=Category.choices, db_index=True)
+    description = models.CharField("علت یا توضیح", max_length=500)
+    panel = models.ForeignKey("Panel", on_delete=models.SET_NULL, null=True, blank=True,
+                              related_name="expenses", verbose_name="پنل مرتبط")
+
+    class Meta:
+        verbose_name = "هزینه"
+        verbose_name_plural = "هزینه‌ها"
+        ordering = ("-expense_date", "-pk")
+
+    def clean(self):
+        super().clean()
+        if self.panel_id and self.store_id and self.panel.store_id != self.store_id:
+            raise ValidationError({"panel": "پنل باید به همان فروشگاه هزینه تعلق داشته باشد."})
+
+    def __str__(self):
+        return f"{self.get_category_display()} - {self.amount:,} {self.get_currency_display()}"
+
+
 class Panel(TimeStampedModel):
     class Family(models.TextChoices):
         XUI = "xui", _("X-UI / Sanaei")

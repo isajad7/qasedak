@@ -14,6 +14,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import GroupAdmin as DjangoGroupAdmin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from django.contrib.auth.models import Group
+from django.core.paginator import Paginator
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.db.models import Count, Max, Min, OuterRef, Q, Subquery, Sum
@@ -66,6 +67,7 @@ from .models import (
     CustomerReward,
     DiscountCode,
     ExternalSubscriptionFeed,
+    Expense,
     FreeTrialRequest,
     Inbound,
     LegacyWizWizImportJob,
@@ -103,6 +105,9 @@ from .models import (
     DailyAdminReportLog,
 )
 from .source_sellability import source_verification_ui_state
+from .admin_reports_center import get_report_store_options, resolve_report_period, _format_money
+from .expense_reports import financial_summary
+from .jalali import format_jalali_date
 from .orchestrator_v2.models import ServerNode, TenantInstance
 from .admin_setup import (
     active_sales_inbounds,
@@ -3008,6 +3013,92 @@ class PlanInboundRouteAdmin(ImportExportModelAdmin):
         if not panel or not panel.is_active:
             return format_html('<span class="badge bg-danger">{}</span>', _("Panel inactive"))
         return format_html('<span class="badge bg-success">{}</span>', _("Ready"))
+
+
+class ExpenseAdminForm(forms.ModelForm):
+    class Meta:
+        model = Expense
+        fields = "__all__"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        store_id = self.data.get("store") if self.is_bound else (self.instance.store_id or self.initial.get("store"))
+        if store_id and str(store_id).isdecimal():
+            self.fields["panel"].queryset = Panel.objects.filter(store_id=store_id)
+        else:
+            self.fields["panel"].queryset = Panel.objects.all()
+
+
+@admin.register(Expense)
+class ExpenseAdmin(admin.ModelAdmin):
+    form = ExpenseAdminForm
+    readonly_fields = ("created_at", "updated_at")
+    change_list_template = "admin/store/expense/change_list.html"
+    list_display = ("expense_date_display", "amount_display", "category", "description", "store", "panel")
+    list_filter = ("store", "category", "currency")
+    search_fields = ("description",)
+    list_select_related = ("store", "panel")
+    list_per_page = 30
+    ordering = ("-expense_date", "-pk")
+
+    @admin.display(description="تاریخ هزینه", ordering="expense_date")
+    def expense_date_display(self, obj):
+        return format_jalali_date(obj.expense_date)
+
+    @admin.display(description="مبلغ")
+    def amount_display(self, obj):
+        return _format_money(obj.amount, obj.currency)
+
+    def get_urls(self):
+        return [path("summary/", self.admin_site.admin_view(self.summary_view),
+                     name="store_expense_summary")] + super().get_urls()
+
+    def get_changeform_initial_data(self, request):
+        initial = super().get_changeform_initial_data(request)
+        store_id = request.GET.get("store", "")
+        if store_id.isdecimal() and Store.objects.filter(pk=store_id).exists():
+            initial["store"] = store_id
+        return initial
+
+    def summary_view(self, request):
+        if not self.has_view_permission(request):
+            raise PermissionDenied
+        stores, store = get_report_store_options(request.GET.get("store"))
+        period_params = request.GET.copy()
+        if period_params.get("range") != "custom":
+            period_params.pop("start", None)
+            period_params.pop("end", None)
+        period = resolve_report_period(period_params, store)
+        expenses, rows, categories = financial_summary(store, period) if store and not period.blocked else (Expense.objects.none(), [], [])
+        category = request.GET.get("category", "")
+        if category in Expense.Category.values:
+            expenses = expenses.filter(category=category)
+        else:
+            category = ""
+        query = (request.GET.get("q") or "").strip()[:100]
+        if query:
+            expenses = expenses.filter(description__icontains=query)
+        matching = list(expenses.values("currency").annotate(total=Sum("amount")).order_by("currency"))
+        page = Paginator(expenses.select_related("panel", "store"), 30).get_page(request.GET.get("page"))
+        for expense in page:
+            expense.date_display = format_jalali_date(expense.expense_date)
+            expense.money_display = _format_money(expense.amount, expense.currency)
+        params = request.GET.copy()
+        params.pop("page", None)
+        context = {
+            **self.admin_site.each_context(request), "title": "هزینه‌ها و خلاصهٔ مالی",
+            "stores": stores, "selected_store": store, "period": period,
+            "financial_rows": [dict(row, revenue_display=_format_money(row["revenue"], row["currency"]),
+                                   expense_display=_format_money(row["expense"], row["currency"]),
+                                   net_display=_format_money(row["net"], row["currency"])) for row in rows],
+            "category_rows": [dict(row, label=Expense.Category(row["category"]).label,
+                                   display=_format_money(row["total"], row["currency"])) for row in categories],
+            "matching_totals": [_format_money(row["total"], row["currency"]) for row in matching],
+            "categories": Expense.Category.choices, "selected_category": category,
+            "query": query, "page": page, "page_params": params.urlencode(),
+            "opts": self.model._meta,
+        }
+        return TemplateResponse(request, "admin/store/expense/summary.html", context)
 
 
 class PanelAdminForm(forms.ModelForm):
