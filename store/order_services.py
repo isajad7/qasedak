@@ -1399,34 +1399,41 @@ def create_renewal_payment_order(*, customer, vpn_client, metadata=None, discoun
 
 
 def grant_free_subscription(
-    *,
-    store,
-    customer,
-    plan,
-    inbound=None,
-    granted_by=None,
-    reason="",
-    metadata=None,
-    notify_customer=True,
-    revenue_included=False,
-    revenue_amount=None,
+    *, store, customer, plan, inbound=None, granted_by=None, reason="", metadata=None,
+    notify_customer=True, revenue_included=False, revenue_amount=None, request_id=None,
 ):
+    """Reserve the order before external work; a repeated confirmation only returns it."""
     from .order_actions import activate_order
 
     if revenue_included and (revenue_amount is None or not 0 < revenue_amount <= 2147483647):
         return ProvisionedOrderResult(False, "مبلغ درآمد باید مثبت باشد.")
+    if request_id:
+        previous = Order.objects.filter(public_id=request_id).first()
+        if previous:
+            if previous.customer_id != customer.pk or previous.plan_id != plan.pk:
+                return ProvisionedOrderResult(False, "تأیید عملیات معتبر نیست.")
+            return ProvisionedOrderResult(
+                previous.status == Order.Status.COMPLETED,
+                "این عملیات قبلاً ثبت شده؛ وضعیت سفارش را بررسی کن.", previous,
+                duplicate_detected=True,
+            )
 
     canonical_delivery, delivery_error = canonical_delivery_for_checkout(plan, store)
+    preflight_error = delivery_error
     if delivery_error:
-        return ProvisionedOrderResult(False, delivery_error)
+        if not request_id:
+            return ProvisionedOrderResult(False, delivery_error)
+        from .plan_delivery_services import resolve_plan_delivery_configuration
+
+        canonical_delivery = resolve_plan_delivery_configuration(plan, store)
+    grant_metadata = dict(metadata or {})
+    grant_metadata.update({
+        "source": "admin_free", "free_grant": True, "free_grant_reason": reason,
+        "suppress_new_order_notification": True, "suppress_admin_order_updates": True,
+        "suppress_customer_notification": not notify_customer,
+    })
     if canonical_delivery is not None:
-        now = timezone.now()
-        tracking_code = generate_order_tracking()
-        grant_metadata = dict(metadata or {})
         grant_metadata.update({
-            "source": "admin_free", "free_grant": True, "free_grant_reason": reason,
-            "suppress_new_order_notification": True, "suppress_admin_order_updates": True,
-            "suppress_customer_notification": not notify_customer,
             "provisioning_strategy": PLAN_DELIVERY_V2_CHECKOUT_STRATEGY,
             "plan_delivery_v2": {
                 "status": "awaiting_payment", "delivery_config_id": canonical_delivery.delivery_config_id,
@@ -1436,124 +1443,55 @@ def grant_free_subscription(
                 "expected_output_count": canonical_delivery.expected_output_count,
             },
         })
-        order = Order.objects.create(
-            store=store, customer=customer, plan=plan, order_tracking_code=tracking_code,
-            username=build_client_display_name(customer, short_id=tracking_code, metadata=grant_metadata),
-            original_amount=plan.price, discount_amount=plan.price, amount=0, currency=plan.currency,
-            status=Order.Status.PENDING_PAYMENT, provisioning_status=Order.ProvisioningStatus.PENDING,
-            payment_method=Order.PaymentMethod.ADMIN_FREE, is_paid=True, payment_submitted_at=now,
-            payment_date=timezone.localdate(now, TEHRAN_TZ), metadata=grant_metadata,
-            revenue_included=bool(revenue_included), revenue_amount=revenue_amount if revenue_included else None,
-        )
-        result = activate_order(order, user=granted_by, notify=True)
-        order.refresh_from_db()
-        vpn_client = order.vpn_clients.order_by("created_at", "pk").first()
-        return ProvisionedOrderResult(result.success, result.message, order, vpn_client)
-
-    try:
-        inbound = inbound or select_inbound_for_plan(
-            plan,
-            store=store,
-            purpose="admin_free_subscription",
-            allow_modern_deferred=True,
-        )
-    except ValidationError as exc:
-        return ProvisionedOrderResult(False, exc.messages[0])
-    if not inbound:
-        return ProvisionedOrderResult(False, "فعلاً سرور VPN فعالی در دسترس نیست. کمی بعد دوباره تلاش کن.")
-    try:
-        inbound = validate_inbound_for_order(inbound, store, allow_modern_deferred=True)
-    except ValidationError as exc:
-        logger.warning(
-            "Rejected free subscription with unusable inbound inbound_pk=%s panel_id=%s store_id=%s: %s",
-            getattr(inbound, "pk", None),
-            getattr(inbound, "panel_id", None),
-            getattr(store, "pk", None),
-            exc.messages[0],
-        )
-        return ProvisionedOrderResult(False, exc.messages[0])
-
-    tracking_code = generate_order_tracking()
-    username = build_client_display_name(
-        customer,
-        short_id=tracking_code,
-        metadata=metadata,
-    )
-    provisioning_strategy = resolve_provisioning_strategy(
-        inbound.panel,
-        order_type="admin_direct_paid_grant",
-        payment_state="verified",
-    )
-    client_result = None
-    if provisioning_strategy == STRATEGY_LEGACY_PRECREATE_INACTIVE:
-        client_result = create_inactive_client_details(
-            email_prefix=username,
-            total_gb=plan.volume_gb,
-            expire_days=plan.duration_days,
-            panel=inbound.panel,
-            inbound=inbound,
-            limit_ip=plan.device_limit,
-        )
-    if provisioning_strategy == STRATEGY_LEGACY_PRECREATE_INACTIVE and not client_result:
-        return ProvisionedOrderResult(False, "ساخت کانفیگ روی پنل انجام نشد. لطفاً تنظیمات پنل را بررسی کن.")
+    else:
+        try:
+            inbound = inbound or select_inbound_for_plan(
+                plan, store=store, purpose="admin_free_subscription", allow_modern_deferred=True,
+            )
+            if not inbound:
+                raise ValidationError("فعلاً سرور VPN فعالی در دسترس نیست.")
+            inbound = validate_inbound_for_order(inbound, store, allow_modern_deferred=True)
+        except ValidationError as exc:
+            if not request_id:
+                return ProvisionedOrderResult(False, exc.messages[0])
+            preflight_error = exc.messages[0]
+            inbound = None
+        if inbound:
+            strategy = resolve_provisioning_strategy(
+                inbound.panel, order_type="admin_direct_paid_grant", payment_state="verified",
+            )
+            grant_metadata.update({
+                "provisioning_strategy": strategy, "provisioning_scope": provisioning_scope(inbound),
+                "panel_provisioning_deferred": True, "panel_provisioning_reason": strategy,
+            })
 
     now = timezone.now()
-    grant_metadata = {
-        "source": "admin_free",
-        "free_grant": True,
-        "free_grant_reason": reason,
-        "suppress_new_order_notification": True,
-        "suppress_admin_order_updates": True,
-        "suppress_customer_notification": not notify_customer,
-    }
-    grant_metadata.update(metadata or {})
-    grant_metadata["provisioning_strategy"] = provisioning_strategy
-    grant_metadata["provisioning_scope"] = provisioning_scope(inbound)
-
-    with transaction.atomic():
-        order_defaults = {
-            "status": Order.Status.PENDING_PAYMENT,
-            "payment_method": Order.PaymentMethod.ADMIN_FREE,
-            "revenue_included": bool(revenue_included),
-            "revenue_amount": revenue_amount if revenue_included else None,
-            "is_paid": True,
-            "payment_submitted_at": now,
-            "payment_date": timezone.localdate(now, TEHRAN_TZ),
-        }
-        if client_result:
-            order, vpn_client = _create_inactive_order_records(
-                store=store,
-                customer=customer,
-                plan=plan,
-                inbound=inbound,
-                tracking_code=tracking_code,
-                username=username,
-                client_result=client_result,
-                metadata=grant_metadata,
-                order_defaults=order_defaults,
-            )
-        else:
-            grant_metadata["panel_provisioning_deferred"] = True
-            grant_metadata["panel_provisioning_reason"] = provisioning_strategy
-            grant_metadata["deferred_panel_username"] = username
-            order = _create_deferred_order_record(
-                store=store,
-                customer=customer,
-                plan=plan,
-                inbound=inbound,
-                tracking_code=tracking_code,
-                username=username,
-                metadata=grant_metadata,
-                order_defaults=order_defaults,
-            )
-            vpn_client = None
-        order.discount_amount = plan.price
-        order.amount = 0
-        order.save(update_fields=["discount_amount", "amount", "metadata", "updated_at"])
-
+    tracking_code = generate_order_tracking()
+    username = build_client_display_name(customer, short_id=tracking_code, metadata=grant_metadata)
+    grant_metadata["deferred_panel_username"] = username
+    defaults = dict(
+        store=store, customer=customer, plan=plan, inbound=inbound, order_tracking_code=tracking_code,
+        username=username, original_amount=plan.price, discount_amount=plan.price, amount=0,
+        currency=plan.currency, status=Order.Status.PENDING_PAYMENT,
+        provisioning_status=Order.ProvisioningStatus.PENDING,
+        payment_method=Order.PaymentMethod.ADMIN_FREE, is_paid=True, payment_submitted_at=now,
+        payment_date=timezone.localdate(now, TEHRAN_TZ), metadata=grant_metadata,
+        revenue_included=bool(revenue_included), revenue_amount=revenue_amount if revenue_included else None,
+    )
+    if request_id:
+        order, created = Order.objects.get_or_create(public_id=request_id, defaults=defaults)
+        if not created:
+            if order.customer_id != customer.pk or order.plan_id != plan.pk:
+                return ProvisionedOrderResult(False, "تأیید عملیات معتبر نیست.")
+            return ProvisionedOrderResult(False, "این عملیات قبلاً ثبت شده؛ وضعیت سفارش را بررسی کن.", order,
+                                          duplicate_detected=True)
+    else:
+        order = Order.objects.create(**defaults)
+    if preflight_error:
+        order.provisioning_status = Order.ProvisioningStatus.FAILED
+        order.last_provisioning_error = preflight_error
+        order.save(update_fields=["provisioning_status", "last_provisioning_error", "updated_at"])
+        return ProvisionedOrderResult(False, preflight_error, order)
     result = activate_order(order, user=granted_by, notify=True)
     order.refresh_from_db()
-    vpn_client = order.vpn_clients.order_by("created_at", "pk").first()
-    if not result.success:
-        return ProvisionedOrderResult(False, result.message, order, vpn_client)
-    return ProvisionedOrderResult(True, "سرویس مشتری ساخته و فعال شد.", order, vpn_client)
+    return ProvisionedOrderResult(result.success, result.message, order, order.vpn_clients.order_by("pk").first())

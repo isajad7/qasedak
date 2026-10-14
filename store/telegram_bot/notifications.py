@@ -513,7 +513,7 @@ def _send_customer_order_event_message(client, order, *, event_type, chat_id, re
     )
 
 
-def notify_order_event(order, *, event_type, force_customer=False):
+def notify_order_event(order, *, event_type, force_customer=False, target_bot_user=None):
     from .order_delivery import notify_customer_order_event
 
     title_by_event = {
@@ -534,6 +534,7 @@ def notify_order_event(order, *, event_type, force_customer=False):
         log_event_func=log_event_func,
         send_customer_order_event_message_func=_send_customer_order_event_message,
         force=force_customer,
+        target_bot_user=target_bot_user,
     )
     if not (order.metadata or {}).get("suppress_admin_order_updates"):
         try:

@@ -136,7 +136,7 @@ from .models import (
     normalize_payment_digits,
 )
 from .order_revenue import (
-    AdminServiceGrantForm, is_admin_direct_order, order_counts_in_revenue,
+    is_admin_direct_order, order_counts_in_revenue,
     order_revenue_amount, revenue_form_for_order, update_order_revenue,
 )
 from .order_actions import activate_order, reject_order
@@ -1795,42 +1795,83 @@ def build_customer_review_context(customer):
 
 @require_any_admin_capability("orders.view", "services.view", "support.view")
 def customer_review(request, customer_id):
+    from uuid import uuid4
+    from django.core import signing
+    from .customer_assignment import (AssignmentForm, assign_customer_service, assignment_assets,
+                                      target_label, target_orders)
+    from .order_recovery import customer_notification_summary, resend_order_result
+
     customer = get_review_customer(customer_id)
-    grant_form = AdminServiceGrantForm(request.POST if request.method == "POST" else None)
+    target_id = request.GET.get("bot_user")
+    target = get_object_or_404(customer.bot_users.select_related("bot_config"), pk=target_id) if target_id else None
+    form_data = request.POST if request.method == "POST" else None
+    grant_form = AssignmentForm(form_data, customer=customer, target=target)
+    preview = None
+    confirmation = ""
     if request.method == "POST":
         ensure_admin_capability(request.user, "orders.approve")
-        if request.POST.get("action") != "grant_service":
-            messages.error(request, "عملیات معتبر نیست.")
-        elif grant_form.is_valid():
-            from .order_services import grant_free_subscription
-
-            plan = grant_form.cleaned_data["plan"]
-            result = grant_free_subscription(
-                store=plan.store, customer=customer, plan=plan, granted_by=request.user,
-                reason=grant_form.cleaned_data["reason"],
-                revenue_included=grant_form.cleaned_data["revenue_included"],
-                revenue_amount=grant_form.cleaned_data["revenue_amount"],
-            )
-            (messages.success if result.success else messages.error)(request, safe_action_message(result.message))
-            if result.order:
-                return redirect(order_review_url(result.order))
-        else:
-            messages.error(request, "اطلاعات فرم را اصلاح کن.")
+        action = request.POST.get("action")
+        try:
+            if action == "resend_service":
+                orders = target_orders(target) if target else customer.orders.all()
+                order = get_object_or_404(orders, pk=request.POST.get("order_id"))
+                result = resend_order_result(order, target_bot_user=target)
+                (messages.success if result.success else messages.error)(request, safe_action_message(result.message))
+                return redirect(request.get_full_path())
+            if action == "confirm_grant":
+                payload = signing.loads(request.POST.get("confirmation", ""), salt="customer-assignment", max_age=3600)
+                if payload["actor"] != request.user.pk or payload["customer"] != customer.pk:
+                    raise signing.BadSignature
+                selected_target = get_object_or_404(customer.bot_users.select_related("bot_config"), pk=payload["target"]) if payload["target"] else None
+                plan = get_object_or_404(Plan, pk=payload["plan"])
+                asset = assignment_assets(plan).filter(pk=payload["asset"]).first() if payload["asset"] else None
+                result = assign_customer_service(
+                    customer=customer, target=selected_target, plan=plan, mode=payload["mode"], asset=asset,
+                    included=payload["included"], amount=payload["amount"], request_id=payload["request_id"],
+                    actor=request.user, actor_key=f"web:{request.user.pk}", reason=payload["reason"],
+                )
+                (messages.success if result.success else messages.error)(request, safe_action_message(result.message))
+                if result.order:
+                    return redirect(order_review_url(result.order))
+            elif action == "grant_service" and grant_form.is_valid():
+                data = grant_form.cleaned_data
+                plan, selected_target, asset = data["plan"], data["bot_user"], data.get("asset")
+                payload = {
+                    "actor": request.user.pk, "customer": customer.pk, "plan": plan.pk,
+                    "target": selected_target.pk if selected_target else None,
+                    "asset": asset.pk if asset and data["mode"] == "existing" else None,
+                    "mode": data["mode"], "included": data["revenue_included"], "amount": data["revenue_amount"],
+                    "request_id": uuid4().hex, "reason": data["reason"],
+                }
+                confirmation = signing.dumps(payload, salt="customer-assignment")
+                preview = {
+                    "customer": target_label(selected_target) if selected_target else safe_customer_name(customer),
+                    "plan": plan.name, "amount": data["revenue_amount"] or 0, "currency": plan.get_currency_display(),
+                    "mode": "اختصاص کانفیگ موجود" if data["mode"] == "existing" else "اختصاص سرویس جدید",
+                    "asset": payload["asset"],
+                }
+            elif action != "load_assets":
+                messages.error(request, "اطلاعات فرم را اصلاح کن.")
+        except signing.BadSignature:
+            messages.error(request, "تأیید معتبر نیست یا منقضی شده؛ پیش‌نمایش را دوباره بساز.")
+        except ValidationError as exc:
+            messages.error(request, "؛ ".join(exc.messages))
     review_context = build_customer_review_context(customer)
-    review_context["grant_form"] = grant_form
+    review_context.update(grant_form=grant_form, assignment_preview=preview, assignment_confirmation=confirmation,
+                          selected_bot_user=target, bot_identities=customer.bot_users.select_related("bot_config"))
     review_context["can_grant_service"] = user_has_capability(request.user, "orders.approve")
     review_context["grant_plans"] = [
         {"id": plan.pk, "label": f"{plan.name} · {plan.store.name}", "price": plan.price, "currency": plan.get_currency_display()}
         for plan in grant_form.fields["plan"].queryset
     ]
+    orders = target_orders(target) if target else customer.orders.select_related("plan").order_by("-created_at")
+    review_context["assigned_services"] = [{"order": order, "notification": customer_notification_summary(order)}
+                                           for order in orders.filter(status=Order.Status.COMPLETED)[:20]]
     if not user_has_capability(request.user, "support.reply"):
         review_context["message_url"] = ""
     context = {
-        **admin.site.each_context(request),
-        **review_context,
-        "customer": customer,
-        "title": f"بررسی مشتری #{customer.pk}",
-        "subtitle": "از مشتری به سرویس، usage، expiry و orderهای مرتبط برس.",
+        **admin.site.each_context(request), **review_context, "customer": customer,
+        "title": f"بررسی مشتری #{customer.pk}", "subtitle": "سرویس‌ها، سفارش‌ها و اختصاص سرویس به مشتری",
     }
     return TemplateResponse(request, "admin/store/customers/review.html", context)
 

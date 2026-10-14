@@ -40,6 +40,7 @@ def main_menu_keyboard(*, is_admin=False):
                     {"text": "گزارش مشتریان 📊", "callback_data": "admin:ca:menu"},
                     {"text": "ارسال پیام 📣", "callback_data": "admin:bc:menu"},
                 ],
+                [{"text": "کاربران", "callback_data": "admin:users:list:1"}],
                 [{"text": "تنظیمات سریع", "callback_data": "admin:quick_settings"}],
             ]
         )

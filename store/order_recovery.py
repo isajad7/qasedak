@@ -79,13 +79,13 @@ def retry_order_completion(order, *, actor=None):
     return approve_and_provision_order(order, actor=actor, source="manual_retry", notify=True)
 
 
-def resend_order_result(order):
+def resend_order_result(order, *, target_bot_user=None):
     order.refresh_from_db()
     if not can_resend_order(order):
         return OrderMessageResult(False, "ارسال مجدد فقط برای سفارش تکمیل‌شده در دسترس است.")
     from .telegram_bot.notifications import notify_order_event
 
-    notify_order_event(order, event_type="approved", force_customer=True)
+    notify_order_event(order, event_type="approved", force_customer=True, target_bot_user=target_bot_user)
     order.refresh_from_db()
     summary = customer_notification_summary(order)
     return OrderMessageResult(summary.get("status") == "sent", summary["label"])

@@ -1009,6 +1009,10 @@ def _activate_renewal_order_locked(order, *, actor=None):
 
 
 def approve_and_provision_order(order, actor=None, source=None, notify=True):
+    if (order.metadata or {}).get("admin_inventory_asset_id"):
+        from .customer_assignment import complete_inventory_assignment
+
+        return complete_inventory_assignment(order, actor=actor, notify=notify)
     if not order_is_renewal(order):
         return _approve_and_provision_order(order, actor=actor, source=source, notify=notify)
 

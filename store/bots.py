@@ -783,7 +783,7 @@ ADMIN_MENU_CALLBACKS = {"admin:orders:pending", "admin:sales_report", "admin:qui
 
 
 def is_admin_menu_callback_data(data):
-    return str(data or "") in ADMIN_MENU_CALLBACKS
+    return str(data or "") in ADMIN_MENU_CALLBACKS or str(data or "").startswith("admin:users:")
 
 
 ADMIN_CONFIG_CALLBACK_PREFIXES = (
@@ -832,6 +832,12 @@ def handle_admin_menu_callback_update(config, callback_query, *, chat_id):
         client.send_message("شما اجازه دسترسی به منوی ادمین را ندارید.", chat_id=chat_id)
         return {"ok": True, "success": False, "permission_denied": True}
 
+    if data.startswith("admin:users:"):
+        from .telegram_bot.admin_users import handle_callback
+
+        admin = update_bot_user_from_update(config, {"callback_query": callback_query},
+                                            chat_id=chat_id, user_id=admin_user_id, attach_customer=False)
+        return handle_callback(client, config, admin, data, chat_id=chat_id)
     if data == "admin:orders:pending":
         return _handle_admin_orders_menu_callback(client, config, data, chat_id=chat_id)
     if _is_admin_report_menu_callback_data(data):

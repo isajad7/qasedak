@@ -39,6 +39,9 @@
                     <span class="qadmin-badge qadmin-badge-{{ customer_summary.telegram_tone }}">{{ customer_summary.telegram_label }}</span>
                 </header>
                 <dl class="qadmin-review-grid">
+                    {% for bot_user in bot_identities %}
+                    <div><dt>{{ bot_user.bot_config.name }}</dt><dd>{{ bot_user.display_name }} · @{{ bot_user.username|default:"-" }} · {{ bot_user.provider_user_id }} · <a href="?bot_user={{ bot_user.pk }}">انتخاب این ربات</a></dd></div>
+                    {% endfor %}
                     <div><dt>نام</dt><dd>{{ customer_summary.name }}</dd></div>
                     <div><dt>تلفن</dt><dd>{% if customer_summary.phone_masked %}{{ customer_summary.phone_masked }}{% else %}-{% endif %}</dd></div>
                     <div><dt>Username</dt><dd>{% if customer_summary.username_masked %}{{ customer_summary.username_masked }}{% else %}-{% endif %}</dd></div>
@@ -66,6 +69,19 @@
                         <p>سفارشی ثبت نشده است.</p>
                     {% endfor %}
                 </div>
+            </article>
+
+            <article class="qadmin-review-panel">
+                <h2>سرویس‌های تحویل‌شده و ارسال مجدد</h2>
+                {% for item in assigned_services %}
+                <div class="qadmin-mini-list">
+                    <p>{{ item.order.plan.name }} · {{ item.order.order_tracking_code }} · پیام: {{ item.notification.label }}</p>
+                    {% if can_grant_service %}<form method="post">{% csrf_token %}
+                        <input type="hidden" name="order_id" value="{{ item.order.pk }}">
+                        <button name="action" value="resend_service" class="qadmin-button">ارسال مجدد سرویس</button>
+                    </form>{% endif %}
+                </div>
+                {% empty %}<p>سرویسی تحویل نشده است.</p>{% endfor %}
             </article>
 
             <article class="qadmin-review-panel">
@@ -119,9 +135,25 @@
             <a href="{{ admin_change_url }}" class="qadmin-action qadmin-action-secondary">فرم ادمین مشتری</a>
             {% if can_grant_service %}
             <h3>اختصاص سرویس به مشتری</h3>
+            {% if assignment_preview %}
+            <section class="qadmin-review-panel">
+                <h3>پیش‌نمایش اختصاص</h3>
+                <p>{{ assignment_preview.customer }}</p>
+                <p>{{ assignment_preview.mode }} · {{ assignment_preview.plan }}{% if assignment_preview.asset %} · کانفیگ #{{ assignment_preview.asset }}{% endif %}</p>
+                <p>درآمد: {{ assignment_preview.amount }} {{ assignment_preview.currency }}</p>
+                <form method="post">{% csrf_token %}
+                    <input type="hidden" name="confirmation" value="{{ assignment_confirmation }}">
+                    <button name="action" value="confirm_grant" class="qadmin-button">تأیید اختصاص و ارسال به مشتری</button>
+                </form>
+            </section>
+            {% endif %}
             <form method="post" class="qadmin-action-form" id="grant-service-form">
                 {% csrf_token %}
                 {{ grant_form.non_field_errors }}
+                <label for="id_bot_user">گیرنده در ربات</label>
+                {{ grant_form.bot_user.errors }}{{ grant_form.bot_user }}
+                <label for="id_mode">نوع اختصاص</label>
+                {{ grant_form.mode.errors }}{{ grant_form.mode }}
                 <label for="id_plan">پلن سرویس</label>
                 {{ grant_form.plan.errors }}
                 <select id="id_plan" name="plan" required>
@@ -130,13 +162,18 @@
                     <option value="{{ plan.id }}" data-price="{{ plan.price }}" data-currency="{{ plan.currency }}" {% if grant_form.plan.value|stringformat:"s" == plan.id|stringformat:"s" %}selected{% endif %}>{{ plan.label }} · {{ plan.price }} {{ plan.currency }}</option>
                     {% endfor %}
                 </select>
+                <div id="inventory-selection">
+                    <button name="action" value="load_assets" formnovalidate class="qadmin-button">نمایش موجودی پلن انتخاب‌شده</button>
+                    <label for="id_asset">کانفیگ موجود (بدون ساخت روی پنل)</label>
+                    {{ grant_form.asset.errors }}{{ grant_form.asset }}
+                </div>
                 <label for="id_revenue_included">{{ grant_form.revenue_included.label }}</label>
                 {{ grant_form.revenue_included.errors }}{{ grant_form.revenue_included }}
                 <label for="id_revenue_amount">مبلغ درآمد (<span id="grant-currency">واحد پول پلن</span>)</label>
                 {{ grant_form.revenue_amount.errors }}{{ grant_form.revenue_amount }}
                 <label for="id_reason">{{ grant_form.reason.label }}</label>
                 {{ grant_form.reason.errors }}{{ grant_form.reason }}
-                <button type="submit" name="action" value="grant_service" class="qadmin-button">اختصاص سرویس و ارسال به مشتری</button>
+                <button type="submit" name="action" value="grant_service" class="qadmin-button">پیش‌نمایش اختصاص</button>
             </form>
             <script>
             (() => {
@@ -153,6 +190,10 @@
                 };
                 plan.addEventListener('change', () => update(true));
                 included.addEventListener('change', () => update(!amount.value));
+                const mode = form.querySelector('[name="mode"]');
+                const updateMode = () => { document.getElementById('inventory-selection').hidden = mode.value !== 'existing'; };
+                mode.addEventListener('change', updateMode);
+                updateMode();
                 update(false);
             })();
             </script>

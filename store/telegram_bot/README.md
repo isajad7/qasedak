@@ -13,6 +13,7 @@ entrypoint.
 - `user_menu.py`, `services_flow.py`, `profile_flow.py`, `user_orders_flow.py`: user account and service flows.
 - `buy_flow.py`, `payment_flow.py`, `renewal_flow.py`, `order_finalizers.py`: purchase, payment, and renewal flows.
 - `config_lookup_flow.py`, `free_trial_flow.py`, `referral_flow.py`, `support_flow.py`: secondary user flows.
+- `admin_users.py`: current-bot user directory, assignment preview/confirmation, and targeted resend.
 - `admin_orders.py`, `admin_reports.py`, `admin_broadcast.py`, `admin_config_management.py`, `admin_support.py`: admin flows.
 
 ## Rules

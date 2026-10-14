@@ -3,13 +3,14 @@ import secrets
 from decimal import Decimal, InvalidOperation
 
 from django.core.cache import cache
+from django.db.models import Q
 
 from store.customer_delivery import (
     customer_delivery_link_groups_for_client,
     resolve_customer_client_delivery,
 )
 from store.jalali import persian_digits
-from store.models import VPNClient
+from store.models import Order, VPNClient
 from store.referral_services import get_available_referral_gb
 from store.vpn_client_management_services import (
     VPNClientManagementError,
@@ -223,6 +224,10 @@ def subscription_management_keyboard(bot_user, *, renew_mode=False):
             delete_button = user_client_delete_button(bot_user, client, suffix=suffix)
             if delete_button:
                 rows.append([delete_button])
+    if not renew_mode:
+        for order in order_only_services(bot_user)[:10]:
+            rows.append([{"text": f"دریافت لینک · {order.plan.name}"[:60],
+                          "callback_data": f"user:order_service:{order.public_id}"}])
     rows.append([{"text": "خرید اشتراک", "callback_data": "user:buy"}])
     rows.append([{"text": "منوی اصلی", "callback_data": "user:menu"}])
     return {"inline_keyboard": rows}
@@ -262,6 +267,10 @@ def active_subscription_lines(
         else:
             lines.append("لینک کانفیگ هنوز آماده نیست.")
         lines.append("")
+    for order in order_only_services(bot_user)[:10]:
+        found = True
+        lines.extend([order.plan.name, f"سفارش: {order.order_tracking_code}",
+                      "برای دریافت لینک، دکمه «دریافت لینک» را بزنید.", ""])
     if not found:
         lines.append("هنوز اشتراک فعالی برای این حساب پیدا نشد.")
     return "\n".join(lines).strip()
@@ -578,3 +587,26 @@ def confirm_user_client_delete_flow(
         reply_markup=main_menu_keyboard(is_admin=is_admin),
     )
     return {"ok": True, "success": True}
+
+
+def order_only_services(bot_user):
+    from store.customer_assignment import target_orders
+
+    return target_orders(bot_user).filter(status=Order.Status.COMPLETED, vpn_clients__isnull=True).filter(
+        Q(metadata__customer_hidden__isnull=True) | Q(metadata__customer_hidden=False)
+    )
+
+
+def send_order_service(client, bot_user, public_id, *, chat_id):
+    from uuid import UUID
+    from .notifications import _send_customer_order_event_message
+
+    try:
+        order = order_only_services(bot_user).filter(public_id=UUID(public_id)).first()
+    except (ValueError, TypeError):
+        order = None
+    if not order:
+        client.send_message("سرویس پیدا نشد.", chat_id=chat_id)
+        return {"ok": True, "success": False}
+    _send_customer_order_event_message(client, order, event_type="approved", chat_id=chat_id)
+    return {"ok": True, "handled": True}

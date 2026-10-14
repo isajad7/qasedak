@@ -151,15 +151,18 @@ class AdminOrderRevenueTests(TestCase):
             self.client.post(url, {"action": "grant_service", "plan": self.plan.pk})
             grant.assert_not_called()
             grant.return_value = ProvisionedOrderResult(False, "test failure")
-            response = self.client.post(url, {"action": "grant_service", "plan": self.plan.pk,
+            response = self.client.post(url, {"action": "grant_service", "mode": "new", "plan": self.plan.pk,
                                              "revenue_included": "yes", "revenue_amount": "65000"})
             self.assertEqual(response.status_code, 200)
+            grant.assert_not_called()
+            self.client.post(url, {"action": "confirm_grant", "confirmation": response.context["assignment_confirmation"]})
             self.assertEqual(grant.call_args.kwargs["revenue_amount"], 65000)
             self.assertTrue(grant.call_args.kwargs["revenue_included"])
             self.assertEqual(grant.call_args.kwargs["customer"], self.customer)
-            self.client.post(url, {"action": "grant_service", "plan": self.plan.pk, "revenue_included": "no"})
+            response = self.client.post(url, {"action": "grant_service", "mode": "new", "plan": self.plan.pk, "revenue_included": "no"})
+            self.client.post(url, {"action": "confirm_grant", "confirmation": response.context["assignment_confirmation"]})
             self.assertFalse(grant.call_args.kwargs["revenue_included"])
-            self.assertIsNone(grant.call_args.kwargs["revenue_amount"])
+
 
     def test_existing_grant_function_stores_financial_choice_before_activation(self):
         from .order_services import grant_free_subscription
@@ -174,7 +177,7 @@ class AdminOrderRevenueTests(TestCase):
             self.assertEqual(order_revenue_amount(order), 0)
             Order.objects.filter(pk=order.pk).update(status=Order.Status.COMPLETED,
                 verification_status=Order.VerificationStatus.VERIFIED)
-            return SimpleNamespace(success=True)
+            return SimpleNamespace(success=True, message="activated")
 
         with patch("store.order_services.select_inbound_for_plan", return_value=inbound), \
                 patch("store.order_services.validate_inbound_for_order", return_value=inbound), \

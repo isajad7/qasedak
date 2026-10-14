@@ -1,0 +1,9 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div dir="rtl">
+    <h1>پرونده کاربر ربات</h1>
+    <p>{{ target.display_name }} · @{{ target.username|default:"-" }} · {{ target.provider_user_id }}</p>
+    <p>این کاربر هنوز پرونده مشتری ندارد.</p>
+    <form method="post">{% csrf_token %}<button type="submit">آماده‌سازی پرونده و اختصاص سرویس</button></form>
+</div>
+{% endblock %}

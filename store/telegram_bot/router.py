@@ -488,6 +488,10 @@ def dispatch_user_callback(config, bot_user, callback_query, *, chat_id, deps):
             title="حجم باقی‌مانده اشتراک‌های شما",
             force_refresh=True,
         )
+    if data.startswith("user:order_service:"):
+        from .services_flow import send_order_service
+
+        return send_order_service(client, bot_user, data.rsplit(":", 1)[-1], chat_id=chat_id)
     if data == "user:subs":
         return deps["show_user_services"](client, bot_user, chat_id=chat_id)
     if data.startswith("user:client_usage:"):
@@ -614,6 +618,11 @@ def dispatch_user_message(config, bot_user, message, *, chat_id, deps):
             reply_markup=deps["remove_reply_keyboard"](),
         )
         return deps["send_profile"](client, bot_user, chat_id=chat_id)
+
+    if deps["is_admin_bot_user"](config, bot_user) and bot_user.state in {"admin_users_search", "admin_users_amount"}:
+        from .admin_users import handle_text
+
+        return handle_text(client, config, bot_user, text, chat_id=chat_id)
 
     if deps["is_admin_bot_user"](config, bot_user) and bot_user.state == BotUser.State.BROADCAST_WAIT_TEXT:
         return deps["handle_broadcast_text"](config, bot_user, text, chat_id=chat_id)

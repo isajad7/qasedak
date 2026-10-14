@@ -128,6 +128,7 @@ def notify_customer_order_event(
     log_event_func,
     send_customer_order_event_message_func,
     force=False,
+    target_bot_user=None,
 ):
     tracked = event_type == "approved"
     state = {
@@ -168,6 +169,8 @@ def notify_customer_order_event(
         targeted_bot_user = base_bot_users.filter(pk=bot_user_id).first()
         if targeted_bot_user:
             bot_users = [targeted_bot_user]
+        elif (order.metadata or {}).get("assignment_actor"):
+            bot_users = base_bot_users.none()
         elif bot_config_id:
             bot_users = base_bot_users.filter(bot_config_id=bot_config_id)
         else:
@@ -176,6 +179,10 @@ def notify_customer_order_event(
         bot_users = base_bot_users.filter(bot_config_id=bot_config_id)
     elif order.store_id:
         bot_users = base_bot_users.filter(Q(bot_config__store=order.store) | Q(bot_config__store__isnull=True))
+
+    if target_bot_user is not None:
+        # Explicit admin resend must never fan out to other bots or customers.
+        bot_users = base_bot_users.filter(pk=target_bot_user.pk)
 
     sent = 0
     failed = 0

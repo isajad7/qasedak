@@ -18,6 +18,7 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.db.models import Count, Max, Min, OuterRef, Q, Subquery, Sum
 from django.http import Http404, HttpResponse, HttpResponseRedirect
+from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils.http import urlencode
@@ -1513,6 +1514,7 @@ class BotUserAdmin(ImportExportModelAdmin):
     change_list_template = "admin/store/botuser/change_list.html"
     list_display = (
         "display_name",
+        "customer_review_link",
         "provider_user_id",
         "chat_id",
         "username",
@@ -1543,6 +1545,7 @@ class BotUserAdmin(ImportExportModelAdmin):
     def get_urls(self):
         urls = super().get_urls()
         custom_urls = [
+            path("<int:bot_user_id>/customer/", self.admin_site.admin_view(self.customer_review_view), name="store_botuser_customer"),
             path(
                 "wizwiz-restore/",
                 self.admin_site.admin_view(self.wizwiz_restore_view),
@@ -1550,6 +1553,29 @@ class BotUserAdmin(ImportExportModelAdmin):
             ),
         ]
         return custom_urls + urls
+
+    @admin.display(description="پرونده و اختصاص سرویس")
+    def customer_review_link(self, obj):
+        return format_html('<a href="{}">پرونده · اختصاص سرویس</a>', reverse("admin:store_botuser_customer", args=[obj.pk]))
+
+    def get_search_results(self, request, queryset, search_term):
+        return super().get_search_results(request, queryset, search_term.lstrip("@"))
+
+    def customer_review_view(self, request, bot_user_id):
+        from .admin_access import ensure_admin_capability
+        from .customer_assignment import ensure_target_customer
+
+        ensure_admin_capability(request.user, "orders.view")
+        target = get_object_or_404(BotUser, pk=bot_user_id)
+        if not target.customer_id:
+            if request.method == "POST":
+                ensure_admin_capability(request.user, "orders.approve")
+                ensure_target_customer(target)
+            else:
+                return TemplateResponse(request, "admin/store/botuser/create_customer.html", {
+                    **self.admin_site.each_context(request), "target": target, "title": "پرونده کاربر ربات",
+                })
+        return redirect(reverse("admin_store_customer_review", args=[target.customer_id]) + f"?bot_user={target.pk}")
 
     def changelist_view(self, request, extra_context=None):
         extra_context = extra_context or {}
