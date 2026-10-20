@@ -97,6 +97,7 @@ from .models import (
     SupportConversation,
     SupportMessage,
     SubscriptionCup,
+    TelegramProxyConfiguration,
     VPNClient,
     VPNClientActionLog,
     VPNClientReminderLog,
@@ -1299,6 +1300,7 @@ class BotConfigurationAdmin(ImportExportModelAdmin):
     list_select_related = ("store",)
     readonly_fields = (
         "token_status",
+        "telegram_proxy_link",
         "masked_webhook_secret",
         "webhook_path_hint",
         "event_logs_link",
@@ -1319,6 +1321,7 @@ class BotConfigurationAdmin(ImportExportModelAdmin):
                     "telegram_bot_username",
                     "token_status",
                     "bot_token",
+                    "telegram_proxy_link",
                     "admin_user_id",
                     "additional_admin_user_ids",
                     "is_active",
@@ -1428,6 +1431,17 @@ class BotConfigurationAdmin(ImportExportModelAdmin):
             return format_html('<span class="badge bg-success">{}</span>', _("Configured"))
         return format_html('<span class="badge bg-secondary">{}</span>', _("Not configured"))
 
+    @admin.display(description=_("پروکسی تلگرام"))
+    def telegram_proxy_link(self, obj):
+        if not obj or not obj.pk or obj.provider != BotConfiguration.Provider.TELEGRAM:
+            return _("برای ربات تلگرام پس از ذخیره در دسترس است.")
+        proxy = TelegramProxyConfiguration.objects.filter(bot_config_id=obj.pk).first()
+        if proxy:
+            url = reverse("admin:store_telegramproxyconfiguration_change", args=[proxy.pk])
+        else:
+            url = f"{reverse('admin:store_telegramproxyconfiguration_add')}?{urlencode({'bot_config': obj.pk})}"
+        return format_html('<a class="button" href="{}">{}</a>', url, _("مدیریت و تست پروکسی"))
+
     @admin.display(description=_("Admin status"))
     def admin_status(self, obj):
         count = len(obj.get_admin_user_ids()) if obj else 0
@@ -1501,6 +1515,106 @@ class BotConfigurationAdmin(ImportExportModelAdmin):
                 config.save(update_fields=["last_report_sent_at", "updated_at"])
                 sent += 1
         messages.success(request, _("%(count)s sales report(s) sent.") % {"count": sent})
+
+
+class TelegramProxyConfigurationAdminForm(forms.ModelForm):
+    username = forms.CharField(
+        label=_("نام کاربری پروکسی"), required=False,
+        widget=forms.PasswordInput(render_value=False),
+        help_text=_("برای حفظ نام کاربری فعلی خالی بگذارید."),
+    )
+    password = forms.CharField(
+        label=_("رمز پروکسی"), required=False,
+        widget=forms.PasswordInput(render_value=False),
+        help_text=_("برای حفظ رمز فعلی خالی بگذارید."),
+    )
+    clear_auth = forms.BooleanField(label=_("حذف نام کاربری و رمز ذخیره‌شده"), required=False)
+
+    class Meta:
+        model = TelegramProxyConfiguration
+        fields = "__all__"
+
+    def clean_password(self):
+        value = self.cleaned_data.get("password") or ""
+        if value:
+            return value
+        return self.instance.password if self.instance.pk else ""
+
+    def clean_username(self):
+        value = self.cleaned_data.get("username") or ""
+        return value or (self.instance.username if self.instance.pk else "")
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get("clear_auth"):
+            cleaned["username"] = ""
+            cleaned["password"] = ""
+        return cleaned
+
+
+@admin.register(TelegramProxyConfiguration)
+class TelegramProxyConfigurationAdmin(admin.ModelAdmin):
+    form = TelegramProxyConfigurationAdminForm
+    list_display = ("bot_config", "mode", "proxy_status", "test_link")
+    list_select_related = ("bot_config",)
+    fields = ("bot_config", "mode", "protocol", "host", "port", "username", "password", "clear_auth", "proxy_status", "test_link")
+    readonly_fields = ("proxy_status", "test_link")
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "bot_config":
+            kwargs["queryset"] = BotConfiguration.objects.filter(provider=BotConfiguration.Provider.TELEGRAM)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    @admin.display(description=_("وضعیت پروکسی"))
+    def proxy_status(self, obj):
+        if not obj or not obj.pk:
+            return _("برای تست، ابتدا ذخیره کنید.")
+        if obj.mode == TelegramProxyConfiguration.Mode.DIRECT:
+            return _("اتصال مستقیم")
+        from .bot_proxy import effective_telegram_proxy_url, sanitized_telegram_proxy_url
+
+        url = effective_telegram_proxy_url(obj.bot_config)
+        return sanitized_telegram_proxy_url(url) if url else _("بدون پروکسی")
+
+    @admin.display(description=_("تست اتصال"))
+    def test_link(self, obj):
+        if not obj or not obj.pk:
+            return _("ابتدا ذخیره کنید.")
+        url = reverse("admin:store_telegramproxyconfiguration_test", args=[obj.pk])
+        return format_html('<a class="button" href="{}">{}</a>', url, _("تست اتصال تلگرام"))
+
+    def get_urls(self):
+        return [
+            path("<path:object_id>/test/", self.admin_site.admin_view(self.test_proxy_view),
+                 name="store_telegramproxyconfiguration_test"),
+        ] + super().get_urls()
+
+    def test_proxy_view(self, request, object_id):
+        obj = self.get_object(request, object_id)
+        if obj is None:
+            raise Http404
+        if not self.has_change_permission(request, obj):
+            raise PermissionDenied
+        result = None
+        if request.method == "POST":
+            from .telegram_bot.client import BotClient
+
+            try:
+                payload = BotClient(obj.bot_config).call("getMe", {}, timeout=(3, 8))
+                result = bool(payload.get("ok"))
+            except Exception:
+                # Exception text may include the bot token, credentials or proxy URL.
+                result = False
+        context = {
+            **self.admin_site.each_context(request),
+            "title": _("تست اتصال تلگرام"),
+            "opts": self.model._meta,
+            "original": obj,
+            "proxy_status": self.proxy_status(obj),
+            "result": result,
+            "back_url": reverse("admin:store_telegramproxyconfiguration_change", args=[obj.pk]),
+        }
+        return TemplateResponse(request, "admin/store/telegramproxyconfiguration/test_proxy.html", context)
 
 
 @admin.register(BotAdminOrderMessage)

@@ -63,6 +63,7 @@ These are install-time settings, but they belong in the database:
 
 - `Store`: product name, English name, domain, payment/card settings, SMSForwarder token hash, payment SMS timezone, sales mode, reminders, reports, and Revenue Engine flags.
 - `BotConfiguration`: Telegram/Bale token, bot username, admin IDs, provider, active state, and force-join settings.
+- `TelegramProxyConfiguration`: optional per-Telegram-bot proxy override. Defaults to server env, supports direct connection, and is read on each bot API call. Use Admin to test `getMe` after saving.
 - `Panel`: X-UI/Sanaei panel URL, username, password, per-panel proxy URL, and health behavior.
 - `Inbound`: sellable panel inbound details.
 - `Plan`: public plan pricing, duration, traffic, devices, and visibility.
@@ -119,7 +120,7 @@ Installer and doctor summaries should show only whether a secret is configured, 
 | `TELEGRAM_WEBHOOK_RESPONSE_ENABLED` | no | `False` | Optional webhook response optimization; long polling installs keep false. | no | advanced |
 | `BOT_API_CONNECT_TIMEOUT_SECONDS` | no | `3` | Bot API connect timeout. | no | advanced |
 | `BOT_API_READ_TIMEOUT_SECONDS` | no | `8` | Bot API read timeout. | no | advanced |
-| `TELEGRAM_PROXY_URL` | no | empty | Legacy full Telegram proxy URL. Prefer structured proxy fields. | yes | conditional |
+| `TELEGRAM_PROXY_URL` | no | empty | Legacy full Telegram proxy URL; default when a bot has no panel override. | yes | conditional |
 | `TELEGRAM_PROXY_PROTOCOL` | no | `http` | Telegram proxy protocol when host/port are used. | no | conditional |
 | `TELEGRAM_PROXY_HOST` | no | empty | Telegram proxy host. | no | conditional |
 | `TELEGRAM_PROXY_PORT` | no | empty | Telegram proxy port. | no | conditional |

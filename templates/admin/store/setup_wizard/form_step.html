@@ -48,6 +48,12 @@
         <form method="post" class="qadmin-form-panel" novalidate>
             {% csrf_token %}
             {{ form.non_field_errors }}
+            {% if current_step.slug == "telegram-proxy" %}
+                <div class="qadmin-form-row">
+                    <p>پروکسی هر ربات را در پنل ذخیره و همان‌جا اتصال به تلگرام را تست کنید.</p>
+                    <a class="qadmin-action" href="{% url 'admin:store_telegramproxyconfiguration_changelist' %}">مدیریت و تست پروکسی‌های تلگرام</a>
+                </div>
+            {% endif %}
             {% for field in form %}
                 <div class="qadmin-form-row{% if field.errors %} has-error{% endif %}">
                     <label for="{{ field.id_for_label }}">{{ field.label }}</label>

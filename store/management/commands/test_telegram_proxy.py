@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 import requests
 from django.core.management.base import BaseCommand, CommandError
 
-from store.bot_proxy import bot_request_proxies, sanitized_telegram_proxy_url, telegram_proxy_url
+from store.bot_proxy import bot_request_proxies, effective_telegram_proxy_url, mask_proxy_secrets, sanitized_telegram_proxy_url
 from store.models import BotConfiguration
 from store.telegram_bot.client import BotClient, BotDeliveryError
 
@@ -26,9 +26,9 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         config = self._get_config(options.get("config_id"))
-        proxy_url = telegram_proxy_url()
+        proxy_url = effective_telegram_proxy_url(config)
         if not proxy_url:
-            raise CommandError("Telegram proxy is disabled; configure TELEGRAM_PROXY_* or TELEGRAM_PROXY_URL.")
+            raise CommandError("Telegram proxy is disabled for this bot; configure its admin proxy or server environment.")
 
         self._with_retries(
             lambda: self._check_proxy_socket(proxy_url, options["timeout"]),
@@ -97,12 +97,12 @@ class Command(BaseCommand):
         self._success(f"Proxy socket connection succeeded proxy={sanitized_telegram_proxy_url(proxy_url)}")
 
     def _check_telegram_api(self, config, timeout):
-        proxies = bot_request_proxies(config.provider)
+        proxies = bot_request_proxies(config)
         try:
             response = requests.get("https://api.telegram.org", timeout=timeout, proxies=proxies, allow_redirects=False)
             response.raise_for_status()
         except requests.RequestException as exc:
-            raise CommandError(f"Telegram API connection failed through proxy: {exc}") from exc
+            raise CommandError(f"Telegram API connection failed through proxy: {mask_proxy_secrets(exc)}") from None
         self._success(f"Telegram API connection succeeded through proxy status={response.status_code}")
 
     def _success(self, message):

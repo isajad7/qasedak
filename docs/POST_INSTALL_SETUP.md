@@ -104,7 +104,7 @@ The wizard walks through Store identity, payment, Telegram, optional Telegram pr
 4. Configure payment/card settings: card number, card owner, bank details, receipt behavior, and SMSForwarder webhook token if used.
 5. Create or update `BotConfiguration` for Telegram.
 6. Test the Telegram bot from admin or with `doctor.sh --live-bot --no-fail` only after the token and admin IDs are configured.
-7. Configure Telegram proxy settings if the server needs a proxy to reach Telegram.
+7. For Telegram connectivity, open **پروکسی‌های تلگرام** in Admin (or the link on the bot configuration). Select the bot, choose server default, custom HTTP/SOCKS5 proxy, or direct connection, save, then use **تست اتصال تلگرام**. Custom changes take effect on the next bot API request without restarting the container. The default mode continues to use `TELEGRAM_PROXY_*` from the server.
 8. Create a `Panel` for X-UI/Sanaei with URL, username, password, and optional panel proxy.
 9. Sync or create at least one active `Inbound` for new orders.
 10. Create public `Plan` records for the packages you want to sell.

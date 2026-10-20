@@ -5,8 +5,8 @@ from django.db.models import Q
 from django.urls import reverse
 
 from .admin_catalog import catalog_url
-from .bot_proxy import sanitized_telegram_proxy_url, telegram_proxy_url
-from .models import BotConfiguration, Inbound, Panel, Plan, PlanInboundRoute, RevenueOfferLog, Store
+from .bot_proxy import effective_telegram_proxy_url, sanitized_telegram_proxy_url, telegram_proxy_url
+from .models import BotConfiguration, Inbound, Panel, Plan, PlanInboundRoute, RevenueOfferLog, Store, TelegramProxyConfiguration
 from .setup_readiness import canonical_delivery_configured_count, plan_has_ready_canonical_delivery
 
 
@@ -376,10 +376,16 @@ def setup_telegram_card(store):
 
 
 def setup_telegram_proxy_card(store=None):
-    raw_proxy = telegram_proxy_url()
+    bot = BotConfiguration.objects.filter(provider=BotConfiguration.Provider.TELEGRAM, store=store).first() if store else None
+    raw_proxy = effective_telegram_proxy_url(bot) if bot else telegram_proxy_url()
     details = []
     if raw_proxy:
         details.append(f"Proxy تلگرام فعال است: {sanitized_telegram_proxy_url(raw_proxy)}")
+        status = "done"
+    elif bot and TelegramProxyConfiguration.objects.filter(
+        bot_config_id=bot.pk, mode=TelegramProxyConfiguration.Mode.DIRECT
+    ).exists():
+        details.append("اتصال مستقیم برای این ربات انتخاب شده است.")
         status = "done"
     else:
         details.append("Proxy تلگرام تنظیم نشده؛ فقط اگر سرور به Telegram دسترسی ندارد لازم است.")
@@ -387,10 +393,10 @@ def setup_telegram_proxy_card(store=None):
     return card(
         "telegram_proxy",
         "Proxy تلگرام",
-        "وضعیت proxy از settings/env، بدون نمایش مقدار حساس.",
+        "تنظیم هر ربات از پنل یا تنظیم پیش‌فرض سرور؛ بدون نمایش اطلاعات ورود.",
         status,
         details,
-        [setup_wizard_action("telegram_proxy", store)],
+        [SetupAction("مدیریت و تست پروکسی تلگرام", admin_url("store_telegramproxyconfiguration_changelist"))],
         command="python manage.py test_telegram_proxy --help",
     )
 

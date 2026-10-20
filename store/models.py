@@ -1036,6 +1036,46 @@ class BotConfiguration(TimeStampedModel):
         return str(user_id or "") in self.get_admin_user_ids()
 
 
+class TelegramProxyConfiguration(TimeStampedModel):
+    class Mode(models.TextChoices):
+        ENVIRONMENT = "environment", _("تنظیم سرور")
+        CUSTOM = "custom", _("پروکسی این ربات")
+        DIRECT = "direct", _("بدون پروکسی")
+
+    bot_config = models.OneToOneField(
+        BotConfiguration, on_delete=models.CASCADE, related_name="telegram_proxy_configuration",
+        verbose_name=_("ربات تلگرام"),
+    )
+    mode = models.CharField(_("روش اتصال"), max_length=20, choices=Mode.choices, default=Mode.ENVIRONMENT)
+    protocol = models.CharField(_("پروتکل"), max_length=8, choices=(("http", "HTTP"), ("socks5", "SOCKS5")), default="http")
+    host = models.CharField(_("آدرس پروکسی"), max_length=255, blank=True)
+    port = models.PositiveIntegerField(_("پورت"), null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(65535)])
+    username = models.CharField(_("نام کاربری پروکسی"), max_length=255, blank=True)
+    password = models.CharField(_("رمز پروکسی"), max_length=255, blank=True)
+
+    class Meta:
+        verbose_name = _("پروکسی تلگرام")
+        verbose_name_plural = _("پروکسی‌های تلگرام")
+
+    def __str__(self):
+        return str(self.bot_config)
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        if self.bot_config_id and self.bot_config.provider != BotConfiguration.Provider.TELEGRAM:
+            errors["bot_config"] = _("فقط ربات تلگرام را انتخاب کنید.")
+        if self.mode == self.Mode.CUSTOM:
+            if not (self.host or "").strip():
+                errors["host"] = _("آدرس پروکسی لازم است.")
+            if not self.port:
+                errors["port"] = _("پورت پروکسی لازم است.")
+            if self.host and ("://" in self.host or "/" in self.host or "@" in self.host or " " in self.host):
+                errors["host"] = _("فقط نام میزبان یا IP را وارد کنید.")
+        if errors:
+            raise ValidationError(errors)
+
+
 class BotUser(TimeStampedModel):
     class State(models.TextChoices):
         IDLE = "idle", _("Idle")

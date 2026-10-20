@@ -1,0 +1,19 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div id="content-main">
+  <p>ربات: {{ original.bot_config }}</p>
+  <p>روش اتصال: {{ original.get_mode_display }} — {{ proxy_status }}</p>
+  {% if result is True %}
+    <p class="success">اتصال به API تلگرام و شناسایی ربات موفق بود.</p>
+  {% elif result is False %}
+    <p class="errornote">اتصال ناموفق بود. آدرس، پورت و اطلاعات ورود پروکسی را بررسی کنید.</p>
+  {% endif %}
+  <form method="post">
+    {% csrf_token %}
+    <div class="submit-row"><input type="submit" value="تست اتصال (getMe)"></div>
+  </form>
+  <p><a href="{{ back_url }}">بازگشت به تنظیمات پروکسی</a></p>
+</div>
+{% endblock %}

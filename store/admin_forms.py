@@ -172,14 +172,6 @@ class TelegramSetupForm(forms.Form):
 
 
 class TelegramProxySetupForm(forms.Form):
-    proxy_enabled = forms.BooleanField(label=_("Proxy تلگرام لازم است"), required=False)
-    proxy_url = forms.CharField(
-        label=_("Proxy URL"),
-        required=False,
-        widget=_password_widget(_("Proxy از env/settings خوانده می‌شود؛ مقدار کامل نمایش داده نمی‌شود.")),
-        help_text=_("در این نسخه wizard مقدار env را تغییر نمی‌دهد. برای تست، از command جداگانه استفاده کن."),
-    )
-
     def save(self):
         return None
 

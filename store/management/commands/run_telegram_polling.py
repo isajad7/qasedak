@@ -7,7 +7,7 @@ import time
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections
 
-from store.bot_proxy import sanitized_telegram_proxy_url, telegram_proxy_url
+from store.bot_proxy import effective_telegram_proxy_url, sanitized_telegram_proxy_url
 from store.bots import handle_bot_update
 from store.models import BotConfiguration
 from store.telegram_bot.client import BotClient, BotDeliveryError
@@ -182,7 +182,7 @@ class TelegramPollingWorker:
         self.config = self._load_config()
         self.client = BotClient(self.config)
 
-        proxy_url = telegram_proxy_url()
+        proxy_url = effective_telegram_proxy_url(self.config)
         if proxy_url:
             self.command._log(
                 f"Telegram proxy enabled config={self.config.pk} proxy={sanitized_telegram_proxy_url(proxy_url)}"

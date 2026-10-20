@@ -5,7 +5,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from django.conf import settings
 
-from .models import BotConfiguration
+from .models import BotConfiguration, TelegramProxyConfiguration
 
 _webhook_response_state = threading.local()
 URL_CREDENTIAL_RE = re.compile(r"\b([a-z][a-z0-9+.-]*://)([^/\s:@]+)(?::([^@\s]*))?@", re.IGNORECASE)
@@ -38,6 +38,26 @@ def telegram_proxy_url():
     return f"{protocol}://{auth}{host}:{port}"
 
 
+def effective_telegram_proxy_url(config=None):
+    """Read the bot override on each request, including from long-running pollers."""
+    if not config or not config.pk or config.provider != BotConfiguration.Provider.TELEGRAM:
+        return telegram_proxy_url()
+    proxy = TelegramProxyConfiguration.objects.filter(bot_config_id=config.pk).values(
+        "mode", "protocol", "host", "port", "username", "password"
+    ).first()
+    if not proxy or proxy["mode"] == TelegramProxyConfiguration.Mode.ENVIRONMENT:
+        return telegram_proxy_url()
+    if proxy["mode"] == TelegramProxyConfiguration.Mode.DIRECT:
+        return ""
+    host, port = proxy["host"], proxy["port"]
+    if not host or not port:
+        return ""
+    auth = quote(proxy["username"], safe="") if proxy["username"] else ""
+    if auth and proxy["password"]:
+        auth += ":" + quote(proxy["password"], safe="")
+    return f"{proxy['protocol']}://{auth + '@' if auth else ''}{host}:{port}"
+
+
 def sanitized_telegram_proxy_url(proxy_url=None):
     proxy_url = proxy_url if proxy_url is not None else telegram_proxy_url()
     if not proxy_url:
@@ -60,10 +80,12 @@ def mask_proxy_secrets(value):
 
 
 def bot_request_proxies(provider):
+    config = provider if isinstance(provider, BotConfiguration) else None
+    provider = config.provider if config else provider
     if provider != BotConfiguration.Provider.TELEGRAM:
         return None
 
-    proxy_url = telegram_proxy_url()
+    proxy_url = effective_telegram_proxy_url(config)
     if not proxy_url:
         return None
 
@@ -75,7 +97,14 @@ def bot_request_proxies(provider):
 
 def bot_request_kwargs(provider):
     proxies = bot_request_proxies(provider)
-    return {"proxies": proxies} if proxies else {}
+    if proxies:
+        return {"proxies": proxies}
+    if isinstance(provider, BotConfiguration) and provider.pk and provider.provider == BotConfiguration.Provider.TELEGRAM:
+        mode = TelegramProxyConfiguration.objects.filter(bot_config_id=provider.pk).values_list("mode", flat=True).first()
+        if mode == TelegramProxyConfiguration.Mode.DIRECT:
+            # Empty proxy values suppress requests' ambient HTTP(S)_PROXY variables.
+            return {"proxies": {"http": "", "https": ""}}
+    return {}
 
 
 @contextmanager

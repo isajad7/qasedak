@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlsplit
 
 from django.conf import settings
 
-from store.bot_proxy import telegram_proxy_url
+from store.bot_proxy import effective_telegram_proxy_url
 from store.models import BotConfiguration
 
 
@@ -46,8 +46,11 @@ def telegram_api_request(config, request_method, url, *, json_payload=None, data
     if config.provider != BotConfiguration.Provider.TELEGRAM:
         return None
     override_ip = telegram_api_override_ip()
-    proxy_url = telegram_proxy_url()
+    proxy_url = effective_telegram_proxy_url(config)
     if not override_ip or not proxy_url:
+        return None
+    if urlsplit(proxy_url).scheme.lower() != "http":
+        # The pinned-IP transport uses HTTP CONNECT; requests handles SOCKS proxies.
         return None
 
     parsed_url = urlsplit(url)

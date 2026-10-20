@@ -14,7 +14,6 @@ from .admin_forms import (
     TelegramSetupForm,
 )
 from .admin_setup import active_panels, active_telegram_configs, build_setup_cards, route_queryset_for_store
-from .bot_proxy import sanitized_telegram_proxy_url, telegram_proxy_url
 from .models import BotConfiguration, Inbound, Panel, Plan, PlanInboundRoute, Store
 from .setup_readiness import build_store_readiness_checklist, setup_checklist_passes, sync_store_setup_status
 
@@ -303,14 +302,7 @@ def get_step_form(slug, request=None, store=None, data=None):
     if slug == "telegram":
         return TelegramSetupForm(data=data, store=store, bot_config=get_telegram_config(store))
     if slug == "telegram-proxy":
-        proxy_url = telegram_proxy_url()
-        return TelegramProxySetupForm(
-            data=data,
-            initial={
-                "proxy_enabled": bool(proxy_url),
-                "proxy_url": sanitized_telegram_proxy_url(proxy_url) if proxy_url else "",
-            },
-        )
+        return TelegramProxySetupForm(data=data)
     if slug == "panel":
         return PanelSetupForm(data=data, store=store, panel=get_panel(store))
     if slug == "inbounds":

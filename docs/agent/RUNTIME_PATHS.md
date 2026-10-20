@@ -1,5 +1,11 @@
 # Runtime paths for sales and subscriptions
 
+Telegram API calls in `store/telegram_bot/client.py` and the pinned IP transport use
+`store/bot_proxy.py::effective_telegram_proxy_url(config)`. It reads each bot's
+`TelegramProxyConfiguration` on every request; missing or environment mode falls
+back to `TELEGRAM_PROXY_*`. Long polling reloads the bot config each cycle.
+Admin proxy edits and read-only `getMe` testing live in `TelegramProxyConfigurationAdmin`.
+
 Use this as a call-path index. Verify a symbol in current code before editing. Keep website, bot, and client output consistent through the existing resolver.
 
 ## Paid website order to delivery

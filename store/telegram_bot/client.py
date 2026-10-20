@@ -73,7 +73,7 @@ class BotClient:
                     url,
                     json=payload,
                     timeout=timeout or bot_api_timeout(),
-                    **bot_request_kwargs(self.config.provider),
+                    **bot_request_kwargs(self.config),
                 )
             try:
                 data = response.json()
@@ -112,7 +112,7 @@ class BotClient:
                     data=data,
                     files=files,
                     timeout=bot_api_timeout(),
-                    **bot_request_kwargs(self.config.provider),
+                    **bot_request_kwargs(self.config),
                 )
             try:
                 payload = response.json()
@@ -254,7 +254,7 @@ class BotClient:
                 response = requests.get(
                     file_url,
                     timeout=bot_api_timeout(),
-                    **bot_request_kwargs(self.config.provider),
+                    **bot_request_kwargs(self.config),
                 )
             response.raise_for_status()
         except Exception as exc:
