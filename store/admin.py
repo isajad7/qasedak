@@ -712,6 +712,7 @@ class StoreAdmin(PanelHealthAlertAdminMixin, ImportExportModelAdmin):
                         "plan_inbound_routing_enabled",
                         "allow_global_inbound_fallback",
                         "custom_volume_price_per_gb",
+                        "customer_lost_grace_days",
                         "referral_system_enabled",
                         "referral_reward_gb",
                         "referral_reward_duration_days",
@@ -7287,7 +7288,7 @@ ANALYTICS_SEGMENT_LABELS = {
     SEGMENT_GOOD: _("Good"),
     SEGMENT_TOP_BUYER: _("Top buyer"),
     SEGMENT_TOP_REFERRER: _("Top referrer"),
-    SEGMENT_INACTIVE: _("Inactive"),
+    SEGMENT_INACTIVE: _("بدون خرید اخیر (بر اساس زمان خرید، نه مصرف یا ازدست‌رفتن)"),
     SEGMENT_NO_ORDER: _("No order"),
     SEGMENT_NEW_CUSTOMER: _("New customer"),
 }

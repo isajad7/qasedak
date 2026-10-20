@@ -623,6 +623,12 @@ class Store(TimeStampedModel):
         default=True,
         help_text=_("Include panel usage deltas and active users in the daily admin report."),
     )
+    customer_lost_grace_days = models.PositiveIntegerField(
+        "مهلت تمدیدنکردن مشتری (روز)",
+        default=7,
+        validators=[MinValueValidator(1)],
+        help_text="پس از پایان معتبر همهٔ سرویس‌ها؛ دادهٔ ناقص یا سرویس معتبر دیگر مانع تشخیص ازدست‌رفتن است.",
+    )
     panel_usage_snapshot_retention_days = models.PositiveIntegerField(
         _("panel usage snapshot retention days"),
         default=45,

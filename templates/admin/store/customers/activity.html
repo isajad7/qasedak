@@ -27,10 +27,11 @@
 {% if collector.completed_at %} آخرین دور کامل: {{ collector.completed_at|date:"Y/m/d H:i" }}{% endif %}
 <div class="activity-note">برای تشخیص ۴۸ ساعت عدم مصرف، ۴۸ ساعت مشاهدهٔ پیوسته لازم است. نبود داده یا کانفیگ مشترک، «عدم مصرف» محسوب نمی‌شود.</div>
 <div class="activity-note">در ساب با پوشش ناقص، افزایش مصرفِ کانفیگ اختصاصی می‌تواند فعالیت را ثابت کند؛ ثابت‌ماندن آن برای تشخیص عدم مصرف یا پایان کل خرید کافی نیست.</div>
+<div class="activity-note">سلامت دریافت ساب و مصرف دو موضوع جدا هستند؛ خطای refresh یا feed به‌تنهایی نشانهٔ عدم مصرف یا ازدست‌رفتن مشتری نیست.</div>
 </section>
 <section class="activity-grid">
 <article class="activity-card"><strong>{{ active_today }}</strong>مشتری با مصرف امروز <div class="activity-note">از {{ measured_today }} مشتری با نمونهٔ معتبر امروز</div></article>
-<article class="activity-card"><strong>{{ total }}</strong>مشتری دارای سابقهٔ سفارش</article>
+<article class="activity-card"><strong>{{ total }}</strong>مشتری و کاربر ثبت‌شدهٔ همین فروشگاه</article>
 {% for key,label,count in segments %}<a class="activity-card" href="?store={{ selected_store.pk }}&amp;segment={{ key }}"><strong>{{ count }}</strong>{{ label }}</a>{% endfor %}
 </section>
 <section class="activity-card"><h2>مشتری فعال روزانه · ۱۴ روز اخیر</h2>
@@ -42,14 +43,23 @@
 <form method="get" class="activity-filters">
 <label>فروشگاه <select name="store">{% for store in stores %}<option value="{{ store.pk }}" {% if store == selected_store %}selected{% endif %}>{{ store.name }}</option>{% endfor %}</select></label>
 <label>گروه <select name="segment"><option value="">همه</option>{% for key,label,count in segments %}<option value="{{ key }}" {% if selected_segment == key %}selected{% endif %}>{{ label }} ({{ count }})</option>{% endfor %}</select></label>
-<label>نام، نام کاربری یا شماره مشتری <input name="q" value="{{ search }}" maxlength="100"></label><button type="submit">نمایش</button>
+<label>نام، @یوزرنیم، آیدی تلگرام یا شماره مشتری <input name="q" value="{{ search }}" maxlength="100"></label><button type="submit">نمایش</button>
 </form>
-<p class="activity-note">جدید: اولین خرید تأییدشده در ۳۰ روز اخیر. وفادار: حداقل ۲ خرید تأییدشده. ازدست‌رفته: همهٔ سرویس‌ها حداقل ۷ روز است پایان یافته‌اند و سرویس قابل استفاده یا دادهٔ نامشخص ندارد. این برچسب‌ها مستقل از فعالیت مصرف هستند.</p>
+<p class="activity-note">جدید: اولین خرید تجاری تأییدشده در ۳۰ روز اخیر. وفادار: حداقل ۲ خرید تجاری تأییدشده. مهلت تمدیدنکردن: {{ selected_store.customer_lost_grace_days }} روز پس از پایان معتبر همهٔ سرویس‌ها؛ سرویس معتبر دیگر یا دادهٔ نامشخص مانع تشخیص ازدست‌رفتن است. برچسب‌ها می‌توانند هم‌زمان برقرار باشند؛ هر شمارنده به فیلتر همان گروه وصل است.</p>
+{% if selected_store %}<p class="activity-note"><a href="{% url 'admin:store_store_change' selected_store.pk %}">تنظیمات فروشگاه ← Customer / Sales Settings ← مهلت تمدیدنکردن مشتری</a></p>{% endif %}
 {% for row in rows %}<article class="activity-card" style="margin-top:16px">
-<strong style="font-size:18px">{% if can_review_customer %}<a href="{% url 'admin_store_customer_review' row.customer.pk %}">{% endif %}{{ row.customer.display_name|default:row.customer.username|default:"مشتری" }} · #{{ row.customer.pk }}{% if can_review_customer %}</a>{% endif %}</strong>
+<strong style="font-size:18px">{% if can_review_customer %}<a href="{{ row.profile_url }}">{% endif %}{{ row.name }}{% if row.customer %} · #{{ row.customer.pk }}{% endif %}{% if can_review_customer %}</a>{% endif %}</strong>
 <span class="activity-chip activity-state-{{ row.state }}">{{ row.label }}</span>{% for label in row.tag_labels %}<span class="activity-chip">{{ label }}</span>{% endfor %}
+<div class="activity-note">{% for user in row.bot_users %}<div>{{ user.bot_config.name }} · {{ user.bot_config.get_provider_display }} · نام: {{ user.display_name|default:user.first_name|default:"—" }} · <bdi>{% if user.username %}@{{ user.username }}{% else %}—{% endif %}</bdi> · آیدی عددی: <bdi>{{ user.provider_user_id }}</bdi></div>{% empty %}{% if row.customer.username %}<div>یوزرنیم: <bdi>{{ row.customer.username }}</bdi></div>{% endif %}{% endfor %}</div>
+<p>{{ row.reason }}</p>
+{% if row.followup_services %}<p class="activity-note activity-state-inactive">سرویس‌های نیازمند پیگیری: {{ row.followup_services|join:"، " }}</p>{% endif %}
+<div class="activity-note">آخرین خرید موفق: {{ row.last_purchase_at|date:"Y/m/d H:i"|default:"—" }} · آخرین تمدید موفق: {{ row.last_renewal_at|date:"Y/m/d H:i"|default:"—" }} · آخرین پایان معتبر سرویس فعلی: {{ row.last_service_end|date:"Y/m/d H:i"|default:"—" }}</div>
+<div class="activity-note">آخرین بازهٔ مصرف اثبات‌شده: {% if row.proven_start %}{{ row.proven_start|date:"Y/m/d H:i" }} تا {{ row.proven_end|date:"Y/m/d H:i" }}{% else %}—{% endif %} · زمان دقیق مصرف داخل این بازه مشخص نیست.</div>
+<div class="activity-note">آخرین مشاهدهٔ معتبر: {{ row.last_valid_at|date:"Y/m/d H:i"|default:"—" }} · آخرین تلاش پایش: {{ row.last_attempt_at|date:"Y/m/d H:i"|default:"—" }}</div>
+{% if row.data_issues %}<div class="activity-warning activity-note">مشکل یا محدودیت داده: {% for issue in row.data_issues %}<div>{{ issue }}</div>{% endfor %}</div>{% endif %}
+<p>{% if can_review_customer %}<a href="{{ row.profile_url }}">پروندهٔ مشتری</a>{% endif %}{% if can_message_customer and row.message_url %} · <a href="{{ row.message_url }}">پیام مستقیم</a>{% endif %}</p>
 <details><summary>{{ row.purchases|length }} خرید · مشاهدهٔ وضعیت جداگانه</summary><div class="activity-scroll"><table class="activity-table"><thead><tr><th>خرید / پلن</th><th>سرویس</th><th>فعالیت</th><th>دلیل و زمان مشاهده</th></tr></thead><tbody>
-{% for purchase in row.purchases %}<tr><td>#{{ purchase.order.pk }} · {{ purchase.order.plan.name }}<br><small>حجم پلن: {{ purchase.order.plan.volume_gb }} گیگ · {{ purchase.order.created_at|date:"Y/m/d" }}</small></td><td>{{ purchase.entitlement_label }}</td><td class="activity-state-{{ purchase.state }}">{{ purchase.label }}{% if purchase.activity.last_activity_at %}<br><small>آخرین مصرف مشاهده‌شده: {{ purchase.activity.last_activity_at|date:"m/d H:i" }}</small>{% endif %}</td><td>{{ purchase.reason }}<br><small>{{ purchase.activity.observed_at|date:"m/d H:i"|default:"—" }} · {{ purchase.activity.source_count|default:0 }} منبع</small></td></tr>{% empty %}<tr><td colspan="4">خرید تأییدشده‌ای برای پایش وجود ندارد.</td></tr>{% endfor %}
+{% for purchase in row.purchases %}<tr><td>#{{ purchase.order.pk }} · {{ purchase.order.plan.name }}<br><small>حجم پلن: {{ purchase.order.plan.volume_gb }} گیگ · {{ purchase.order.created_at|date:"Y/m/d" }}</small></td><td>{{ purchase.entitlement_label }}{% if purchase.activity.ended_at %}<br><small>پایان: {{ purchase.activity.ended_at|date:"Y/m/d H:i" }}</small>{% endif %}</td><td class="activity-state-{{ purchase.state }}">{{ purchase.label }}{% if purchase.activity.proven_start %}<br><small>بازهٔ مصرف اثبات‌شده: {{ purchase.activity.proven_start|date:"m/d H:i" }} تا {{ purchase.activity.proven_end|date:"m/d H:i" }}</small>{% endif %}</td><td>{{ purchase.reason }}<br><small>مشاهدهٔ معتبر: {{ purchase.last_valid_at|date:"m/d H:i"|default:"—" }}<br>تلاش پایش: {{ purchase.activity.observed_at|date:"m/d H:i"|default:"—" }} · {{ purchase.activity.source_count|default:0 }} منبع</small></td></tr>{% empty %}<tr><td colspan="4">خرید تأییدشده‌ای برای پایش وجود ندارد.</td></tr>{% endfor %}
 </tbody></table></div></details></article>{% empty %}<p>مشتری مطابق این فیلتر پیدا نشد.</p>{% endfor %}
 <nav style="margin-top:16px">{% if rows.has_previous %}<a href="?store={{ selected_store.pk }}&amp;segment={{ selected_segment|urlencode }}&amp;q={{ search|urlencode }}&amp;page={{ rows.previous_page_number }}">قبلی</a>{% endif %} صفحهٔ {{ rows.number }} از {{ rows.paginator.num_pages }} {% if rows.has_next %}<a href="?store={{ selected_store.pk }}&amp;segment={{ selected_segment|urlencode }}&amp;q={{ search|urlencode }}&amp;page={{ rows.next_page_number }}">بعدی</a>{% endif %}</nav>
 </section></div>{% endtimezone %}
