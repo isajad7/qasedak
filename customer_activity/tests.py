@@ -5,13 +5,14 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from store.models import ConfigLink, CupItem, Customer, Inbound, Order, Panel, Plan, Store, SubscriptionCup, VPNClient
+from store.models import BotConfiguration, BotUser, ConfigLink, CupItem, Customer, Inbound, Order, Panel, Plan, Store, SubscriptionCup, VPNClient
 from store.xui_api import hash_xui_identifier
 from .mapping import credential_from_link, load_purchase_maps, resolve_maps
 from .models import ActivityCollector, ActivityObservation, PurchaseActivity
@@ -560,3 +561,192 @@ class ActivityTests(TestCase):
         other = Store.objects.create(name="Other", card_number="0000000000000000", card_owner="Other")
         self.assertEqual(customer_rows(other, now=self.now), [])
         self.assertEqual(daily_counts(other, now=self.now)[-1]["active"], 0)
+
+    def test_lost_grace_default_and_exact_boundary(self):
+        self.assertEqual(self.store.customer_lost_grace_days, 7)
+        order = self.purchase(amount=0)  # A discounted normal purchase is still a purchase.
+        vpn = self.vpn(order)
+        cutoff = self.now - timedelta(days=7)
+        self.record(order, vpn, expiry_time=cutoff + timedelta(seconds=1))
+        self.assertEqual(customer_rows(self.store, now=self.now)[0]["state"], "awaiting_renewal")
+        PurchaseActivity.objects.filter(order=order).update(ended_at=cutoff)
+        row = customer_rows(self.store, now=self.now)[0]
+        self.assertEqual(row["state"], "lost")
+        self.assertIn("7 روز", row["reason"])
+        self.assertEqual(row["last_service_end"], cutoff)
+
+    def test_store_grace_is_configurable_validated_and_exposed(self):
+        order = self.purchase()
+        self.record(order, self.vpn(order), expiry_time=self.now - timedelta(days=8))
+        self.store.customer_lost_grace_days = 10
+        self.store.save(update_fields=["customer_lost_grace_days"])
+        self.assertEqual(customer_rows(self.store, now=self.now)[0]["state"], "awaiting_renewal")
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("admin:store_store_change", args=[self.store.pk]))
+        self.assertContains(response, 'name="customer_lost_grace_days"')
+        field = response.context["adminform"].form.fields["customer_lost_grace_days"]
+        self.assertEqual(field.clean("3"), 3)
+        with self.assertRaises(ValidationError):
+            Store._meta.get_field("customer_lost_grace_days").clean(0, self.store)
+        form = type(response.context["adminform"].form)({"customer_lost_grace_days": "0"}, instance=self.store)
+        self.assertIn("customer_lost_grace_days", form.errors)
+
+    def test_latest_of_multiple_known_service_ends_controls_grace(self):
+        for days in (20, 6):
+            order = self.purchase()
+            self.record(order, self.vpn(order), expiry_time=self.now - timedelta(days=days))
+        row = customer_rows(self.store, now=self.now)[0]
+        self.assertEqual(row["state"], "awaiting_renewal")
+        self.assertEqual(row["last_service_end"], self.now - timedelta(days=6))
+
+    def test_valid_gift_and_unobserved_replacement_each_prevent_false_loss(self):
+        old = self.purchase()
+        self.record(old, self.vpn(old), expiry_time=self.now - timedelta(days=12))
+        gift = self.purchase(payment_method=Order.PaymentMethod.ADMIN_FREE, revenue_included=False,
+                             metadata={"source": "admin_free", "free_grant": True})
+        self.assertEqual(customer_rows(self.store, now=self.now)[0]["state"], "unknown")
+        self.record(gift, self.vpn(gift))
+        row = customer_rows(self.store, now=self.now)[0]
+        self.assertNotIn("lost", row["tags"])
+        self.assertEqual(row["last_purchase_at"], old.verified_at)
+        self.assertNotIn("loyal", row["tags"])
+
+    def test_expired_gift_alone_is_not_a_lost_commercial_customer(self):
+        order = self.purchase(payment_method=Order.PaymentMethod.ADMIN_FREE, revenue_included=False,
+                              metadata={"free_grant": True})
+        self.record(order, self.vpn(order), expiry_time=self.now - timedelta(days=20))
+        row = customer_rows(self.store, now=self.now)[0]
+        self.assertNotIn("lost", row["tags"])
+        self.assertIn("no_purchase", row["tags"])
+        self.assertIsNone(row["last_purchase_at"])
+        order.revenue_included = True
+        order.revenue_amount = 50000
+        order.save(update_fields=["revenue_included", "revenue_amount"])
+        self.assertEqual(customer_rows(self.store, now=self.now)[0]["state"], "lost")
+
+    def test_direct_admin_metadata_excludes_commercial_loss_and_daily_counts(self):
+        for metadata in ({"admin_direct_purchase": True}, {"source": "admin_direct_purchase"}):
+            order = self.purchase(amount=90000, metadata=metadata)
+            vpn = self.vpn(order)
+            self.record(order, vpn, expiry_time=self.now - timedelta(days=20))
+            self.record(order, vpn, used=100, at=self.now + timedelta(minutes=15),
+                        expiry_time=self.now - timedelta(days=20))
+        row = customer_rows(self.store, now=self.now + timedelta(minutes=15))[0]
+        self.assertEqual(row["state"], "no_purchase")
+        self.assertEqual(row["purchases"], [])
+        self.assertEqual(daily_counts(self.store, now=self.now + timedelta(minutes=15))[-1]["active"], 0)
+
+    def test_active_customer_still_names_unused_valid_service(self):
+        quiet = self.purchase()
+        active = self.purchase()
+        quiet_vpn, active_vpn = self.vpn(quiet), self.vpn(active)
+        for minute in range(0, 48 * 60 + 1, 30):
+            self.record(quiet, quiet_vpn, at=self.now + timedelta(minutes=minute))
+        self.record(active, active_vpn, at=self.now + timedelta(hours=48, minutes=-15))
+        self.record(active, active_vpn, at=self.now + timedelta(hours=48), used=300)
+        row = customer_rows(self.store, now=self.now + timedelta(hours=48))[0]
+        self.assertEqual(row["state"], "active")
+        self.assertIn("at_risk", row["tags"])
+        self.assertEqual(row["followup_services"], [f"{quiet.plan.name} · #{quiet.pk}"])
+
+    def test_successful_renewal_supersedes_old_cycle_in_customer_summary(self):
+        old = self.purchase()
+        vpn = self.vpn(old)
+        self.record(old, vpn, expiry_time=self.now - timedelta(days=20))
+        renewal = self.purchase(verified_at=self.now + timedelta(minutes=15), metadata={"renewal_client_pk": vpn.pk})
+        self.record(old, vpn, at=self.now + timedelta(minutes=15))
+        self.record(renewal, vpn, at=self.now + timedelta(minutes=15))
+        row = customer_rows(self.store, now=self.now + timedelta(minutes=15))[0]
+        self.assertNotIn("lost", row["tags"])
+        self.assertIsNone(row["last_service_end"])
+        self.assertEqual(row["last_renewal_at"], renewal.verified_at)
+        self.assertEqual(next(p for p in row["purchases"] if p["order"] == old)["entitlement"], "superseded")
+
+    def test_outage_keeps_last_proven_interval_and_last_valid_observation(self):
+        order = self.purchase()
+        vpn = self.vpn(order)
+        self.record(order, vpn)
+        valid_at = self.now + timedelta(minutes=15)
+        self.record(order, vpn, used=100, at=valid_at)
+        mapping = next(m for m in load_purchase_maps()[0] if m.order.pk == order.pk)
+        failed_at = self.now + timedelta(minutes=30)
+        record_purchase(mapping, {}, "panel_unreachable", now=failed_at)
+        row = customer_rows(self.store, now=failed_at)[0]
+        self.assertEqual(row["state"], "unknown")
+        self.assertEqual((row["proven_start"], row["proven_end"]), (self.now, valid_at))
+        self.assertEqual(row["last_valid_at"], valid_at)
+        self.assertEqual(row["last_attempt_at"], failed_at)
+        self.assertIn("پنل در دسترس نیست", " ".join(row["data_issues"]))
+        self.assertNotIn("at_risk", row["tags"])
+
+    def test_stale_ended_and_incomplete_ownership_never_prove_loss(self):
+        order = self.purchase()
+        vpn = self.vpn(order)
+        self.record(order, vpn, expiry_time=self.now - timedelta(days=20))
+        self.assertEqual(customer_rows(self.store, now=self.now + timedelta(minutes=46))[0]["state"], "unknown")
+        mapping = next(m for m in load_purchase_maps()[0] if m.order.pk == order.pk)
+        for index, reason in enumerate(("panel_unreachable", "missing_counters", "ownership_conflict", "shared_identity"), start=1):
+            at = self.now + timedelta(hours=index)
+            record_purchase(mapping, {}, reason, now=at)
+            row = customer_rows(self.store, now=at)[0]
+            self.assertEqual(row["state"], "unknown")
+            self.assertNotIn("lost", row["tags"])
+            self.assertNotIn("at_risk", row["tags"])
+
+    def test_directory_search_uses_scoped_bot_identity_and_includes_unlinked_users(self):
+        bot = BotConfiguration.objects.create(store=self.store, name="Shop bot", bot_token="test-token")
+        linked = BotUser.objects.create(bot_config=bot, customer=self.customer, provider_user_id="112233", chat_id="112233",
+                                        username="BuyerHandle", display_name="Buyer name")
+        unlinked = BotUser.objects.create(bot_config=bot, provider_user_id="445566", chat_id="445566", display_name="No order")
+        other = Store.objects.create(name="Other shop")
+        foreign = BotConfiguration.objects.create(store=other, name="Foreign bot", bot_token="other-test-token")
+        BotUser.objects.create(bot_config=foreign, customer=self.customer, provider_user_id="998877", chat_id="998877", username="ForeignHandle")
+        self.client.force_login(self.admin)
+        url = reverse("admin_store_customer_activity")
+        before = Customer.objects.count()
+        for search, expected in (("@buyerhandle", linked), ("۱۱۲۲۳۳", linked), ("Buyer name", linked), ("445566", unlinked)):
+            response = self.client.get(url, {"store": self.store.pk, "segment": "no_purchase", "q": search})
+            self.assertEqual(response.context["rows"].paginator.count, 1)
+            self.assertContains(response, expected.provider_user_id)
+            self.assertNotContains(response, "998877")
+        response = self.client.get(url, {"store": self.store.pk, "q": "ForeignHandle"})
+        self.assertEqual(response.context["rows"].paginator.count, 0)
+        self.assertEqual(Customer.objects.count(), before)
+        self.assertContains(self.client.get(url), reverse("admin_store_customer_message", args=[self.customer.pk]))
+
+    def test_segment_counts_match_paginated_store_list(self):
+        bot = BotConfiguration.objects.create(store=self.store, name="Directory bot", bot_token="test-token")
+        BotUser.objects.bulk_create([BotUser(bot_config=bot, provider_user_id=str(100000 + i), chat_id=str(100000 + i)) for i in range(27)])
+        self.client.force_login(self.admin)
+        url = reverse("admin_store_customer_activity")
+        response = self.client.get(url, {"store": self.store.pk, "segment": "no_purchase", "page": 2})
+        self.assertEqual(response.context["total"], 27)
+        self.assertEqual(response.context["rows"].paginator.count, 27)
+        self.assertEqual(len(response.context["rows"]), 2)
+        self.assertEqual(dict((key, count) for key, label, count in response.context["segments"])["no_purchase"], 27)
+
+    def test_rendered_customer_summary_distinguishes_evidence_from_collection(self):
+        order = self.purchase()
+        vpn = self.vpn(order)
+        self.record(order, vpn)
+        self.record(order, vpn, used=100, at=self.now + timedelta(minutes=15))
+        self.client.force_login(self.admin)
+        with patch("customer_activity.views.timezone.now", return_value=self.now + timedelta(minutes=30)):
+            response = self.client.get(reverse("admin_store_customer_activity"), {"store": self.store.pk})
+        self.assertContains(response, "آخرین بازهٔ مصرف اثبات‌شده")
+        self.assertContains(response, "زمان دقیق مصرف داخل این بازه مشخص نیست")
+        self.assertContains(response, "آخرین مشاهدهٔ معتبر")
+        self.assertContains(response, "آخرین تلاش پایش")
+        self.assertContains(response, "آخرین تمدید موفق")
+        self.assertNotContains(response, vpn.uuid)
+        self.assertEqual(response.context["rows"][0]["proven_end"], self.now + timedelta(minutes=15))
+
+    def test_customer_message_link_requires_support_reply_capability(self):
+        self.purchase()
+        analyst = get_user_model().objects.create_user("activity-analyst", password="secret", is_staff=True)
+        self.client.force_login(analyst)
+        with patch("store.admin_access.get_user_capabilities", return_value={"revenue.view", "orders.view"}):
+            response = self.client.get(reverse("admin_store_customer_activity"), {"store": self.store.pk})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["can_message_customer"])
+        self.assertNotContains(response, reverse("admin_store_customer_message", args=[self.customer.pk]))
