@@ -164,6 +164,7 @@ if [[ "$old_image" == "$image" && -n "$old_refresh_container" ]]; then
     docker exec "$old_container" python manage.py process_order_automation --check-running >/dev/null 2>&1 || die 'Order automation heartbeat is missing or stale.'
     docker exec "$old_container" python manage.py collect_customer_activity --check-running >/dev/null 2>&1 || die 'Customer activity heartbeat is missing or stale.'
     docker exec "$old_container" python manage.py run_customer_outreach --check-running >/dev/null 2>&1 || die 'Purchase outreach heartbeat is missing or stale.'
+    python3 "$QASEDAK_DEV_ROOT/releases/$revision/scripts/deploy/write_compose_image.py" "$QASEDAK_DEV_ROOT/.env" "$image"
     docker exec "$old_container" python manage.py sync_pasarguard_subscriptions --refresh --public-base-url https://botsell.panelwpvideo.ir
     docker exec "$old_container" python manage.py run_customer_outreach --activate-initial --only-active-store
     docker exec "$old_container" python manage.py run_customer_outreach
@@ -244,6 +245,7 @@ if (( ! healthy )); then
     rollback
     die 'New image did not pass tenant/database health or scheduler heartbeat checks; previous image restart attempted. Database migrations require manual review.'
 fi
+python3 "$release/scripts/deploy/write_compose_image.py" "$QASEDAK_DEV_ROOT/.env" "$image"
 printf 'Order automation and customer activity scheduler heartbeats verified.\n'
 docker exec "$current" python manage.py collect_customer_activity --status
 docker exec "$current" python manage.py run_customer_outreach --status

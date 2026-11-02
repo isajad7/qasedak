@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import unittest
 
+from write_compose_image import write_image_tag
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -103,6 +105,28 @@ printf 'scp %s\\n' "$*" >> "$DEPLOY_TEST_CALLS"
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Image checksum mismatch", result.stderr)
+
+    def test_verified_image_preserves_compose_profiles_and_file_permissions(self):
+        environment = self.directory / ".env"
+        environment.write_text("# Runtime settings\nCOMPOSE_PROFILES=consumers\nQASEDAK_IMAGE_TAG=old\nOTHER=value\n")
+        environment.chmod(0o640)
+        image = "qasedak-development:" + self.revision
+        write_image_tag(environment, image)
+        write_image_tag(environment, image)
+        self.assertEqual(environment.read_text(),
+                         "# Runtime settings\nCOMPOSE_PROFILES=consumers\nOTHER=value\nQASEDAK_IMAGE_TAG=" + image + "\n")
+        self.assertEqual(environment.stat().st_mode & 0o777, 0o640)
+
+    def test_image_setting_refuses_symlink_or_invalid_revision(self):
+        environment = self.directory / ".env"
+        environment.symlink_to(self.artifact / "image.id")
+        with self.assertRaises(ValueError):
+            write_image_tag(environment, "qasedak-development:" + self.revision)
+        self.assertEqual((self.artifact / "image.id").read_text(), self.image_id + "\n")
+        environment.unlink()
+        with self.assertRaises(ValueError):
+            write_image_tag(environment, "qasedak-development:latest")
+        self.assertFalse(environment.exists())
 
 
 if __name__ == "__main__":
