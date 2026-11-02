@@ -1,14 +1,18 @@
 """Exercise deployment artifact boundaries without contacting a server."""
 
 import hashlib
+import io
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import tarfile
 import unittest
 
 from write_compose_image import write_image_tag
+from image_config_id import image_config_id
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -127,6 +131,39 @@ printf 'scp %s\\n' "$*" >> "$DEPLOY_TEST_CALLS"
         with self.assertRaises(ValueError):
             write_image_tag(environment, "qasedak-development:latest")
         self.assertFalse(environment.exists())
+
+
+class PortableImageIdentityTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="qasedak-image-id-test-")
+        self.addCleanup(temporary.cleanup)
+        self.archive = Path(temporary.name) / "image.tar.gz"
+        self.tag = "qasedak-development:" + "1" * 40
+
+    def export(self, *, architecture="amd64", tag=None):
+        config = json.dumps({"os": "linux", "architecture": architecture, "rootfs": {"diff_ids": []}}).encode()
+        config_path = "blobs/sha256/" + hashlib.sha256(config).hexdigest()
+        manifest = json.dumps([{"RepoTags": [tag or self.tag], "Config": config_path}]).encode()
+        with tarfile.open(self.archive, "w:gz") as archive:
+            for name, data in [("manifest.json", manifest), (config_path, config), ("index.json", b'{"manifests":[]}')]:
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+        return "sha256:" + hashlib.sha256(config).hexdigest()
+
+    def test_uses_exported_configuration_identity_instead_of_manifest_or_index(self):
+        expected = self.export()
+        self.assertEqual(image_config_id(self.archive, self.tag), expected)
+
+    def test_rejects_wrong_release_tag(self):
+        self.export(tag="qasedak-development:other")
+        with self.assertRaises(ValueError):
+            image_config_id(self.archive, self.tag)
+
+    def test_rejects_wrong_target_platform(self):
+        self.export(architecture="arm64")
+        with self.assertRaises(ValueError):
+            image_config_id(self.archive, self.tag)
 
 
 if __name__ == "__main__":

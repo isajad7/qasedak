@@ -13,6 +13,12 @@ This repository has a Dockerfile and a multi-tenant container entrypoint, but no
 
 ## One-time read-only server inventory
 
+`image.id` is the SHA-256 of the configuration blob in the exported image's
+`manifest.json`, not the runner's local image-index ID. This remains comparable
+with the classic image store on the target after loading a containerd export.
+`scripts/deploy/image_config_id.py` also checks the exact release tag and target
+platform; archive checksums and the loaded revision label remain mandatory.
+
 From a machine with authorized SSH access, identify the current application **before** moving it. Record names, ports, owner, release path, Compose project, container IDs, bind mounts/volumes, database engine and database name, Nginx upstream, and bot/worker processes. Do not print environment values, database passwords, customer data, full Nginx configs, or provider URLs.
 
 Useful scoped checks: `docker ps --format '{{.ID}} {{.Names}} {{.Image}} {{.Ports}}'`, `docker compose ls`, `systemctl list-units --type=service --all`, `ss -ltnp`, and names under `/etc/nginx/sites-enabled`. Inspect a selected container's labels, ports, mounts and image individually, without dumping `.Config.Env`. Confirm whether a legacy install tree is a running host install, a Docker build source, or an unused copy. Confirm the new `qasedak` code and data are compatible before replacing any running image.
