@@ -6,6 +6,13 @@ Telegram API calls in `store/telegram_bot/client.py` and the pinned IP transport
 back to `TELEGRAM_PROXY_*`. Long polling reloads the bot config each cycle.
 Admin proxy edits and read-only `getMe` testing live in `TelegramProxyConfigurationAdmin`.
 
+Polling dispatch is sequential per bot. `TelegramPollingWorker._handle_update`
+logs handler time and message delivery lag without message contents. Interactive
+X-UI identifier lookup uses one request attempt with a 3-second timeout, stops on
+transport failure rather than retrying every inbound, and backs off an unreachable
+panel for 30 seconds. Other panels are still searched; provisioning keeps its
+existing timeout/retry policy.
+
 Use this as a call-path index. Verify a symbol in current code before editing. Keep website, bot, and client output consistent through the existing resolver.
 
 ## Paid website order to delivery
