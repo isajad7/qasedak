@@ -26,11 +26,12 @@ Read only the row for the task. Paths and symbols below were checked against `ma
 
 ## Delivery data relationships
 
-Panel admin deletion uses `store/admin_deletion.py::counted_deleted_objects`:
-fast-deletable monitoring tables are counted in SQL, not rendered row by row.
-Registered model delete permissions and protected plan routes still block deletion.
-Free-trial history survives retired panel/inbound deletion with nullable references;
-trial eligibility still uses the retained request history.
+Panel admin deletion uses `store/admin_deletion.py`: SQL counts summarize the
+confirmation page without loading monitoring histories. Single and bulk deletion
+remove the panel's inbounds, routes, orders, VPN clients, cups, generated links,
+trial requests, delivery sources and logs in a database transaction. Registered
+model delete permissions remain required. Shared stores, customers, plans and
+inventory stay available. No remote panel calls occur during deletion.
 
 | Entity | Role |
 | --- | --- |
