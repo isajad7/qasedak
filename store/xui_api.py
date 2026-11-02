@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 PANEL_TIMEOUT_SECONDS = 30
 PANEL_LOGIN_TIMEOUT_SECONDS = (5, 30)
 PANEL_LOGIN_ATTEMPTS = 2
+LOOKUP_TIMEOUT_SECONDS = 3
+LOOKUP_UNAVAILABLE_CACHE_SECONDS = 30
 CLIENT_STATS_CACHE_SECONDS = 60
 USAGE_SNAPSHOT_INTERVAL_SECONDS = 300
 REALITY_PUBLIC_KEY_MISSING_MESSAGE = "Reality public key برای ساخت لینک پیدا نشد. لینک تولیدشده ممکن است قابل استفاده نباشد."
@@ -1009,12 +1011,13 @@ class XUIClientStats:
 
 
 class XUIService:
-    def __init__(self, panel, *, timeout_seconds=None):
+    def __init__(self, panel, *, timeout_seconds=None, request_attempts=None):
         self.panel = panel
         self.base_url = self._normalize_base_url(panel.url)
         self.session = configure_xui_session(requests.Session(), panel=panel)
         self._logged_in = False
         self.csrf_token = ""
+        self.request_attempts = max(int(request_attempts or PANEL_LOGIN_ATTEMPTS), 1)
         if timeout_seconds is None:
             self.timeout_seconds = PANEL_TIMEOUT_SECONDS
             self.login_timeout = PANEL_LOGIN_TIMEOUT_SECONDS
@@ -1285,18 +1288,18 @@ class XUIService:
 
     def _login_request_with_retries(self, request_func):
         last_exception = None
-        for attempt in range(1, PANEL_LOGIN_ATTEMPTS + 1):
+        for attempt in range(1, self.request_attempts + 1):
             try:
                 return request_func()
             except requests.RequestException as exc:
                 last_exception = exc
-                if attempt >= PANEL_LOGIN_ATTEMPTS:
+                if attempt >= self.request_attempts:
                     raise
                 logger.warning(
                     "Panel login request failed for panel %s; retrying (%s/%s).",
                     self.panel.pk,
                     attempt,
-                    PANEL_LOGIN_ATTEMPTS,
+                    self.request_attempts,
                 )
                 time.sleep(min(attempt, 2))
         raise last_exception or XUIError("Panel login failed.", category="unknown")
@@ -1586,6 +1589,10 @@ class XUIService:
             try:
                 inbound_data = self.get_inbound(inbound, use_cache=False)
                 successful_inbound_reads += 1
+            except (requests.ConnectionError, requests.Timeout):
+                # Every inbound uses the same panel connection. Repeating a
+                # transport failure here can block all polling users for minutes.
+                raise
             except Exception as exc:
                 safe_error = sanitize_xui_operational_text(exc, panel=self.panel)
                 inbound_errors.append(f"{inbound.inbound_id}: {safe_error}")
@@ -3018,7 +3025,22 @@ def collect_panel_usage_stats(panel):
 
 
 def find_client_by_identifier(panel, identifier):
-    return XUIService(panel).find_client_by_identifier(identifier)
+    endpoint = f"{panel.url}|{xui_panel_proxy_url(panel)}"
+    endpoint_hash = hashlib.sha256(endpoint.encode()).hexdigest()[:16]
+    failure_key = f"xui:lookup-unavailable:{panel.pk}:{endpoint_hash}"
+    if cache.get(failure_key):
+        raise XUIError("Panel is temporarily unreachable; try again shortly.", category="network_timeout")
+    try:
+        # This is a read-only, interactive search. Provisioning keeps its normal
+        # timeouts and retries so a slow lookup cannot change write semantics.
+        return XUIService(
+            panel,
+            timeout_seconds=LOOKUP_TIMEOUT_SECONDS,
+            request_attempts=1,
+        ).find_client_by_identifier(identifier)
+    except (requests.ConnectionError, requests.Timeout):
+        cache.set(failure_key, True, LOOKUP_UNAVAILABLE_CACHE_SECONDS)
+        raise
 
 
 def delete_client_from_inbound(panel, inbound, identifier, *, allow_multi_scope=False):

@@ -216,6 +216,8 @@ class TelegramPollingWorker:
         return len(updates)
 
     def _handle_update(self, update):
+        started = time.monotonic()
+        received_at = time.time()
         update_id = update.get("update_id") if isinstance(update, dict) else None
         try:
             handle_bot_update(
@@ -236,6 +238,18 @@ class TelegramPollingWorker:
                 logging.ERROR,
             )
         finally:
+            handler_ms = (time.monotonic() - started) * 1000
+            payload = update if isinstance(update, dict) else {}
+            kind = "callback" if payload.get("callback_query") else "message" if payload.get("message") else "other"
+            message = payload.get("message") or {}
+            sent_at = message.get("date") if isinstance(message, dict) else None
+            lag_ms = max(0, (received_at - sent_at) * 1000) if isinstance(sent_at, (int, float)) else None
+            self.command._log(
+                f"Telegram update timing config={self.config_id} update_id={update_id} "
+                f"kind={kind} handler_ms={handler_ms:.1f} "
+                f"delivery_lag_ms={round(lag_ms, 1) if lag_ms is not None else 'unknown'}",
+                logging.WARNING if handler_ms >= 2000 else logging.INFO,
+            )
             if update_id is not None:
                 next_offset = int(update_id) + 1
                 self.offset = max(self.offset or next_offset, next_offset)
