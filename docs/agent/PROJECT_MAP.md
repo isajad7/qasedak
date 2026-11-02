@@ -26,6 +26,13 @@ Read only the row for the task. Paths and symbols below were checked against `ma
 
 ## Delivery data relationships
 
+Panel admin deletion uses `store/admin_deletion.py`: SQL counts summarize the
+confirmation page without loading monitoring histories. Single and bulk deletion
+remove the panel's inbounds, routes, orders, VPN clients, cups, generated links,
+trial requests, delivery sources and logs in a database transaction. Registered
+model delete permissions remain required. Shared stores, customers, plans and
+inventory stay available. No remote panel calls occur during deletion.
+
 | Entity | Role |
 | --- | --- |
 | `PlanDeliveryConfig` -> `PlanDeliverySource` | Delivery mode and ordered panel/inventory sources for a plan. |

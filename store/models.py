@@ -4770,14 +4770,18 @@ class FreeTrialRequest(TimeStampedModel):
     panel = models.ForeignKey(
         Panel,
         verbose_name=_("panel"),
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
         related_name="free_trial_requests",
+        null=True,
+        blank=True,
     )
     inbound = models.ForeignKey(
         Inbound,
         verbose_name=_("inbound"),
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
         related_name="free_trial_requests",
+        null=True,
+        blank=True,
     )
     vpn_client = models.ForeignKey(
         VPNClient,
