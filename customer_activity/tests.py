@@ -480,7 +480,7 @@ class ActivityTests(TestCase):
             link = ConfigLink.objects.create(raw_link=raw, normalized_hash=f"native-ss-{index}", vpn_client=vpn,
                                              source_panel=self.panel, source_inbound=self.inbound)
             CupItem.objects.create(cup=cup, config_link=link)
-        user = self.pasar_user()
+        user = self.pasar_user(expire=(timezone.now() + timedelta(days=30)).isoformat())
         user["proxy_settings"]["shadowsocks"] = {"password": "ss-pass"}
         client_cls.return_value.request.return_value = {"total": 1, "users": [user]}
         rows, _ = read_panel(self.panel)

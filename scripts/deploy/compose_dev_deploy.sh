@@ -6,11 +6,18 @@ die() { printf 'Development deploy: %s\n' "$*" >&2; exit 1; }
 revision="${1:-}"
 expected_checksum="${2:-}"
 archive="${3:-}"
+expected_image_checksum="${4:-}"
+expected_image_id="${5:-}"
 [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || die 'Invalid revision.'
 [[ "$expected_checksum" =~ ^[0-9a-f]{64}$ ]] || die 'Invalid archive checksum.'
 [[ "$archive" =~ ^/tmp/qasedak-dev\.[a-zA-Z0-9]{8}/release\.tar\.gz$ ]] || die 'Invalid archive path.'
+[[ "$expected_image_checksum" =~ ^[0-9a-f]{64}$ ]] || die 'Invalid image checksum.'
+[[ "$expected_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die 'Invalid image ID.'
 [[ -f "$archive" ]] || die 'Release archive is missing.'
 [[ "$(sha256sum "$archive" | cut -d' ' -f1)" == "$expected_checksum" ]] || die 'Release checksum mismatch.'
+image_archive="${archive%/*}/image.tar.gz"
+[[ -s "$image_archive" ]] || die 'Runner-built image archive is missing.'
+[[ "$(sha256sum "$image_archive" | cut -d' ' -f1)" == "$expected_image_checksum" ]] || die 'Image checksum mismatch.'
 
 config=/etc/qasedak/dev-deploy.conf
 [[ -r "$config" ]] || die 'Missing reviewed /etc/qasedak/dev-deploy.conf.'
@@ -151,6 +158,7 @@ PY
 }
 
 if [[ "$old_image" == "$image" && -n "$old_refresh_container" ]]; then
+    [[ "$(docker image inspect -f '{{.Id}}' "$image")" == "$expected_image_id" ]] || die 'Existing revision image ID mismatch.'
     health_ok || die 'Existing revision is not healthy.'
     [[ "$(docker inspect -f '{{.State.Running}}' "$old_refresh_container")" == true ]] || die 'Subscription refresh container is not running.'
     docker exec "$old_container" python manage.py process_order_automation --check-running >/dev/null 2>&1 || die 'Order automation heartbeat is missing or stale.'
@@ -201,16 +209,19 @@ PY
     mv -- "$tmp_release" "$release"
 fi
 
-docker build -t "$image" "$release" >/dev/null
+# Import the runner-built image; the target server never needs Docker Hub or pip.
+docker image load --quiet --input "$image_archive" >/dev/null
+[[ "$(docker image inspect -f '{{.Id}}' "$image")" == "$expected_image_id" ]] || die 'Loaded image ID mismatch.'
+[[ "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" == "$revision" ]] || die 'Loaded image revision mismatch.'
 rollback() {
     if [[ -n "$old_refresh_container" ]]; then
-        QASEDAK_IMAGE_TAG="$old_image" "${compose[@]}" up -d --no-deps --no-build "$QASEDAK_DEV_SERVICE" subscription-refresh >/dev/null || true
+        QASEDAK_IMAGE_TAG="$old_image" "${compose[@]}" up -d --no-deps --no-build --pull never "$QASEDAK_DEV_SERVICE" subscription-refresh >/dev/null || true
     else
-        QASEDAK_IMAGE_TAG="$old_image" "${compose[@]}" up -d --no-deps --no-build "$QASEDAK_DEV_SERVICE" >/dev/null || true
+        QASEDAK_IMAGE_TAG="$old_image" "${compose[@]}" up -d --no-deps --no-build --pull never "$QASEDAK_DEV_SERVICE" >/dev/null || true
         "${compose[@]}" rm -sf subscription-refresh >/dev/null || true
     fi
 }
-if ! "${compose[@]}" up -d --no-deps --no-build "$QASEDAK_DEV_SERVICE" subscription-refresh >/dev/null; then
+if ! "${compose[@]}" up -d --no-deps --no-build --pull never "$QASEDAK_DEV_SERVICE" subscription-refresh >/dev/null; then
     rollback
     die 'Compose update failed; attempted to restore the previous image. Inspect migrations before relying on rollback.'
 fi

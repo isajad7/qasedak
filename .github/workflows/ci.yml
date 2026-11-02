@@ -51,13 +51,46 @@ jobs:
       - name: Shell syntax
         run: bash -n scripts/install.sh scripts/doctor.sh scripts/backup.sh scripts/update.sh scripts/timers.sh scripts/release_check.sh scripts/deploy/*.sh docker/*.sh
 
+      - name: Deployment artifact checks
+        run: python scripts/deploy/test_deploy.py
+
       - name: Whitespace check
         run: git diff --check HEAD^ HEAD
+
+  build_image:
+    needs: django
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the tested revision on the runner
+        run: |
+          docker build --platform linux/amd64 \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t "qasedak-development:$GITHUB_SHA" .
+      - name: Export image and verification metadata
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p "$RUNNER_TEMP/qasedak-image"
+          docker image save "qasedak-development:$GITHUB_SHA" | gzip -1 > "$RUNNER_TEMP/qasedak-image/image.tar.gz"
+          docker image inspect --format '{{.Id}}' "qasedak-development:$GITHUB_SHA" > "$RUNNER_TEMP/qasedak-image/image.id"
+          cd "$RUNNER_TEMP/qasedak-image"
+          sha256sum image.tar.gz > image.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: qasedak-image-${{ github.sha }}
+          path: ${{ runner.temp }}/qasedak-image/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
   deploy_development:
     # Enable only after the new server's deploy config, SSH key, known_hosts, and backup hook are verified.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEV_AUTO_DEPLOY == 'true' }}
-    needs: django
+    needs: [django, build_image]
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment: development
@@ -68,6 +101,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: qasedak-image-${{ github.sha }}
+          path: ${{ runner.temp }}/qasedak-image
       - name: Deploy tested commit to the configured development Compose service
         env:
           # Pin the new host so stale environment variables cannot deploy to the retired server.

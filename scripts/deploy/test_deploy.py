@@ -1,0 +1,109 @@
+"""Exercise deployment artifact boundaries without contacting a server."""
+
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class DeploymentArtifactTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="qasedak-deploy-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.artifact = self.directory / "qasedak-image"
+        self.artifact.mkdir()
+        self.image = self.artifact / "image.tar.gz"
+        self.image.write_bytes(b"runner-built-image-fixture")
+        self.checksum = hashlib.sha256(self.image.read_bytes()).hexdigest()
+        (self.artifact / "image.tar.gz.sha256").write_text(f"{self.checksum}  image.tar.gz\n")
+        self.image_id = "sha256:" + "1" * 64
+        (self.artifact / "image.id").write_text(self.image_id + "\n")
+        self.revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        self.calls = self.directory / "calls"
+        self.remote_script = self.directory / "remote-script"
+        binaries = self.directory / "bin"
+        binaries.mkdir()
+        for command, body in {
+            "ssh": '''#!/usr/bin/env bash
+printf 'ssh %s\\n' "$*" >> "$DEPLOY_TEST_CALLS"
+case "${!#}" in
+    'mktemp -d '*) printf '/tmp/qasedak-dev.ABCDEFGH\\n' ;;
+    'bash -s -- '*) cat > "$DEPLOY_TEST_REMOTE_SCRIPT" ;;
+esac
+''',
+            "scp": '''#!/usr/bin/env bash
+printf 'scp %s\\n' "$*" >> "$DEPLOY_TEST_CALLS"
+''',
+        }.items():
+            path = binaries / command
+            path.write_text(body)
+            path.chmod(0o700)
+        self.environment = {
+            **os.environ,
+            "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
+            "RUNNER_TEMP": str(self.directory),
+            "GITHUB_SHA": self.revision,
+            "DEV_SSH_HOST": "deploy.example.invalid",
+            "DEV_SSH_USER": "deploy",
+            "DEV_SSH_PRIVATE_KEY": "test-private-key",
+            "DEV_SSH_KNOWN_HOSTS": "test-known-hosts",
+            "DEPLOY_TEST_CALLS": str(self.calls),
+            "DEPLOY_TEST_REMOTE_SCRIPT": str(self.remote_script),
+        }
+
+    def sender(self):
+        return subprocess.run(
+            ["bash", str(ROOT / "scripts/deploy/github_dev_deploy.sh")],
+            cwd=ROOT, env=self.environment, capture_output=True, text=True,
+        )
+
+    def test_corrupt_image_never_contacts_ssh(self):
+        self.image.write_bytes(b"corrupted-in-transit")
+        result = self.sender()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Image artifact checksum mismatch", result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_missing_image_never_contacts_ssh(self):
+        self.image.unlink()
+        result = self.sender()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("image artifact is missing", result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_sender_transfers_both_artifacts_and_binds_image_identity(self):
+        result = self.sender()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls.read_text()
+        self.assertIn(f"{self.directory}/qasedak-deploy-ssh/release.tar.gz", calls)
+        self.assertIn(str(self.image), calls)
+        self.assertIn(f"'{self.checksum}' '{self.image_id}'", calls)
+        self.assertIn("StrictHostKeyChecking=yes", calls)
+        self.assertEqual(self.remote_script.read_bytes(), (ROOT / "scripts/deploy/compose_dev_deploy.sh").read_bytes())
+        self.assertFalse((self.directory / "qasedak-deploy-ssh").exists())
+
+    def test_server_rejects_corrupt_image_before_loading_config_or_running_docker(self):
+        stage = subprocess.check_output(["mktemp", "-d", "/tmp/qasedak-dev.XXXXXXXX"], text=True).strip()
+        self.addCleanup(shutil.rmtree, stage)
+        release = Path(stage) / "release.tar.gz"
+        release.write_bytes(b"source-fixture")
+        (Path(stage) / "image.tar.gz").write_bytes(b"corrupted-in-transit")
+        checksum = hashlib.sha256(release.read_bytes()).hexdigest()
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts/deploy/compose_dev_deploy.sh"), self.revision,
+             checksum, str(release), self.checksum, self.image_id],
+            env=self.environment, capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Image checksum mismatch", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
