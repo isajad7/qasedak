@@ -1,5 +1,6 @@
 import logging
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
@@ -13,13 +14,14 @@ from django.db.models import F, Q
 from django.utils import timezone
 
 from .jalali import format_jalali_datetime, persian_digits
-from .models import ConfigLink, CupItem, Customer, FreeTrialRequest, Inbound, Panel, SubscriptionCup, VPNClient
+from .models import ConfigLink, CupItem, Customer, FreeTrialRequest, Inbound, Panel, PlanDeliverySource, SubscriptionCup, VPNClient
 from .naming import build_trial_client_name
 from .order_services import get_current_store
 from .panels import PanelIntegrationError, get_safe_panel_adapter
 from .external_subscription_sources import (
     ExternalSubscriptionRefreshError,
     filter_native_configs,
+    resolved_filter_policy_for_source,
     register_external_subscription_feed_snapshot,
 )
 from .subscription_cups import (
@@ -110,6 +112,21 @@ def validate_free_trial_settings(store=None, bot_config=None):
 
     if errors:
         raise ValidationError(errors)
+    # Use the active sales Cup source for this exact panel/inbound. Each trial
+    # still owns its client, links and Cup; only delivery settings are shared.
+    settings["delivery_source"] = (
+        PlanDeliverySource.objects.filter(
+            Q(panel=panel) | Q(panel__isnull=True),
+            inbound=inbound,
+            active=True,
+            is_fallback=False,
+            source_type=PlanDeliverySource.SourceType.PANEL_INBOUND,
+            delivery_config__active=True,
+            delivery_config__delivery_mode="SUBSCRIPTION",
+            delivery_config__plan__is_active=True,
+            delivery_config__plan__store=settings["store"],
+        ).order_by("priority", "pk").first()
+    )
     return settings
 
 
@@ -171,7 +188,8 @@ def _trial_lock_key(customer, telegram_user_id=None):
 
 
 def sanitize_free_trial_log_value(value):
-    return CONFIG_LINK_LOG_RE.sub("<config-link-redacted>", str(value or ""))
+    value = CONFIG_LINK_LOG_RE.sub("<config-link-redacted>", str(value or ""))
+    return re.sub(r"\b[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\b", "<uuid-redacted>", value)
 
 
 def _is_pasarguard_panel(panel):
@@ -196,7 +214,7 @@ def _trial_expires_at_from_hours(duration_hours, *, now=None):
     return (now or timezone.now()) + timedelta(hours=hours)
 
 
-def create_trial_client_details(email_prefix, total_gb, duration_hours, panel, inbound, limit_ip=1):
+def create_trial_client_details(email_prefix, total_gb, duration_hours, panel, inbound, limit_ip=1, *, request_id=None):
     if not _is_pasarguard_panel(panel):
         return create_xui_trial_client_details(
             email_prefix=email_prefix,
@@ -207,6 +225,10 @@ def create_trial_client_details(email_prefix, total_gb, duration_hours, panel, i
             limit_ip=limit_ip,
         )
     try:
+        # PasarGuard derives its username and marker from this identity. A fresh
+        # request must never reuse/modify a prior trial, including after cooldown.
+        client_uuid = (uuid.uuid5(uuid.NAMESPACE_URL, f"qasedak:free-trial:{panel.pk}:{request_id}")
+                       if request_id is not None else uuid.uuid4())
         request = SimpleNamespace(
             email_prefix=email_prefix,
             total_gb=total_gb,
@@ -215,8 +237,8 @@ def create_trial_client_details(email_prefix, total_gb, duration_hours, panel, i
             inbound=inbound,
             inbounds=[inbound] if inbound else [],
             limit_ip=limit_ip,
-            client_uuid="",
-            sub_id="",
+            client_uuid=str(client_uuid),
+            sub_id=client_uuid.hex[:16],
             email="",
         )
         return get_safe_panel_adapter(panel).create_enabled_client(request)
@@ -253,6 +275,13 @@ def delete_client(target):
 
 def cleanup_panel_trial_client(client_result, inbound, *, trial_request=None):
     if not client_result or not client_result.get("uuid") or not inbound:
+        return False
+    identity = Q(uuid=client_result["uuid"])
+    if client_result.get("email"):
+        identity |= Q(inbound__panel_id=inbound.panel_id, xui_email=client_result["email"])
+    if VPNClient.objects.filter(identity).exists():
+        logger.warning("Free trial cleanup skipped: existing local service owns remote identity request_id=%s",
+                       getattr(trial_request, "pk", None))
         return False
     target = SimpleNamespace(
         inbound=inbound,
@@ -310,7 +339,7 @@ def _create_free_trial_subscription_cup(*, trial_request, vpn_client, client_res
     selected_links = raw_links
     filter_result = None
     if is_pasarguard:
-        filter_result = filter_native_configs(raw_links)
+        filter_result = filter_native_configs(raw_links, resolved_filter_policy_for_source(settings.get("delivery_source")))
         if filter_result.selected_count <= 0:
             raise ValidationError("خروجی PasarGuard پس از فیلتر پروتکل‌ها خالی بود.")
         selected_links = [item.raw_link for item in filter_result.selected_configs]
@@ -325,6 +354,7 @@ def _create_free_trial_subscription_cup(*, trial_request, vpn_client, client_res
         "raw_link_count": len(raw_links),
         "selected_link_count": len(selected_links),
         "created_from": "free_trial_request",
+        "sales_delivery_source_id": getattr(settings.get("delivery_source"), "pk", None),
         "last_fulfilled_at": now.isoformat(),
     }
     cup = SubscriptionCup.objects.create(
@@ -376,7 +406,7 @@ def _create_free_trial_subscription_cup(*, trial_request, vpn_client, client_res
             )
         register_external_subscription_feed_snapshot(
             cup=cup,
-            source=None,
+            source=settings.get("delivery_source"),
             panel=settings["panel"],
             vpn_client=vpn_client,
             protected_subscription_url=upstream_subscription_url,
@@ -476,6 +506,7 @@ def create_free_trial_for_customer(customer, telegram_user_id=None, *, store=Non
             total_gb=payload["total_gb"],
             duration_hours=payload["duration_hours"],
             limit_ip=payload["limit_ip"],
+            request_id=trial_request.pk,
         )
         if not client_result:
             message = "ساخت تست رایگان روی پنل انجام نشد. کمی بعد دوباره تلاش کنید."

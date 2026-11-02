@@ -42,3 +42,14 @@ Use this as a call-path index. Verify a symbol in current code before editing. K
 | SMS matching/webhook | `payments.tests` |
 
 Run `python manage.py check`, `python manage.py makemigrations --check --dry-run`, a focused test class, and `git diff --check`. Add the wider `python manage.py test store.tests payments.tests` when the changed boundary calls for it. The test runner uses its own database; never target a production database for tests.
+
+## Free-trial delivery
+
+`store/free_trial_services.py` creates a dedicated client and Cup for each trial.
+PasarGuard UUID/subscription identity is scoped to the persisted trial request,
+so a later request cannot reuse a prior trial's remote account or local UUID.
+Cleanup never removes a remote identity already owned by a local client.
+For the configured trial panel/inbound, the first active, non-fallback source
+from an active sales SUBSCRIPTION plan (priority, then ID) supplies native-link
+filters and refresh interval. The feed retains that source association, while
+quota, exact expiry and cooldown use the store's existing trial settings.
