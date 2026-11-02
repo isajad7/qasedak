@@ -55,7 +55,7 @@ jobs:
         run: git diff --check HEAD^ HEAD
 
   deploy_development:
-    # Enable only after the server inventory, one-time Compose setup, and backup hook are verified.
+    # Enable only after the new server's deploy config, SSH key, known_hosts, and backup hook are verified.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEV_AUTO_DEPLOY == 'true' }}
     needs: django
     runs-on: ubuntu-latest
@@ -70,9 +70,10 @@ jobs:
           persist-credentials: false
       - name: Deploy tested commit to the configured development Compose service
         env:
-          DEV_SSH_HOST: ${{ vars.DEV_SSH_HOST }}
-          DEV_SSH_USER: ${{ vars.DEV_SSH_USER }}
-          DEV_SSH_PORT: ${{ vars.DEV_SSH_PORT }}
+          # Pin the new host so stale environment variables cannot deploy to the retired server.
+          DEV_SSH_HOST: 103.75.196.232
+          DEV_SSH_USER: root
+          DEV_SSH_PORT: '22'
           DEV_SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
           DEV_SSH_KNOWN_HOSTS: ${{ secrets.DEV_SSH_KNOWN_HOSTS }}
         run: bash scripts/deploy/github_dev_deploy.sh
