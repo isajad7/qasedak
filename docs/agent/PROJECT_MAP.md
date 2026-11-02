@@ -26,6 +26,12 @@ Read only the row for the task. Paths and symbols below were checked against `ma
 
 ## Delivery data relationships
 
+Panel admin deletion uses `store/admin_deletion.py::counted_deleted_objects`:
+fast-deletable monitoring tables are counted in SQL, not rendered row by row.
+Registered model delete permissions and protected plan routes still block deletion.
+Free-trial history survives retired panel/inbound deletion with nullable references;
+trial eligibility still uses the retained request history.
+
 | Entity | Role |
 | --- | --- |
 | `PlanDeliveryConfig` -> `PlanDeliverySource` | Delivery mode and ordered panel/inventory sources for a plan. |

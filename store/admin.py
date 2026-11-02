@@ -33,6 +33,7 @@ from import_export.widgets import ForeignKeyWidget
 from payments.models import IncomingPaymentSMS
 
 from .admin_access import get_user_product_roles, mask_staff_email, user_has_capability
+from .admin_deletion import counted_deleted_objects
 from .admin_catalog import (
     PlanBulkPriceForm,
     apply_price_per_gb_to_plans,
@@ -3350,6 +3351,9 @@ class PanelAdmin(ImportExportModelAdmin):
         ),
     )
     actions = ("run_health_check",)
+
+    def get_deleted_objects(self, objs, request):
+        return counted_deleted_objects(objs, request, self.admin_site)
 
     def get_fieldsets(self, request, obj=None):
         if self.has_change_permission(request, obj):
