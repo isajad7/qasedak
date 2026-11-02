@@ -75,7 +75,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/qasedak-image"
           docker image save "qasedak-development:$GITHUB_SHA" | gzip -1 > "$RUNNER_TEMP/qasedak-image/image.tar.gz"
-          docker image inspect --format '{{.Id}}' "qasedak-development:$GITHUB_SHA" > "$RUNNER_TEMP/qasedak-image/image.id"
+          python scripts/deploy/image_config_id.py "$RUNNER_TEMP/qasedak-image/image.tar.gz" "qasedak-development:$GITHUB_SHA" > "$RUNNER_TEMP/qasedak-image/image.id"
           cd "$RUNNER_TEMP/qasedak-image"
           sha256sum image.tar.gz > image.tar.gz.sha256
       - uses: actions/upload-artifact@v4
